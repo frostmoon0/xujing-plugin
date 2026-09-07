@@ -318,10 +318,19 @@ export class wanhun extends plugin {
   }
 
   async wanhunGuide (e) {
-    /* 完整玩法说明约2800字，单条消息在部分协议端会因长度返回422；拆成小段逐条发送。 */
+    const text = Wanhun.guideText()
+    /* 与 #万魂幡路线/#万魂幡状态 及其它 #XXX玩法 一致: 玩法说明全文渲染成一张图发送, 避免长文本刷屏/协议端422 */
+    try {
+      const img = await textToImg(text)
+      if (img) {
+        e.reply(img)
+        return true
+      }
+    } catch (err) { }
+    /* 图片渲染不可用(如 puppeteer 异常)时回退: 完整玩法说明较长, 拆成小段逐条发送避免协议端422。 */
     const pages = []
     let current = ''
-    for (const line of Wanhun.guideText().split('\n')) {
+    for (const line of text.split('\n')) {
       if (current && current.length + line.length + 1 > 600) {
         pages.push(current)
         current = ''
