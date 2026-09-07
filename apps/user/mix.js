@@ -243,6 +243,18 @@ export class MIX extends plugin {
             mat('云裳仙蕊', 6),
             { name: '红武器', quality: 6, icon: QUALITY[6].icon, count: 1 }
         ]
+        /* 妖丹凝练(残丹×5 → 随机品质妖丹): 与丹药RECIPES无关, 走 #合成妖丹 专属指令 */
+        const yaodanFormulas = [{
+            mats: [mat('残丹', 5)],
+            result: {
+                name: '随机品质妖丹',
+                quality: 5,
+                icon: '🎖️',
+                count: 1,
+                desc: '5个残丹凝成1颗妖丹，随机1~7阶（低阶更常见）'
+            },
+            tip: '#合成妖丹（可带数量，如 #合成妖丹 3）'
+        }]
         const resPath = `../../../../../plugins/${Plugin_Name}/resources/`
         const img = await puppeteer.screenshot(`${Plugin_Name}/recipe/index`, {
             tplFile: path.join(Plugin_Path, 'resources', 'qylp', 'recipe.html'),
@@ -256,7 +268,8 @@ export class MIX extends plugin {
             arrayDeployFormulas,
             redMats,
             colorMats,
-            rainbowMats
+            rainbowMats,
+            yaodanFormulas
         })
         if (img) e.reply([img])
         else e.reply('图片渲染失败，请检查 puppeteer~')

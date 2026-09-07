@@ -129,6 +129,27 @@
       </div>
     </section>
 
+    <!-- 妖丹凝练: 残丹×5 → 随机品质妖丹 -->
+    <section class="rc-section rc-arrays">
+      <div class="rc-section-head">🎖️ 妖丹凝练</div>
+      <div class="rc-grid rc-grid-one">
+        {{each yaodanFormulas}}
+        <article class="rc-card rc-array">
+          <div class="rc-formula rc-array-formula">
+            {{each $value.mats}}
+            {{if $index}}<span class="rc-plus">＋</span>{{/if}}
+            <div class="rc-mat q{{$value.quality}}"><div class="mat-icon">{{$value.icon}}</div><div class="mat-name">{{$value.name}}</div><div class="mat-count">×{{$value.count}}</div></div>
+            {{/each}}
+          </div>
+          <div class="rc-arrow">▼</div>
+          <div class="rc-result"><div class="rc-mat q{{$value.result.quality}}"><div class="mat-icon">{{$value.result.icon}}</div><div class="mat-name">{{$value.result.name}}</div><div class="mat-count">×{{$value.result.count}}</div></div></div>
+          <div class="rc-desc">{{$value.result.desc}}</div>
+          <div class="rc-tip">{{$value.tip}}</div>
+        </article>
+        {{/each}}
+      </div>
+    </section>
+
     <footer class="rc-foot">发送 #配方台 查看全部配方 · Powered by xujing-yue-plugin</footer>
   </div>
 </body>
