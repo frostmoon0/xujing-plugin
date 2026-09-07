@@ -761,7 +761,7 @@ export async function startAmbush (gid, uid) {
   const loc = getLoc(w, uid)
   const pool = Object.values(f.roster).filter(p => p && p.alive && !p.servantOf && p.status !== 'mine' && !p.mineOf && (p.loc || DEFAULT_REGION) === loc)
   if (!pool.length) return { ok: false, msg: `${regionNameOf(loc)} 空无一人，无处可伏击~` }
-  const st = { phase: 'prep', gid, uid, loc, prepEnd: Date.now() + AMBUSH_PREP_MIN * 60000 }
+  const st = { phase: 'prep', gid, uid, loc, startedAt: Date.now(), prepEnd: Date.now() + AMBUSH_PREP_MIN * 60000 }
   await redis.set(key, JSON.stringify(st), { EX: 3600 })
   let msg = `你已藏身于【${regionNameOf(loc)}】山道旁的灌木丛中，屏息凝神……${AMBUSH_PREP_MIN} 分钟后或有猎物经过（#取消伏击 可撤退）`
   const gift = await servantGift(gid, uid)
@@ -801,24 +801,35 @@ export async function ambushActiveOf (gid, uid) {
   } catch (err) { return null }
 }
 
+/** 已伏击时长文本: 优先取 startedAt; 旧存档无该字段时按 prepEnd - 准备时长倒推 */
+function ambushElapsedOf (st, now = Date.now()) {
+  const since = Number(st && st.startedAt) || ((Number(st && st.prepEnd) || 0) - AMBUSH_PREP_MIN * 60000) || now
+  const sec = Math.max(0, Math.floor((now - since) / 1000))
+  if (sec < 60) return `${sec}秒`
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return s > 0 ? `${m}分${s}秒` : `${m}分钟`
+}
+
 /** 查看伏击状态 */
 export async function ambushStatus (gid, uid) {
   const raw = await redis.get(AMBUSH_KEY(gid, uid))
   if (!raw) return { ok: false, msg: '你当前没有伏击（#伏击 开始）~' }
   const st = JSON.parse(raw)
   const locTxt = regionNameOf(st.loc)
+  const dur = ambushElapsedOf(st)
   if (st.phase === 'prep') {
     const left = Math.max(0, Math.ceil((st.prepEnd - Date.now()) / 60000))
-    return { ok: true, msg: `🪤 你正埋伏于【${locTxt}】，${left} 分钟后开始蹲守~` }
+    return { ok: true, msg: `🪤 已伏击 ${dur}｜你正埋伏于【${locTxt}】，再 ${left} 分钟后开始蹲守~` }
   }
   if (st.phase === 'ready') {
-    return { ok: true, msg: `🪤 你已埋伏于【${locTxt}】，正静候猎物经过（随机 0~30 分钟内出现）~` }
+    return { ok: true, msg: `🪤 已伏击 ${dur}｜你已埋伏于【${locTxt}】，正静候猎物经过（随机 0~30 分钟内出现）~` }
   }
   if (st.phase === 'waiting') {
-    return { ok: true, msg: `🔍 有情况出现了！回复 #伏击打（偷袭）／ #伏击试探（现身）／ #伏击放` }
+    return { ok: true, msg: `🔍 已伏击 ${dur}｜有情况出现了！回复 #伏击打（偷袭）／ #伏击试探（现身）／ #伏击放` }
   }
   if (st.phase === 'won') {
-    return { ok: true, msg: `⚔️ 你已制服猎物！直接回复 1~7 处置（或 #伏击处置1~7）：1全放 2搜刮再放 3全杀 4杀了再搜 5搜刮再杀 6收服 7勒索` }
+    return { ok: true, msg: `⚔️ 已伏击 ${dur}｜你已制服猎物！直接回复 1~7 处置（或 #伏击处置1~7）：1全放 2搜刮再放 3全杀 4杀了再搜 5搜刮再杀 6收服 7勒索` }
   }
   return { ok: false, msg: '伏击状态异常~' }
 }
