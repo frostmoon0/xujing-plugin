@@ -404,6 +404,12 @@ function pickRealmReward (candidates, diffKey, random = Math.random) {
   const last = qualityList[qualityList.length - 1]
   return last?.names[Math.floor(random() * last.names.length)] || '修为丹'
 }
+/**
+ * 残丹(白色材料, 仅遗蜕秘境产出, 5个可#合成妖丹)的独立掉落率: 每件正常掉落有该概率直接为残丹。
+ * 若不设固定概率, 残丹只能与几十种白色物品(丹药/白装/白功法等)均分白色档, 实测约0.6%/件,
+ * 一整场秘境往往0颗, 玩家感知不到掉落。
+ */
+export const REALM_CANDAN_CHANCE = 0.18
 /** 灵石是货币，按阶别给整笔金额；其余掉落物单件固定 1 个。 */
 function realmMoneyAmount (diffKey, random = Math.random) {
   const ranges = { huang: [200, 1000], xuan: [500, 3000], di: [1000, 8000], tian: [3000, 20000] }
@@ -412,7 +418,12 @@ function realmMoneyAmount (diffKey, random = Math.random) {
 }
 export function rollReward (st, diffKey, random = Math.random, cfg = {}) {
   const useSpecial = cfg.special === true && st?.specialPending && Number(st.specialGranted) < SPECIAL_MAX
-  const name = useSpecial ? pickRealmSpecialReward(random) : pickRealmReward(realmRewardPool(st, cfg), diffKey, random)
+  /* 特殊彩奖励名额优先; 未命中彩奖励的每个正常掉落件, 先按固定概率判残丹, 命中即本件为残丹 */
+  const candanChance = typeof cfg.candan === 'number' ? cfg.candan : REALM_CANDAN_CHANCE
+  let name = null
+  if (useSpecial) name = pickRealmSpecialReward(random)
+  else if (candanChance > 0 && random() < candanChance) name = '残丹'
+  else name = pickRealmReward(realmRewardPool(st, cfg), diffKey, random)
   if (useSpecial) st.specialGranted = (Number(st.specialGranted) || 0) + 1
   const currency = name === '灵石'
   const count = currency ? realmMoneyAmount(diffKey, random) : 1

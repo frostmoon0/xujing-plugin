@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MATERIAL_TPL, itemIcon, isYaodan, yaodanName, YAODAN_REMNANT_WEIGHTS, rollYaodanTierFromRemnant, WANHUN_ONLY_MATS } from '../components/equip_data.js'
-import { realmRewardPool, realmSpecialPool } from '../components/realm_data.js'
+import { realmRewardPool, realmSpecialPool, rollReward, REALM_CANDAN_CHANCE } from '../components/realm_data.js'
 
 test('残丹是白色品质1材料, 非妖丹, 不属万魂窟专属, 图标为白色', () => {
   assert.ok(MATERIAL_TPL['残丹'], '残丹应在 MATERIAL_TPL 中')
@@ -45,4 +45,22 @@ test('残丹进入遗蜕秘境公共奖励池(各地形), 不进入特殊彩池'
     assert.ok(realmRewardPool({ terrain }).includes('残丹'), `残丹应可在地形 ${terrain} 的遗蜕秘境池掉落`)
   }
   assert.equal(realmSpecialPool().includes('残丹'), false, '残丹不属特殊彩奖励, 不占彩奖励名额')
+})
+
+test('每个正常掉落件有固定概率直接为残丹, 特殊彩名额优先于残丹', () => {
+  assert.equal(REALM_CANDAN_CHANCE, 0.18)
+  const st = { terrain: 'leichi', diff: 'tian', specialPending: false, specialGranted: 0 }
+  /* random<0.18 → 本件直接判为残丹 */
+  const hit = rollReward(st, 'tian', () => 0)
+  assert.equal(hit.name, '残丹')
+  assert.equal(hit.quality, 1)
+  assert.equal(hit.currency, false)
+  assert.equal(hit.rare, false)
+  /* cfg.candan:0 可禁用残丹分支, 走正常品质池 */
+  assert.notEqual(rollReward(st, 'tian', () => 0, { candan: 0 }).name, '残丹')
+  /* 特殊彩奖励名额优先: 即使 random 命中残丹概率, 有彩名额时仍给特殊彩 */
+  const st2 = { ...st, specialPending: true }
+  const special = rollReward(st2, 'tian', () => 0, { special: true })
+  assert.notEqual(special.name, '残丹')
+  assert.equal(st2.specialGranted, 1)
 })
