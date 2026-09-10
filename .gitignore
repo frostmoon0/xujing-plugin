@@ -15,3 +15,6 @@ CHANGELOG.md
 
 # 帮助面板图片（仅本地使用，不推送）
 resources/help/imgs/
+
+# AI 助手会话目录（worktrees 是仓库完整副本，约 50MB，不推送）
+.claude/
