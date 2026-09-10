@@ -10,6 +10,7 @@
 import fs from 'fs'
 import YAML from 'yaml'
 import { writeJsonAtomic } from './json_store.js'
+import { recoverCorruptJson } from './save_backup.js'
 import { saveOrDefer, withDeferredSaveContext } from './deferred_save.js'
 import { Plugin_Path, Save_Path } from './plugin.js'
 import { getWorld, saveWorld, getRate, addTax, taxFor, regionNameOf, REGION_KEYS, DEFAULT_REGION, REGIONS, levelNameOf } from './world_data.js' // 摆摊交税/跨区/攻打位置校验需世界经济
@@ -305,6 +306,15 @@ export function getFake (gid) {
   try {
     loaded = JSON.parse(fs.readFileSync(file, 'utf8'))
   } catch (err) {
+    /* 只有"内容解析不了"才算损坏(全0字节/断电半写); 读盘错误(占用/权限)原样抛出, 不许动文件 */
+    if (!(err instanceof SyntaxError)) throw err
+    /* 损坏: 隔离现场 → 用最近可用备份写回; 没有可用备份就继续拒绝, 不用空档覆盖上千伪玩家 */
+    const r = recoverCorruptJson(file, `world/fake_${g}.json`, d => !!(d && d.sects && Object.keys(d.sects).length))
+    if (r.restored) {
+      console.log(`[天下大事]宗门档损坏(${err.message})，已隔离到 ${r.bak}，并从备份 ${r.dir} 恢复：${file}`)
+      return getFake(g) // 重新读一遍恢复出来的档
+    }
+    console.log(`[天下大事]宗门档损坏(${err.message})且无可用备份${r.error ? `(${r.error})` : ''}，已隔离到 ${r.bak}，拒绝覆盖：${file}`)
     throw new Error(`[天下大事]宗门存档解析失败，拒绝覆盖：${file}`)
   }
   const f = Object.assign(emptyFake(), loaded || {})
@@ -957,6 +967,9 @@ const HISTORY_CLEANUP_INTERVAL = 24 * 3600000
 const ACTIVE_PERSON_HISTORY_CAP = 100
 const DEAD_PERSON_HISTORY_CAP = 20
 const DEAD_PERSON_HISTORY_KEEP_MS = 3 * 86400000
+/** 陨落记录保留窗口与硬上限(供 #查人 查已故者; 比 byPerson 的 3 天宽, 但不无限增长) */
+const DEATH_RECORD_KEEP_MS = 30 * 86400000
+const DEATH_RECORD_CAP = 5000
 
 /**
  * 清理天下大事中不会再使用的历史索引。
@@ -1042,6 +1055,29 @@ export function cleanupFakeHistory (f, now = Date.now()) {
         delete f.sectLeaveBans[uid]
         changed = true
       }
+    }
+  }
+
+  /* 陨落记录(name → 摘要, 供 #查人 查已故者)原先只增不减, 是存档膨胀的长期底噪:
+     只保留最近 DEATH_RECORD_KEEP_MS 天, 再硬性封顶 DEATH_RECORD_CAP 条(取最新)。
+     注意必须放在上面的 byPerson 循环之后——那里要读 deathRecords 判断 3 天保留窗;
+     旧记录删掉后, 对应 byPerson 条目下一轮也会因查不到陨落时间而清掉, 两者一致。 */
+  for (const name of Object.keys(deathRecords)) {
+    const t = Number(deathRecords[name] && deathRecords[name].t) || 0
+    if (!t || now - t > DEATH_RECORD_KEEP_MS) {
+      delete deathRecords[name]
+      changed = true
+      expired++
+    }
+  }
+  const keptDeaths = Object.keys(deathRecords)
+  if (keptDeaths.length > DEATH_RECORD_CAP) {
+    keptDeaths.sort((a, b) =>
+      (Number(deathRecords[b] && deathRecords[b].t) || 0) - (Number(deathRecords[a] && deathRecords[a].t) || 0))
+    for (const name of keptDeaths.slice(DEATH_RECORD_CAP)) {
+      delete deathRecords[name]
+      changed = true
+      expired++
     }
   }
 

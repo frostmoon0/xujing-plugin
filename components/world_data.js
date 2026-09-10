@@ -8,6 +8,8 @@
  * ============================================================ */
 import fs from 'fs'
 import { saveOrDefer } from './deferred_save.js'
+import { writeJsonAtomic } from './json_store.js'
+import { recoverCorruptJson } from './save_backup.js'
 import { Plugin_Name, Save_Path } from './plugin.js'
 import xujing_data from './xujing_data.js'
 
@@ -120,7 +122,7 @@ function initWorld (gid) {
   return w
 }
 /** 读取世界数据(不存在则初始化; gid=群号, 每群独立; 空gid回退旧全局档) */
-export function getWorld (gid) {
+export function getWorld (gid, depth = 0) {
   const g = String(gid || '')
   const cached = worldCache.get(g)
   if (cached) return cached
@@ -164,29 +166,37 @@ export function getWorld (gid) {
     if (dirty) saveWorld(nw)
     return nw
   } catch (err) {
-    /* 已存在的世界档解析失败时绝不初始化覆盖；让上层报错并等待备份恢复 */
-    if (fs.existsSync(file)) throw new Error(`[虚境-世界] 世界存档解析失败，拒绝清空重建：${file}；${err && err.message}`)
-    return initWorld(g)
+    /* 只有"内容解析不了"才算损坏(全0字节/断电半写); 读盘错误(占用/权限)原样抛出, 不许动文件 */
+    if (!(err instanceof SyntaxError)) throw err
+    return recoverWorld(g, file, err, depth)
   }
+}
+
+/** 世界档可用的最低结构要求(备份副本校验用): 至少带一份小区占领表 */
+function looksLikeWorld (d) { return !!(d && typeof d === 'object' && d.sectMap) }
+
+/**
+ * 损坏恢复: 隔离损坏现场 → 用最近可用备份写回 → 连备份都没有才重建。
+ * 重建只重置世界格局/繁荣/税率(玩家境界、灵石等在各自主档), 好过每次推进都报错卡死。
+ */
+function recoverWorld (g, file, err, depth) {
+  const rel = g ? `world/world_${g}.json` : 'world/world.json'
+  const r = recoverCorruptJson(file, rel, looksLikeWorld)
+  if (r.restored && depth < 3) {
+    console.log(`[虚境-世界] 世界档损坏(${err.message})，已隔离到 ${r.bak}，并从备份 ${r.dir} 恢复：${file}`)
+    return getWorld(g, depth + 1) // 重新走一遍读取与补缺字段(备份字节已通过 JSON 解析)
+  }
+  const why = r.restored ? '恢复出的档回读异常' : (r.error ? `备份写回失败(${r.error})` : '无可用备份')
+  console.log(`[虚境-世界] 世界档损坏(${err.message})且${why}，已隔离到 ${r.bak}，改用重建：${file}`)
+  return initWorld(g)
 }
 export function saveWorld (w) {
   const gid = w && w.gid ? String(w.gid) : ''
   const file = gid ? worldFile(gid) : WORLD_FILE
   if (w && typeof w === 'object') worldCache.set(gid, w)
-  const write = () => {
-    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-    try {
-      if (!fs.existsSync(WORLD_DIR)) fs.mkdirSync(WORLD_DIR, { recursive: true })
-      fs.writeFileSync(tmp, JSON.stringify(w, null, '\t'))
-      fs.renameSync(tmp, file)
-      return true
-    } catch (err) {
-      try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp) } catch (e) { }
-      throw err
-    }
-  }
   try {
-    return saveOrDefer(file, write)
+    /* writeJsonAtomic: 先写临时文件并 fsync 再改名, 断电不会留下全0字节的世界档 */
+    return saveOrDefer(file, () => writeJsonAtomic(file, w))
   } catch (err) {
     console.log('[虚境-世界] 保存失败:', err && err.message)
     return false
