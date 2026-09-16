@@ -38,7 +38,8 @@ export const PUPPET_POWER_RANGES = {
   7: [1200, 1600]
 }
 export const PUPPET_MAX_POWER = 7000
-export const PUPPET_POWER_MULTIPLIER = 1.5
+/** 祭出后计入绝对战力的倍率；战力加成已翻倍（原1.5倍）。 */
+export const PUPPET_POWER_MULTIPLIER = 3
 
 /**
  * 一阶打造配方。万阵核心已是成品，因此只额外收取制作4个核心所需的四种阵材各4个，
@@ -70,13 +71,13 @@ export const PUPPET_UPGRADE_COSTS = {
   7: { materials: { 无主幽魂: 40, 摄魂铁: 120, 阴魂石: 120, 玄阴玉: 110, 镇魂晶: 90, 血煞髓: 70, 万魂帝晶: 50, 造梦神玉: 20, 万阵核心: 5, 七阶妖丹: 1 }, money: 0 }
 }
 
-/** 打造时随机/自选的固有战斗被动。 */
+/** 打造时随机/自选的固有战斗被动；数值已整体翻倍（原攻击/防御/生命3%~15%、暴击2%~10%、爆伤5%~26%）。 */
 export const PUPPET_PASSIVES = {
-  atk: { name: '傀儡战意', desc: '攻击提升', icon: '⚔️', field: 'atk', values: [0.03, 0.05, 0.07, 0.09, 0.11, 0.13, 0.15] },
-  def: { name: '玄甲护身', desc: '防御提升', icon: '🛡️', field: 'def', values: [0.03, 0.05, 0.07, 0.09, 0.11, 0.13, 0.15] },
-  hp: { name: '生机核心', desc: '生命提升', icon: '💚', field: 'hp', values: [0.03, 0.05, 0.07, 0.09, 0.11, 0.13, 0.15] },
-  crit: { name: '机巧会心', desc: '暴击提升', icon: '⚡', field: 'crit', values: [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.1] },
-  cdmg: { name: '破魂机锋', desc: '爆伤提升', icon: '💥', field: 'cdmg', values: [0.05, 0.08, 0.11, 0.14, 0.18, 0.22, 0.26] }
+  atk: { name: '傀儡战意', desc: '攻击提升', icon: '⚔️', field: 'atk', values: [0.06, 0.1, 0.14, 0.18, 0.22, 0.26, 0.3] },
+  def: { name: '玄甲护身', desc: '防御提升', icon: '🛡️', field: 'def', values: [0.06, 0.1, 0.14, 0.18, 0.22, 0.26, 0.3] },
+  hp: { name: '生机核心', desc: '生命提升', icon: '💚', field: 'hp', values: [0.06, 0.1, 0.14, 0.18, 0.22, 0.26, 0.3] },
+  crit: { name: '机巧会心', desc: '暴击提升', icon: '⚡', field: 'crit', values: [0.04, 0.06, 0.08, 0.1, 0.12, 0.16, 0.2] },
+  cdmg: { name: '破魂机锋', desc: '爆伤提升', icon: '💥', field: 'cdmg', values: [0.1, 0.16, 0.22, 0.28, 0.36, 0.44, 0.52] }
 }
 export const PUPPET_PASSIVE_KEYS = Object.keys(PUPPET_PASSIVES)
 export const PUPPET_PASSIVE_CORE = '傀儡被动晶核'

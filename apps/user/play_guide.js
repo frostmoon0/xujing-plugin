@@ -458,7 +458,7 @@ export class play_guide extends plugin {
         '【装备/祭出】',
         '· #装备傀儡 序号/名字：装备（自动卸下其他法宝）；#卸下傀儡 脱下。',
         `· #祭出傀儡：按当前阶位计费，一阶${puppetDeployCost(1).toLocaleString()}、二阶${puppetDeployCost(2).toLocaleString()}、三阶${puppetDeployCost(3).toLocaleString()}、四阶${puppetDeployCost(4).toLocaleString()}、五阶${puppetDeployCost(5).toLocaleString()}、六阶${puppetDeployCost(6).toLocaleString()}、七阶${puppetDeployCost(7).toLocaleString()}灵石/30分钟；每30分钟按当前阶位自动续扣，余额不足自动收回；#收回傀儡手动收回不退费。`,
-        `· 只有祭出中的傀儡才计入你的统一战力，按傀儡基础战力的1.5倍计入；被动同时生效。`,
+        `· 只有祭出中的傀儡才计入你的统一战力，按傀儡基础战力的3倍计入；被动同时生效。`,
         `· 被动：${Object.values(PUPPET_PASSIVES).map(p => p.name + '（' + p.desc + '）').join(' / ')}，随阶位增强。`,
         '',
         '【分解】',
