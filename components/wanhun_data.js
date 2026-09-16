@@ -192,8 +192,8 @@ function caveEnemyPower (minutes) {
 
 /* 白/绿/蓝材料从进入时就有；30分钟后开放紫/金/红材料的常规掉落；彩色材料50分钟后提高概率。 */
 const CAVE_BASE_MATERIALS = ['阴魂砂', '游魂骨', '鬼火草', '幽冥木', '摄魂铁', '阴魂石']
-/* 普通材料兜底按权重抽取: 白色3 > 绿色2 > 蓝色1, 白色材料更易掉落 */
-const CAVE_BASE_WEIGHTS = [3, 3, 2, 2, 1, 1]
+/* 普通材料兜底按权重抽取: 白色5 > 绿色4/3 > 蓝色2/1, 低级材料更易掉落 */
+const CAVE_BASE_WEIGHTS = [5, 4, 3, 2, 2, 1]
 /* 万魂窟彩色掉落仅残卷与万魂帝晶; 造梦神玉/云裳仙蕊不由万魂窟产出(分别在秘境/配方台获取) */
 const CAVE_COLOR_MATERIALS = ['万魂幡残卷', '万魂帝晶']
 const CAVE_ADVANCED_MATERIALS = ['玄阴玉', '镇魂晶', '血煞髓']
@@ -239,30 +239,30 @@ export function rollCaveLoot (minutes, rand = Math.random) {
   return rewards
 }
 
-/* 紫/金/红材料:30分钟前也有极低概率，30分钟后正式提升(各档概率均为基准的3倍)。 */
+/* 紫/金/红材料:30分钟前也有极低概率，30分钟后正式提升；起步与封顶概率均已下调为原来的1/3。 */
 export function caveAdvancedChance (name, minutes) {
   if (!CAVE_ADVANCED_MATERIALS.includes(name)) return 0
   const elapsed = Math.max(0, Number(minutes) || 0)
-  if (elapsed < 30) return 0.015
-  const base = { 玄阴玉: 0.06, 镇魂晶: 0.045, 血煞髓: 0.03 }[name]
-  const cap = { 玄阴玉: 0.3, 镇魂晶: 0.24, 血煞髓: 0.15 }[name]
+  if (elapsed < 30) return 0.005
+  const base = { 玄阴玉: 0.02, 镇魂晶: 0.015, 血煞髓: 0.01 }[name]
+  const cap = { 玄阴玉: 0.1, 镇魂晶: 0.08, 血煞髓: 0.05 }[name]
   return Math.min(cap, base + Math.floor((elapsed - 30) / 10) * 0.015)
 }
 
-/* 万魂幡残卷单独在30分钟进入正式曲线；30分钟前基础概率2%，命中即掉1个。爆率已下调至原来的1/3。 */
+/* 万魂幡残卷单独在30分钟进入正式曲线；30分钟前基础概率1%，命中即掉1个。爆率已降到原来的1/6（先降1/3再砍半）。 */
 export function wanhunScrollChance (minutes) {
   const elapsed = Math.max(0, Number(minutes) || 0)
-  if (elapsed < 30) return 0.02 / 3
-  return Math.min(0.25 / 3, (0.05 + Math.floor((elapsed - 30) / 10) * 0.01) / 3)
+  if (elapsed < 30) return 0.02 / 6
+  return Math.min(0.25 / 6, (0.05 + Math.floor((elapsed - 30) / 10) * 0.01) / 6)
 }
 
-/* 彩色材料概率:50分钟前也可能低概率出现，50分钟后正式提高；万魂帝晶爆率已翻倍。 */
+/* 彩色材料概率:50分钟前也可能低概率出现，50分钟后正式提高；万魂帝晶爆率砍半。 */
 export function caveColorChance (name, minutes) {
   if (!CAVE_COLOR_MATERIALS.includes(name)) return 0
   const elapsed = Math.max(0, Number(minutes) || 0)
   if (name === '万魂幡残卷') return wanhunScrollChance(elapsed)
-  if (elapsed < 50) return 0.005 * 2
-  if (name === '万魂帝晶') return Math.min(0.4, (0.03 + Math.floor((elapsed - 50) / 10) * 0.01) * 2)
+  if (elapsed < 50) return 0.005
+  if (name === '万魂帝晶') return Math.min(0.2, 0.03 + Math.floor((elapsed - 50) / 10) * 0.01)
   return Math.min(0.1, 0.005 + Math.floor((elapsed - 50) / 10) * 0.005)
 }
 
