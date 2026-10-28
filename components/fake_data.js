@@ -14,12 +14,13 @@ import { recoverCorruptJson } from './save_backup.js'
 import { saveOrDefer, withDeferredSaveContext } from './deferred_save.js'
 import { Plugin_Path, Save_Path } from './plugin.js'
 import { getWorld, saveWorld, getRate, addTax, taxFor, regionNameOf, REGION_KEYS, DEFAULT_REGION, REGIONS, levelNameOf } from './world_data.js' // 摆摊交税/跨区/攻打位置校验需世界经济
+import { REALM_MAX_LEVEL } from './realm_cap.js'
 import { ITEM_PRICE, ITEM_TPL, MATERIAL_TPL, GONGFA_TPL, EQUIP_TPL, equipPrice, gongfaPrice, getTotalAttr, isBound, vaultEquipContrib, ensureBagShape, addItemToBag, consumeBagItem, autoEquipBest, rollEquipAttr, attrPower, itemIcon } from './equip_data.js'
 import { getStock, buyStock, recordActive, SHOP_CN } from './shop_data.js'
 import { RAID_LEVELS, guardPowerFor } from './raid_data.js' // 伪玩家洗劫藏宝阁(与玩家同20档难度, 用守卫战力判定成败)
 import {
   PET_CFG, getPetState, savePetState, tickPetGroup, settlePet,
-  resolveEncounter, petPower, canBattle, getActivePetPower
+  resolveEncounter, petPower, canBattle, getActivePetPower, maturePet
 } from './pet_data.js'
 import { speciesMeta, qualityNameOf } from './pet_species.js'
 
@@ -182,11 +183,11 @@ function isFakeNight () {
 }
 /** 灭门后重建延迟(分钟): 散修创建宗门随机等 5~30 分钟(用户要求灭门后尽快重生) */
 export const REBUILD_MIN = [30, 30] // 伪玩家灭门重建固定30分钟(灭门空位玩家可立即覆盖建宗, 伪玩家等30分钟)
-/** 伪玩家境界上限: 去掉(突破后可持续 仙帝N重, 不再有68/36封顶) */
-const FAKE_MAX_LEVEL = 9999
-/** 散修修为带(无上限) */
+/** 伪玩家境界上限: 与玩家一致, 最高仙帝第499重(level 567) */
+const FAKE_MAX_LEVEL = REALM_MAX_LEVEL
+/** 散修修为带(受境界上限约束) */
 const SCATTER_BAND = [1, FAKE_MAX_LEVEL]
-/** 修为带: 宗门成员/散修均无境界上限(不再有 宗门68/散修36 封顶) */
+/** 修为带: 宗门成员/散修共用同一境界上限(仙帝第499重) */
 function levelBand (p) {
   return [1, FAKE_MAX_LEVEL]
 }
@@ -778,7 +779,7 @@ export function sectAlive (f, id) {
 /** 伪玩家战力 = 修为 + 已穿装备加成(按品质) + 已学功法加成(按品质, 运转的1.5倍) */
 /** 境界战力换算(与玩家 realmPower 一致: 每小境界100, 大境界权重6/4) */
 export function realmPowerOf (level) {
-  level = Number(level) || 0
+  level = Math.min(Number(level) || 0, REALM_MAX_LEVEL)
   return ((level % 4) + Math.floor(level / 4) * 6) * 100
 }
 /* ---------- 玩家同款修炼/突破公式(getSubThreshold/getBreakRate 复刻) ---------- */
@@ -2040,7 +2041,7 @@ export async function cultivatePerson (f, p) {
     : Math.round((1 + 19 * Math.random()) * 5)
   addExp(p, gain)
   /* 玩家体系: 灵力达标尝试突破(不清零灵力, 累计制; 有破障丹或买得起服丹90%, 否则基础+功法+演武场) */
-  if (p.exp >= fakeSubThreshold(p.level + 1)) {
+  if (p.level < REALM_MAX_LEVEL && p.exp >= fakeSubThreshold(p.level + 1)) {
     let usedPill = false
     let rate = fakeBreakRateFull(f, p)
     if (p.bag && p.bag.items && itemCount(p.bag.items['破障丹']) > 0) {
@@ -2812,6 +2813,20 @@ export function pillPerson (f, p) {
   }
   return { type: 'flavor', ...evMeta(p), txt: `【服丹】${who} ${p.name} 服下${pill}` }
 }
+
+/* 仙帝丹: 玩家不可服用(可自由交易); 伪玩家拿到后自动服用, 直接升到仙帝第10重(level 78) */
+export const EMPEROR_PILL = '仙帝丹'
+export const EMPEROR_TARGET_LEVEL = 78
+export function fakeEatEmperorPill (f, p, now = Date.now()) {
+  if (!p || !p.bag || !p.bag.items) return null
+  if (itemCount(p.bag.items[EMPEROR_PILL]) <= 0) return null
+  if ((Number(p.level) || 0) >= EMPEROR_TARGET_LEVEL) return null
+  if (!fakeTakeItem(p.bag, EMPEROR_PILL)) return null
+  p.level = EMPEROR_TARGET_LEVEL
+  p.levelname = levelNameOf(p.level)
+  p.exp = Math.max(Number(p.exp) || 0, fakeSubThreshold(p.level))
+  return { type: 'break', major: true, ...evMeta(p), txt: `【突破】${p.name} 服下${itemIcon(EMPEROR_PILL)}仙帝丹，一步登临${levelNameOf(p.level)}！` }
+}
 /** 伪玩家打架前吃增益丹(出征/守城/驰援参战时调用): 从背包挑一颗战斗增益丹(惊鸿/玉甲/凝露/慧心/摄魂)服下, 提升战力; 返回是否吃了 */
 export function fakeCombatPill (f, p) {
   try {
@@ -2983,6 +2998,11 @@ export function fakeVaultSupply (f, p, now = Date.now()) {
 async function perPersonActs (f, now = Date.now()) {
   for (const p of Object.values(f.roster)) {
     if (!p.alive || p.realmBusy) continue
+    /* 仙帝丹: 有就立刻吃, 不受吃丹冷却/被俘/坐牢影响 */
+    try {
+      const emperorEv = fakeEatEmperorPill(f, p, now)
+      if (emperorEv) logEvent(f, emperorEv.type, emperorEv.txt, now, { ...emperorEv })
+    } catch (err) { }
     if (isFakeCaptive(f, p.name) || isInSectJail(f, p.name) || isInRaidJail(f, p.name) || isInSectMine(f, p.name)) continue // 被俘/关押/送矿中: 暂停普通活动
     try {
       const acts = p.activities || (p.activities = {})
@@ -3907,6 +3927,56 @@ function fakePetOwner (f, p) {
 function fakePetName (pet) {
   return pet.customName || speciesMeta(pet.speciesId)?.species.name || pet.speciesId
 }
+
+/* 伪玩家灵兽策略: 白/绿(quality<=2)算垃圾, 最多留战力最高的 3 只 */
+const FAKE_PET_KEEP = 3
+const FAKE_PET_JUNK_QUALITY = 2
+
+/**
+ * 放生垃圾灵兽: 白/绿品质直接放生(只保留最强的一只兜底),
+ * 其余按战力只留 FAKE_PET_KEEP 只。原地修改 state.bag[name]。
+ * @returns {boolean} 是否有放生/出战槽位被清理
+ */
+export function pruneFakePets (state, name) {
+  const bag = state && state.bag && state.bag[name]
+  if (!Array.isArray(bag) || bag.length <= 1) return false
+  const ranked = [...bag].sort((a, b) => (petPower(b) - petPower(a)) || ((Number(b.quality) || 0) - (Number(a.quality) || 0)))
+  const best = ranked[0]
+  const keep = new Set()
+  for (const pet of ranked) {
+    if (keep.size >= FAKE_PET_KEEP) break
+    const junk = (Number(pet.quality) || 0) <= FAKE_PET_JUNK_QUALITY
+    if (junk && pet !== best) continue
+    keep.add(pet.pid)
+  }
+  const next = bag.filter(pet => keep.has(pet.pid))
+  let changed = next.length !== bag.length
+  if (changed) state.bag[name] = next
+  /* 出战槽位指向被放生的灵兽 → 摘掉, 后面自动出战会重选最强 */
+  if (state.active && state.active[name] !== undefined && !keep.has(state.active[name])) {
+    delete state.active[name]
+    changed = true
+  }
+  return changed
+}
+
+/**
+ * 伪玩家灵兽统一整理: 旧灵兽补到满成长(蜕变), 并放生垃圾。
+ * 新捕获的灵兽在 resolveEncounter({ instantGrow: true }) 里直接是蜕变。
+ * @returns {boolean} 是否有变更
+ */
+export function tidyFakePets (state, owners, now = Date.now()) {
+  let changed = false
+  for (const p of owners || []) {
+    const bag = state.bag && state.bag[p.name]
+    if (!Array.isArray(bag) || !bag.length) continue
+    for (const pet of bag) {
+      if (pet && pet.stage !== '蜕变') { maturePet(pet, now); changed = true }
+    }
+    if (pruneFakePets(state, p.name)) changed = true
+  }
+  return changed
+}
 /** 伪玩家自动搜寻/捕获/出战灵兽; 与真实玩家共用规则, 但使用独立 fake pet 存档 */
 export function fakePetTick (f, gid, now = Date.now()) {
   const state = getPetState(gid, 'fake')
@@ -3920,6 +3990,8 @@ export function fakePetTick (f, gid, now = Date.now()) {
     }
   }
   owners.forEach(p => bindFakeGid(p, gid))
+  /* 伪玩家灵兽: 旧灵兽补到满成长(蜕变); 白/绿垃圾放生, 最多留战力最强的 3 只 */
+  if (tidyFakePets(state, owners, now)) changed = true
   let started = 0
   /* 尚未搜寻的伪玩家按独立冷却开始一轮 0~30 分钟搜寻, 大区取自身所在位置 */
   for (const p of owners) {
@@ -3948,7 +4020,7 @@ export function fakePetTick (f, gid, now = Date.now()) {
       const p = f.roster && f.roster[n.uid]
       /* 伪玩家无论当前是否仍可行动都要清理遇宠, 避免 fake 状态卡死 */
       const r = p && fakePetOwner(f, p)
-        ? resolveEncounter(state, n.uid, 1, now, personPower(p))
+        ? resolveEncounter(state, n.uid, 1, now, personPower(p), { instantGrow: true })
         : resolveEncounter(state, n.uid, 2, now, 0)
       if (p) {
         if (!p.activities) p.activities = {}
@@ -3970,6 +4042,11 @@ export function fakePetTick (f, gid, now = Date.now()) {
       if (p && n.pet) logEvent(f, 'pet', `【灵兽】伪玩家 ${p.name} 的【${fakePetName(n.pet)}】${n.type === 'hatched' ? '破壳' : `成长至${n.pet.stage}`}`, now, { who: [p.name] })
       changed = true
     }
+  }
+
+  /* 新捕获的灵兽可能让袋子超额: 再整理一次, 放生最弱的 */
+  for (const p of owners) {
+    if (state.bag[p.name] && pruneFakePets(state, p.name)) changed = true
   }
 
   /* 自动出战当前最强成熟灵兽; 只改 fake state, 不会影响真实玩家出战状态 */

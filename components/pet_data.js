@@ -240,6 +240,20 @@ export function petMaxPower (pet) {
   return powerOfAttr({ atk: pet.maxAtk, def: pet.maxDef, hp: pet.maxHp }, pet.quality, '蜕变')
 }
 
+/**
+ * 直接催熟为满成长(蜕变): 伪玩家捕获即满成长, 旧伪玩家灵兽也用它补齐。
+ * 只改成长阶段, 不动捕获时定死的满成长资质(maxAtk/maxDef/maxHp)。
+ */
+export function maturePet (pet, now = Date.now()) {
+  if (!pet) return pet
+  pet.stage = '蜕变'
+  pet.hatchStart = 0
+  pet.hatchProgress = 100
+  pet.growthStart = pet.growthStart || now
+  pet.lastAt = now
+  return pet
+}
+
 /* ============================================================
  * 存档(按群独立, 原子写)
  * ============================================================ */
@@ -745,8 +759,9 @@ export function parentWinRate (playerPower, parentPower) {
 /**
  * 处理遇宠: choice=1 捕获, 2 放走
  * playerPower: 父母守护形态时玩家战力(应用层传入)
+ * opts.instantGrow: 捕获即满成长(蜕变), 供伪玩家使用; 玩家默认走正常成长
  */
-export function resolveEncounter (state, uid, choice, now = Date.now(), playerPower = 0) {
+export function resolveEncounter (state, uid, choice, now = Date.now(), playerPower = 0, opts = {}) {
   const enc = state.encounter[uid]
   if (!enc) return { ok: false, msg: '你眼下并无待定夺的灵兽~' }
   if (enc.expireAt < now) {
@@ -812,20 +827,22 @@ export function resolveEncounter (state, uid, choice, now = Date.now(), playerPo
   }
 
   /* 成功 → 入袋 */
+  const instantGrow = !!opts.instantGrow
   const pet = {
     pid: state.nextPetId++,
     speciesId: enc.speciesId,
     bloodlineId: meta.bloodline.id,
     quality: enc.quality,
     customName: '',
-    stage: enc.mode === 'egg' ? 'egg' : 'baby',
+    stage: instantGrow ? '蜕变' : (enc.mode === 'egg' ? 'egg' : 'baby'),
     maxAtk: enc.maxAtk,
     maxDef: enc.maxDef,
     maxHp: enc.maxHp,
     growthStart: now,
     lastAt: now,
     obtainedAt: now,
-    hatchStart: enc.mode === 'egg' ? now : 0,
+    hatchStart: instantGrow ? 0 : (enc.mode === 'egg' ? now : 0),
+    hatchProgress: instantGrow ? 100 : 0,
     origin: meta.species.zone === 'mixed' ? 'mixed' : 'region'
   }
   bag.push(pet)
@@ -838,6 +855,9 @@ export function resolveEncounter (state, uid, choice, now = Date.now(), playerPo
   const captureText = enc.mode === 'egg'
     ? pickText(EGG_CAPTURE_LINES).replace('{name}', name)
     : pickText(PET_CAPTURE_LINES).replace('{name}', name)
+  if (instantGrow) {
+    return { ok: true, pet, msg: `🦁 ${captureText}\n灵兽已直接成长至蜕变，无需再等岁月淬炼。` }
+  }
   const eggTail = pickText([
     `约 ${hatchDays} 日后灵光破壳，届时自会相告。`,
     `再温养 ${hatchDays} 日，蛋中小兽便可破壳而出。`,

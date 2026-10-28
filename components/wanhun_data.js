@@ -10,6 +10,7 @@ import { getWorld, getLoc, levelNameOf } from './world_data.js'
 import { disablePuppets, puppetArtifactLine } from './puppet_data.js'
 import { calcCombatPower, getBuffs, fightBestOf5, guardWinRate, realmPower } from './fight.js'
 import { fakeSubThreshold } from './fake_data.js'
+import { REALM_MAX_LEVEL } from './realm_cap.js'
 
 const SAVE_DIR = `${Save_Path}/wanhun`
 const RANK_CAPACITY = [0, 20, 30, 50, 100, 300, 500, 1000, 5000, 10000]
@@ -672,7 +673,7 @@ export const Wanhun = {
     const battle = await xujing_data.getQQYUserBattle(uid, null, false, `${gid}.json`)
     const p = battle[uid]
     if (!p) return false
-    p.level = (Number(p.level) || 0) + 1
+    p.level = Math.min(REALM_MAX_LEVEL, (Number(p.level) || 0) + 1)
     p.levelname = levelNameOf(p.level)
     await xujing_data.getQQYUserBattle(uid, battle, true, `${gid}.json`)
     user.realmDrop.count = Math.max(0, user.realmDrop.count - 1)

@@ -22,12 +22,9 @@ class Puppeteer {
       headless: true,
       args: [
         '--disable-gpu',
-        '--disable-dev-shm-usage',
         '--disable-setuid-sandbox',
         '--no-first-run',
-        '--no-sandbox',
-        '--no-zygote',
-        '--single-process'
+        '--no-sandbox'
       ]
     }
     /*保存html模板*/
@@ -45,12 +42,20 @@ class Puppeteer {
     if (this.lock) return false
     this.lock = true
     logger.mark('puppeteer Chromium 启动中...')
-    this.browser = await puppeteer.launch(this.config).catch((err) => {
-      logger.error(err.toString())
-      if (String(err).includes('correct Chromium')) {
-        logger.error('没有正确安装Chromium,可以尝试执行\n安装命令: node ./node_modules/puppeteer/install.js')
+    /* Windows 下 Edge/Chromium 偶发秒退(exit 0x80000003 STATUS_BREAKPOINT), 重试可自愈 */
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      this.browser = await puppeteer.launch(this.config).catch((err) => {
+        logger.error(err.toString())
+        if (String(err).includes('correct Chromium')) {
+          logger.error('没有正确安装Chromium,可以尝试执行\n安装命令: node ./node_modules/puppeteer/install.js')
+        }
+      })
+      if (this.browser) break
+      if (attempt < 3) {
+        logger.mark(`puppeteer Chromium 启动失败, 第${attempt}次重试...`)
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1000))
       }
-    })
+    }
     this.lock = false
     if (!this.browser) {
       logger.error('puppeteer Chromium 启动失败')

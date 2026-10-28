@@ -6,6 +6,7 @@ import { Plugin_Name, Save_Path } from '../../components/plugin.js'
 import xujing_data from '../../components/xujing_data.js'
 import { addItem, consumeItem, EQUIP_TPL, ITEM_TPL, MATERIAL_TPL, getBag, itemIcon } from '../../components/equip_data.js'
 import { getLevelName } from '../user/duel_exercise.js'
+import { REALM_MAX_LEVEL, XIANDI_MAX_CHONG } from '../../components/realm_cap.js'
 import { delJail, allJails } from '../../components/raid_data.js'
 //项目路径
 //如果报错请删除Yunzai/data/目录中xujing文件夹
@@ -422,10 +423,13 @@ export class duel_setmaster extends plugin {//设置开挂
 			return true
 		}
 		const json = await xujing_data.getQQYUserBattle(e.at, null, false, `${e.group_id}.json`)
-		json[e.at].level = (Number(json[e.at].level) || 0) + lv
-		json[e.at].levelname = getLevelName(json[e.at].level)
+		const before = Number(json[e.at].level) || 0
+		const target = Math.min(REALM_MAX_LEVEL, before + lv)
+		const added = target - before
+		json[e.at].level = target
+		json[e.at].levelname = getLevelName(target)
 		await xujing_data.getQQYUserBattle(e.at, json, true, `${e.group_id}.json`)
-		e.reply([segment.at(e.user_id), `\n✅ 已为 ${e.at} 提升 ${lv} 级修为（当前境界：${json[e.at].levelname}）`])
+		e.reply([segment.at(e.user_id), `\n✅ 已为 ${e.at} 提升 ${added} 级修为（当前境界：${json[e.at].levelname}）${added < lv ? `\n⚠️ 此界境界上限为仙帝第${XIANDI_MAX_CHONG}重，剩余 ${lv - added} 级未生效` : ''}`])
 		return true
 	}
 	/** #虚境扣除道具 @群友 道具名 数量 */

@@ -12,6 +12,7 @@ import { writeJsonAtomic } from './json_store.js'
 import { recoverCorruptJson } from './save_backup.js'
 import { Plugin_Name, Save_Path } from './plugin.js'
 import xujing_data from './xujing_data.js'
+import { REALM_MAX_LEVEL } from './realm_cap.js'
 
 const WORLD_DIR = `${Save_Path}/world`
 const WORLD_FILE = `${WORLD_DIR}/world.json` // 旧全局档(仅首次迁移用)
@@ -378,7 +379,7 @@ const STAGES = ['初期', '中期', '后期', '巅峰']
 const STAGE_COUNT = 4
 const MAX_LEVEL = REALMS.length * STAGE_COUNT
 export function levelNameOf (level) {
-  level = Number(level) || 0
+  level = Math.min(Math.max(0, Math.floor(Number(level) || 0)), REALM_MAX_LEVEL)
   if (level <= 0) return '无灵力'
   if (level > MAX_LEVEL) return `仙帝第${level - MAX_LEVEL}重`
   const i = Math.floor((level - 1) / STAGE_COUNT)

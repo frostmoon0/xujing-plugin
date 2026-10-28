@@ -5,8 +5,9 @@
   <link rel="stylesheet" href="{{_res_path}}/qylp/recipe.css">
   <style>
     body {
-      background: url("{{_res_path}}/help/imgs/{{bg}}") right center !important;
-      background-size: cover !important;
+      background-image:
+        linear-gradient(180deg, rgba(255,255,255,.10) 0%, rgba(225,238,250,.26) 45%, rgba(210,228,245,.42) 100%),
+        url("{{_res_path}}/help/imgs/{{bg}}");
     }
   </style>
 </head>
@@ -14,141 +15,62 @@
   <div class="rc-container">
     <header class="rc-head">
       <div class="rc-title">🧪 虚境配方台</div>
-      <div class="rc-sub">丹药炼制 · 法宝打造 · 阵法核心 · 阵法布置 · 装备铸造</div>
+      <div class="rc-sub">丹药 · 法宝 · 阵法 · 装备 · 妖丹</div>
     </header>
 
-    <!-- 丹药炼制: 独占整行, 4 列排布压缩高度 -->
-    <section class="rc-section rc-potions">
-      <div class="rc-section-head">💊 丹药炼制</div>
-      <div class="rc-grid rc-grid-four">
-        {{each potionFormulas}}
-        <article class="rc-card">
-          <div class="rc-formula">
-            {{each $value.mats}}
-            {{if $index}}<span class="rc-plus">＋</span>{{/if}}
-            <div class="rc-mat q{{$value.quality}}"><div class="mat-icon">{{$value.icon}}</div><div class="mat-name">{{$value.name}}</div><div class="mat-count">×{{$value.count}}</div></div>
-            {{/each}}
+    <main class="rc-grid">
+      {{if emperorFormula}}
+      <article class="rc-card rc-featured rc-kind-emperor">
+        <div class="rc-card-top">
+          <div class="rc-ic q7">{{emperorFormula.result.icon}}</div>
+          <div class="rc-title-wrap">
+            <div class="rc-name">{{emperorFormula.result.name}}</div>
+            <div class="rc-tag">帝品 · 只能喂伪玩家</div>
           </div>
-          <div class="rc-arrow">▼</div>
-          <div class="rc-result"><div class="rc-mat q{{$value.result.quality}}"><div class="mat-icon">{{$value.result.icon}}</div><div class="mat-name">{{$value.result.name}}</div><div class="mat-count">×{{$value.result.count}}</div></div></div>
-          <div class="rc-desc">{{$value.result.desc}}</div>
-          <div class="rc-tip">#合成{{$value.result.name}} 数量</div>
-        </article>
-        {{/each}}
-      </div>
-    </section>
-
-    <!-- 中区: 左列(法宝打造 + 阵法核心) | 右列(阵法布置), 高度互补无空白 -->
-    <div class="rc-mid-grid">
-      <div class="rc-left-stack">
-        <section class="rc-section rc-artifacts">
-          <div class="rc-section-head">🔮 法宝打造</div>
-          <div class="rc-grid rc-grid-two">
-            {{each artifactFormulas}}
-            <article class="rc-card rc-artifact">
-              <div class="rc-formula">
-                {{each $value.mats}}
-                {{if $index}}<span class="rc-plus">＋</span>{{/if}}
-                <div class="rc-mat q{{$value.quality}}"><div class="mat-icon">{{$value.icon}}</div><div class="mat-name">{{$value.name}}</div><div class="mat-count">×{{$value.count}}</div></div>
-                {{/each}}
-              </div>
-              <div class="rc-arrow">▼</div>
-              <div class="rc-result"><div class="rc-mat q{{$value.result.quality}}"><div class="mat-icon">{{$value.result.icon}}</div><div class="mat-name">{{$value.result.name}}</div><div class="mat-count">×1</div></div></div>
-              <div class="rc-desc">{{$value.result.desc}}</div>
-              <div class="rc-tip">{{if $value.result.name === '万魂幡'}}#打造万魂幡{{else if $value.result.name === '傀儡'}}#打造傀儡{{else}}#合成定仙游{{/if}}</div>
-            </article>
-            {{/each}}
+        </div>
+        <div class="rc-mats rc-mats-featured">
+          {{each emperorFormula.mats}}
+          <div class="rc-mat q{{$value.quality}}">
+            <div class="mat-icon">{{$value.icon}}</div>
+            <div class="mat-name">{{$value.name}}</div>
+            <div class="mat-count">×{{$value.count}}</div>
           </div>
-        </section>
-
-        <section class="rc-section rc-arrays">
-          <div class="rc-section-head">🔮 阵法核心</div>
-          <div class="rc-grid rc-grid-one">
-            {{each arrayFormulas}}
-            <article class="rc-card rc-array">
-              <div class="rc-formula rc-array-formula">
-                {{each $value.mats}}
-                {{if $index}}<span class="rc-plus">＋</span>{{/if}}
-                <div class="rc-mat q{{$value.quality}}"><div class="mat-icon">{{$value.icon}}</div><div class="mat-name">{{$value.name}}</div><div class="mat-count">×{{$value.count}}</div></div>
-                {{/each}}
-              </div>
-              <div class="rc-arrow">▼</div>
-              <div class="rc-result"><div class="rc-mat q7"><div class="mat-icon">🔮</div><div class="mat-name">万阵核心</div><div class="mat-count">×1</div></div></div>
-              <div class="rc-desc">{{$value.result.desc}}</div>
-              <div class="rc-tip">#合成万阵核心</div>
-            </article>
-            {{/each}}
-          </div>
-        </section>
-      </div>
-
-      <section class="rc-section rc-array-deploy">
-        <div class="rc-section-head">🌀 阵法布置</div>
-        <div class="rc-deploy-list">
-          {{each arrayDeployFormulas}}
-          <article class="rc-card rc-array">
-            <div class="rc-array-name">{{$value.name}}</div>
-            <div class="rc-formula rc-array-formula">
-              {{each $value.mats}}
-              {{if $index}}<span class="rc-plus">＋</span>{{/if}}
-              <div class="rc-mat q{{$value.quality}}"><div class="mat-icon">{{$value.icon}}</div><div class="mat-name">{{$value.name}}</div><div class="mat-count">×{{$value.count}}</div></div>
-              {{/each}}
-            </div>
-            <div class="rc-arrow">▼</div>
-            <div class="rc-result"><div class="rc-mat q7"><div class="mat-icon">{{$value.result.icon}}</div><div class="mat-name">{{$value.result.name}}</div><div class="mat-count">×1</div></div></div>
-            <div class="rc-desc">{{$value.result.desc}}</div>
-            <div class="rc-tip">{{if $value.name === '血炼大阵'}}#学习血炼阵 · #屠城{{else}}#布置养魂阵{{/if}}</div>
-          </article>
           {{/each}}
         </div>
-      </section>
-    </div>
+        <div class="rc-watermark">{{emperorFormula.result.icon}}</div>
+        <div class="rc-card-foot">
+          <div class="rc-cmd">#合成仙帝丹 数量</div>
+          <div class="rc-desc">{{emperorFormula.result.desc}}</div>
+        </div>
+      </article>
+      {{/if}}
 
-    <!-- 下半区：装备三种制造方式，两列排布 -->
-    <section class="rc-section rc-equips">
-      <div class="rc-section-head">⚒️ 装备铸造</div>
-      <div class="rc-manufactures">
-        <article class="rc-manufacture rc-red">
-          <div class="rc-manufacture-head">🔴 红装制造</div>
-          <div class="rc-wide-formula">{{each redMats}}<div class="rc-mat q{{$value.quality}}"><div class="mat-icon">{{$value.icon}}</div><div class="mat-name">{{$value.name}}</div><div class="mat-count">×{{$value.count}}</div></div>{{/each}}</div>
-          <div class="rc-wide-arrow">▼ 随机红装（品质6）</div>
-          <div class="rc-tip">#制造红装（支持批量）</div>
-        </article>
-        <article class="rc-manufacture rc-color">
-          <div class="rc-manufacture-head">🌈 彩装制造</div>
-          <div class="rc-wide-formula">{{each colorMats}}<div class="rc-mat q{{$value.quality}}"><div class="mat-icon">{{$value.icon}}</div><div class="mat-name">{{$value.name}}</div><div class="mat-count">×{{$value.count}}</div></div>{{/each}}</div>
-          <div class="rc-wide-arrow">▼ 随机彩装（属性=红装×3）</div>
-          <div class="rc-tip">#制造彩装（造梦神玉×6 + 红装×1）</div>
-        </article>
-        <article class="rc-manufacture rc-rainbow">
-          <div class="rc-manufacture-head">🌈 特殊彩武</div>
-          <div class="rc-wide-formula">{{each rainbowMats}}<div class="rc-mat q{{$value.quality}}"><div class="mat-icon">{{$value.icon}}</div><div class="mat-name">{{$value.name}}</div><div class="mat-count">×{{$value.count}}</div></div>{{/each}}</div>
-          <div class="rc-wide-arrow">▼ 成长型绑定神兵</div>
-          <div class="rc-tip">#铸造特殊彩武 · #彩武命名</div>
-        </article>
-      </div>
-    </section>
-
-    <!-- 妖丹凝练: 残丹×5 → 随机品质妖丹 -->
-    <section class="rc-section rc-arrays">
-      <div class="rc-section-head">🎖️ 妖丹凝练</div>
-      <div class="rc-grid rc-grid-one">
-        {{each yaodanFormulas}}
-        <article class="rc-card rc-array">
-          <div class="rc-formula rc-array-formula">
-            {{each $value.mats}}
-            {{if $index}}<span class="rc-plus">＋</span>{{/if}}
-            <div class="rc-mat q{{$value.quality}}"><div class="mat-icon">{{$value.icon}}</div><div class="mat-name">{{$value.name}}</div><div class="mat-count">×{{$value.count}}</div></div>
-            {{/each}}
+      {{each recipeCards}}
+      <article class="rc-card rc-kind-{{$value.kind}}">
+        <div class="rc-card-top">
+          <div class="rc-ic q{{$value.result.quality}}">{{$value.result.icon}}</div>
+          <div class="rc-title-wrap">
+            <div class="rc-name">{{$value.result.name}}</div>
+            <div class="rc-tag">{{$value.kindName}}</div>
           </div>
-          <div class="rc-arrow">▼</div>
-          <div class="rc-result"><div class="rc-mat q{{$value.result.quality}}"><div class="mat-icon">{{$value.result.icon}}</div><div class="mat-name">{{$value.result.name}}</div><div class="mat-count">×{{$value.result.count}}</div></div></div>
-          <div class="rc-desc">{{$value.result.desc}}</div>
-          <div class="rc-tip">{{$value.tip}}</div>
-        </article>
-        {{/each}}
-      </div>
-    </section>
+        </div>
+        <div class="rc-mats">
+          {{each $value.mats}}
+          <div class="rc-mat q{{$value.quality}}">
+            <div class="mat-icon">{{$value.icon}}</div>
+            <div class="mat-name">{{$value.name}}</div>
+            <div class="mat-count">×{{$value.count}}</div>
+          </div>
+          {{/each}}
+        </div>
+        <div class="rc-watermark">{{$value.result.icon}}</div>
+        <div class="rc-card-foot">
+          <div class="rc-cmd">{{$value.cmd}}</div>
+          {{if $value.desc}}<div class="rc-desc">{{$value.desc}}</div>{{/if}}
+        </div>
+      </article>
+      {{/each}}
+    </main>
 
     <footer class="rc-foot">发送 #配方台 查看全部配方 · Powered by xujing-yue-plugin</footer>
   </div>

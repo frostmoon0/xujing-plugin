@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { Plugin_Name, Plugin_Path, Save_Path } from './plugin.js'
+import { normalizeBattleLevels } from './realm_cap.js'
 // 存档统一存放于 Yunzai 本体 data 目录(如 C:/Users/Administrator/Desktop/Yunzai-Bot/data/xujing-yue-plugin/save)
 const dirpath = `${Save_Path}`
 const QQYpath = `${Save_Path}/qylp`
@@ -97,6 +98,8 @@ async function getQQYUserBattle(id, json, is_save, filename = 'global.json') {
             }));
         }
         var json = JSON.parse(fs.readFileSync(file, 'utf8'));//读取文件
+        /* 境界硬上限: 仙帝第499重; 超过的旧档/异常档读取时即收敛并落盘 */
+        var capChanged = normalizeBattleLevels(json)
         if (!json.hasOwnProperty(id)) {//如果json中不存在该用户
             var battleTemplate = {//创建该用户
                 "experience": 0,
@@ -116,10 +119,14 @@ async function getQQYUserBattle(id, json, is_save, filename = 'global.json') {
                 } catch (err) { }
             }
             fs.writeFileSync(file, JSON.stringify(json, null, "\t"));//写入文件
+        } else if (capChanged) {
+            /* 有超上限档: 读取时立即落盘, 避免旧档一直停留在异常重数 */
+            fs.writeFileSync(file, JSON.stringify(json, null, "\t"));
         }
         return json;
     }
     else {
+        normalizeBattleLevels(json)
         fs.writeFileSync(`${QQYbattlepath}/${filename}`, JSON.stringify(json, null, "\t"));//写入文件
         return json;
     }

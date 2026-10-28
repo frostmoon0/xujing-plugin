@@ -224,6 +224,7 @@ export const ITEM_TPL = {
   '登仙令': { icon: '🏯', desc: '渡劫飞升凭证,突破成仙(人仙)时消耗1枚', bound: true },
   '魂石': { icon: '🔹', desc: '进入万魂窟后保护10分钟', bound: true },
   '还魂丹': { icon: '🕯️', desc: '解除失魂状态', bound: true },
+  '仙帝丹': { icon: '👑', desc: '玩家不可服用；赠予伪玩家后自动服用，直接升至仙帝第10重（已达标者留在包中）' },
   '神游蛊': { icon: '🦋', desc: '南疆捕获的神异蛊虫，用于合成定仙游', bound: true },
   '惊鸿丹': { icon: '🔴', desc: '服用后攻击力+20%(持续1小时,丹阁不售)' },
   '灵宝盒': { icon: '🎁', desc: '开启后获得丰厚奖励' },
@@ -549,6 +550,7 @@ export function getItemSource(name) {
     if (name === '破障丹') return '丹阁购买1000灵石 · 新手礼包 · 虚境秘境'
     if (name === '魂石') return '魔窟商人兑换(灵石/材料/丹药/功法书) · #魔窟商人'
     if (name === '还魂丹') return `配方台合成(${itemIcon('玄阴玉')}玄阴玉×2+${itemIcon('镇魂晶')}镇魂晶×1+${itemIcon('血煞髓')}血煞髓×1+${itemIcon('云裳仙蕊')}云裳仙蕊×1) · 魔窟商人兑换(11~12格)`
+    if (name === '仙帝丹') return `配方台合成(${itemIcon('云裳仙蕊')}云裳仙蕊×10 + 五种药材各×100 + ${itemIcon('万魂帝晶')}万魂帝晶×10 + 一至七阶妖丹共×28 + 30万灵石) · 玩家不可服用`
     if (name === '登仙令') return '世界Boss掉落 · 击杀后 #抢夺登仙令 夺得(同大区)'
     if (name === '惊鸿丹') return `配方台合成(${itemIcon('望舒花')}望舒花×1+${itemIcon('星霜草')}星霜草×2)`
     if (name === '灵宝盒') return '幻境试炼结算奖励(每日前5名5~1个 · 每周结算1~20个)'

@@ -14,6 +14,7 @@ import { forceLock, isCurrent, unlock } from '../../components/interact.js'
 import { textToImg } from '../../components/common-lib/reply-img.js'
 import { getFacilityLevel } from '../../components/sect_system.js'
 import { guardActionLocked } from '../../components/action_lock.js'
+import { REALM_MAX_LEVEL, XIANDI_MAX_CHONG } from '../../components/realm_cap.js'
 
 /** 冷却时间格式化(精确到秒,如 4分10秒) */
 const fmtCD = (sec) => {
@@ -84,6 +85,11 @@ const getBreakRate = (level) => {
 /** 执行突破(支持连破N重: 前 pills 重用破障丹成功率90%, 其余基础成功率, 失败即停) */
 const doBreakN = async (e, json, user_id, levels, pills) => {
     json[user_id].level = Number(json[user_id].level) || 0
+    /* 境界硬上限: 仙帝第499重, 到顶后不再突破 */
+    if (json[user_id].level >= REALM_MAX_LEVEL) {
+        e.reply([segment.at(user_id), `\n🚫 你已修至仙帝第${XIANDI_MAX_CHONG}重，此界境界上限已满，无法再突破。`])
+        return true
+    }
     /* 渡劫飞升: 本次突破将进入人仙(level 37)需消耗1枚登仙令; 无则提示且不进冷却 */
     const willAscend = json[user_id].level < 37 && json[user_id].level + levels >= 37
     if (willAscend) {
@@ -116,6 +122,7 @@ const doBreakN = async (e, json, user_id, levels, pills) => {
     /* 逐级判定: 前 pills 重用90%, 其余基础成功率, 失败即停 */
     let broke = 0
     for (let i = 0; i < levels; i++) {
+        if (json[user_id].level >= REALM_MAX_LEVEL) break
         const rate = Math.min(100, (i < pills ? PILL_RATE : getBreakRate(json[user_id].level)) + breakBonus + sectBreakBonus)
         if (Math.random() * 100 > rate) break
         /* 渡劫飞升: 突破成功进入人仙时消耗1枚登仙令 */
@@ -157,7 +164,9 @@ export const getSubThreshold = (level) => {
 }
 /** 根据等级获取境界名 */
 export const getLevelName = (level) => {
+    level = Math.max(0, Math.floor(Number(level) || 0))
     if (level <= 0) return '无灵力'
+    if (level > REALM_MAX_LEVEL) level = REALM_MAX_LEVEL
     if (level > MAX_LEVEL) return `仙帝第${level - MAX_LEVEL}重`
     const i = Math.floor((level - 1) / STAGE_COUNT)
     const j = (level - 1) % STAGE_COUNT
@@ -230,7 +239,7 @@ export class duel_exercise extends plugin {//修炼
         for (let i = 0; i < REALM_COUNT; i++) {
             msgArr.push(`${REALMS[i]}（${STAGES.join('、')}）`)
         }
-        msgArr.push('仙帝之后：仙帝第N重')
+        msgArr.push(`仙帝之后：仙帝第N重（上限第${XIANDI_MAX_CHONG}重）`)
         const img = await textToImg(msgArr.join('\n'))
         if (img) e.reply(img)
         else Config.getforwardMsg(msgArr, e)
@@ -246,6 +255,12 @@ export class duel_exercise extends plugin {//修炼
         const dm = String(e.msg).match(/突破\s*([12])\s*$/)
         const direct = dm ? Number(dm[1]) : 0
         const json = await xujing_data.getQQYUserBattle(user_id, null, false, `${e.group_id}.json`)
+
+        /* 境界硬上限: 仙帝第499重(先于冷却判断, 到顶后直接提示) */
+        if ((Number(json[user_id].level) || 0) >= REALM_MAX_LEVEL) {
+            e.reply([segment.at(user_id), `\n🚫 你已修至仙帝第${XIANDI_MAX_CHONG}重，此界境界上限已满，无法再突破。`])
+            return true
+        }
 
         let lastTime_break = await redis.ttl(`duel:break-cd:${e.user_id}`);
         if (lastTime_break !== -2) {//&& !masterList.includes(e.user_id)
@@ -410,6 +425,11 @@ export class duel_exercise extends plugin {//修炼
     /** 丹药统一入口: 指定丹药名(惊鸿丹/破障丹/修为丹/聚宝丹/灵犀丹/行运丹/同心丹), 不写丹名统一吃修为丹(渡劫吃破障丹请回复 1/2 选择) */
     async takePill(e) {
         const raw = String(e.msg || '')
+        /* 仙帝丹玩家不可服用(可自由交易), 只有伪玩家会自动服用 */
+        if (raw.includes('仙帝丹')) {
+            e.reply('👑 玩家无法服用仙帝丹，只有伪玩家会自动服用~（#伪玩家送 名字 仙帝丹 数量）')
+            return true
+        }
         /* 按消息内容识别指定丹药名(防呆, 名称可带可不带空格/前后) */
         if (raw.includes('惊鸿丹')) return await this.pillBuff(e)
         if (raw.includes('破障丹')) return await this.pillBreak(e)

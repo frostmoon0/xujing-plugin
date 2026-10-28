@@ -26,7 +26,27 @@ const RECIPES = {
   '凝露丹': { mats: [{ name: '凤栖花', count: 1 }, { name: '星霜草', count: 2 }] },
   '慧心丹': { mats: [{ name: '凤栖花', count: 1 }, { name: '望舒花', count: 1 }] },
   '摄魂丹': { mats: [{ name: '望舒花', count: 1 }, { name: '青鸾草', count: 2 }] },
-  '还魂丹': { mats: [{ name: '玄阴玉', count: 2 }, { name: '镇魂晶', count: 1 }, { name: '血煞髓', count: 1 }, { name: '云裳仙蕊', count: 1 }] }
+  '还魂丹': { mats: [{ name: '玄阴玉', count: 2 }, { name: '镇魂晶', count: 1 }, { name: '血煞髓', count: 1 }, { name: '云裳仙蕊', count: 1 }] },
+  /* 仙帝丹: 玩家不可服用(可自由交易); 伪玩家服下直升仙帝第10重. 30万灵石为合成费(单独扣) */
+  '仙帝丹': {
+    money: 300000,
+    mats: [
+      { name: '云裳仙蕊', count: 10 },
+      { name: '星霜草', count: 100 },
+      { name: '青鸾草', count: 100 },
+      { name: '望舒花', count: 100 },
+      { name: '月华芝', count: 100 },
+      { name: '凤栖花', count: 100 },
+      { name: '万魂帝晶', count: 10 },
+      { name: '七阶妖丹', count: 1 },
+      { name: '六阶妖丹', count: 2 },
+      { name: '五阶妖丹', count: 3 },
+      { name: '四阶妖丹', count: 4 },
+      { name: '三阶妖丹', count: 5 },
+      { name: '二阶妖丹', count: 6 },
+      { name: '一阶妖丹', count: 7 }
+    ]
+  }
 }
 
 /** 定仙游配方: 神游蛊×1 + 万魂窟三种核心材料各×5 */
@@ -50,7 +70,7 @@ const WANHUN_RECIPE = {
 }
 
 /** 丹药品质(用于配方图展示): 红6 惊鸿丹/灵犀丹/玉甲丹/慧心丹/摄魂丹, 金5 聚宝丹/行运丹/同心丹/凝露丹 */
-const PILL_QUALITY = { '惊鸿丹': 6, '灵犀丹': 6, '玉甲丹': 6, '慧心丹': 6, '摄魂丹': 6, '还魂丹': 6, '聚宝丹': 5, '行运丹': 5, '同心丹': 5, '凝露丹': 5 }
+const PILL_QUALITY = { '仙帝丹': 7, '惊鸿丹': 6, '灵犀丹': 6, '玉甲丹': 6, '慧心丹': 6, '摄魂丹': 6, '还魂丹': 6, '聚宝丹': 5, '行运丹': 5, '同心丹': 5, '凝露丹': 5 }
 
 /** 红装制造配方: 所有矿物各1(不含彩色造梦神玉) → 随机部位随机属性红装 */
 const RED_ORE = ['月魄石', '星璇石', '流光玉', '织云石', '凤羽玉']//5种非彩色矿物
@@ -98,7 +118,7 @@ export class MIX extends plugin {
             },
             {
                 // 防呆: 数量可在丹药名前后, 可有可无空格(#合成慧心丹3 / #合成慧心丹 3 / #合成3慧心丹)
-                reg: "^[#＃]?合成\\s*(\\d+\\s*)?(惊鸿丹|聚宝丹|灵犀丹|行运丹|同心丹|玉甲丹|凝露丹|慧心丹|摄魂丹|还魂丹)(\\s*\\d+)?$",
+                reg: "^[#＃]?合成\\s*(\\d+\\s*)?(惊鸿丹|聚宝丹|灵犀丹|行运丹|同心丹|玉甲丹|凝露丹|慧心丹|摄魂丹|还魂丹|仙帝丹)(\\s*\\d+)?$",
                 fnc: 'mixCraft'
             },
             {
@@ -152,16 +172,24 @@ export class MIX extends plugin {
                 count
             }
         }
-        const potionFormulas = Object.keys(RECIPES).map(pillName => ({
-            mats: RECIPES[pillName].mats.map(m => mat(m.name, m.count)),
-            result: {
-                name: pillName,
-                quality: PILL_QUALITY[pillName] || 5,
-                icon: ITEM_TPL[pillName]?.icon || '💊',
-                count: 1,
-                desc: ITEM_TPL[pillName]?.desc || ''
+        const potionFormulas = Object.keys(RECIPES).map(pillName => {
+            const mats = RECIPES[pillName].mats.map(m => mat(m.name, m.count))
+            const money = Number(RECIPES[pillName].money) || 0
+            if (money > 0) mats.push(mat('灵石', `${money / 10000}万`, { quality: 1, icon: '💰' }))
+            return {
+                mats,
+                result: {
+                    name: pillName,
+                    quality: PILL_QUALITY[pillName] || 5,
+                    icon: ITEM_TPL[pillName]?.icon || '💊',
+                    count: 1,
+                    desc: ITEM_TPL[pillName]?.desc || ''
+                }
             }
-        }))
+        })
+        /* 仙帝丹材料多, 单独做帝品大卡, 不挤进普通丹药网格 */
+        const emperorFormula = potionFormulas.find(f => f.result.name === '仙帝丹') || null
+        const normalPotionFormulas = potionFormulas.filter(f => f.result.name !== '仙帝丹')
         const artifactFormulas = [
             {
                 kind: 'artifact',
@@ -225,7 +253,7 @@ export class MIX extends plugin {
             mats: Object.entries(Yanghun.BASE_COST).map(([name, count]) => mat(name, count)),
             result: { name: '一阶养魂阵', quality: 7, icon: '🌀', count: 1, desc: '养魂阵每小时产出魂魄；布置时消耗1枚万阵核心' }
         }]
-        const bg = await rodom()
+        const bg = fs.existsSync(path.join(Plugin_Path, 'resources', 'help', 'imgs', '1 (9).jpg')) ? '1 (9).jpg' : await rodom()
         /* 红装制造材料(所有矿物各1, 不含彩色造梦神玉) */
         const redMats = RED_ORE.map(n => ({
             name: n,
@@ -255,6 +283,25 @@ export class MIX extends plugin {
             },
             tip: '#合成妖丹（可带数量，如 #合成妖丹 3）'
         }]
+        /* 统一卡片: 20 张普通配方 + 帝品 2×2, 正好铺满 4×6 网格 */
+        const recipeCards = []
+        for (const f of normalPotionFormulas) {
+            recipeCards.push({ kind: 'potion', kindName: '丹药', mats: f.mats, result: f.result, cmd: `#合成${f.result.name} 数量`, desc: f.result.desc })
+        }
+        for (const f of artifactFormulas) {
+            const cmd = f.result.name === '万魂幡' ? '#打造万魂幡' : (f.result.name === '傀儡' ? '#打造傀儡' : '#合成定仙游')
+            recipeCards.push({ kind: 'artifact', kindName: '法宝', mats: f.mats, result: f.result, cmd, desc: f.result.desc })
+        }
+        for (const f of arrayFormulas) {
+            recipeCards.push({ kind: 'array', kindName: '阵法', mats: f.mats, result: f.result, cmd: '#合成万阵核心', desc: f.result.desc })
+        }
+        for (const f of arrayDeployFormulas) {
+            recipeCards.push({ kind: 'array', kindName: '阵法', mats: f.mats, result: f.result, cmd: f.name === '血炼大阵' ? '#学习血炼阵 · #屠城' : '#布置养魂阵', desc: f.result.desc })
+        }
+        recipeCards.push({ kind: 'equip', kindName: '装备', mats: redMats, result: { name: '随机红装', icon: '🔴', quality: 6 }, cmd: '#制造红装（支持批量）', desc: '随机部位随机属性' })
+        recipeCards.push({ kind: 'equip', kindName: '装备', mats: colorMats, result: { name: '随机彩装', icon: '🌈', quality: 7 }, cmd: '#制造彩装', desc: '属性 = 红装 ×3' })
+        recipeCards.push({ kind: 'equip', kindName: '装备', mats: rainbowMats, result: { name: '特殊彩武', icon: '🌈', quality: 7 }, cmd: '#铸造特殊彩武', desc: '成长型绑定神兵' })
+        recipeCards.push({ kind: 'yaodan', kindName: '妖丹', mats: yaodanFormulas[0].mats, result: yaodanFormulas[0].result, cmd: '#合成妖丹（可带数量）', desc: yaodanFormulas[0].result.desc })
         const resPath = `../../../../../plugins/${Plugin_Name}/resources/`
         const img = await puppeteer.screenshot(`${Plugin_Name}/recipe/index`, {
             tplFile: path.join(Plugin_Path, 'resources', 'qylp', 'recipe.html'),
@@ -262,14 +309,8 @@ export class MIX extends plugin {
             _res_path: resPath,
             saveId: `recipe-${Date.now()}`,
             bg,
-            potionFormulas,
-            artifactFormulas,
-            arrayFormulas,
-            arrayDeployFormulas,
-            redMats,
-            colorMats,
-            rainbowMats,
-            yaodanFormulas
+            emperorFormula,
+            recipeCards
         })
         if (img) e.reply([img])
         else e.reply('图片渲染失败，请检查 puppeteer~')
@@ -279,7 +320,7 @@ export class MIX extends plugin {
     /** #合成[丹药名] [数量]: 按配方扣除药材,批量合成丹药(默认1颗,上限99) */
     async mixCraft(e) {
         const id = e.user_id
-        const m = String(e.msg || '').match(/(惊鸿丹|聚宝丹|灵犀丹|行运丹|同心丹|玉甲丹|凝露丹|慧心丹|摄魂丹|还魂丹)/)
+        const m = String(e.msg || '').match(/(惊鸿丹|聚宝丹|灵犀丹|行运丹|同心丹|玉甲丹|凝露丹|慧心丹|摄魂丹|还魂丹|仙帝丹)/)
         const pillName = m ? m[1] : null
         if (!pillName || !RECIPES[pillName]) {
             e.reply('请指定要合成的丹药，如：#合成聚宝丹（发送 #配方台 查看配方，可 #合成聚宝丹 5 批量合成）')
@@ -290,6 +331,7 @@ export class MIX extends plugin {
         const want = numM ? Math.min(99, Math.max(1, parseInt(numM[1]))) : 1
         const recipe = RECIPES[pillName]
         const bag = getBag(id, e.group_id)
+        const totalMoney = (Number(recipe.money) || 0) * want
         /* 配方异常防呆 */
         for (const mat of recipe.mats) {
             if (!MATERIAL_TPL[mat.name]) {
@@ -305,10 +347,26 @@ export class MIX extends plugin {
             e.reply(`材料不足！合成${pillName}×${want}需要 ${needStr}（你持有：${haveStr}）\n先去虚境秘境收集药材吧~`)
             return true
         }
+        /* 灵石合成费(仅部分配方有): 先校验, 扣完材料再扣灵石 */
+        let homejson = null
+        let homeFile = ''
+        if (totalMoney > 0) {
+            homeFile = `${e.group_id}.json`
+            homejson = await xujing_data.getQQYUserHome(id, null, homeFile, false)
+            const haveMoney = Number(homejson[id] && homejson[id].money) || 0
+            if (haveMoney < totalMoney) {
+                e.reply(`灵石不足！合成${pillName}×${want}需要 ${totalMoney} 灵石（你持有 ${haveMoney}）~`)
+                return true
+            }
+        }
         /* 扣材料 + 加丹药 */
         for (const mat of recipe.mats) consumeItem(id, mat.name, mat.count * want, null, e.group_id)
+        if (totalMoney > 0) {
+            homejson[id].money = (Number(homejson[id].money) || 0) - totalMoney
+            await xujing_data.getQQYUserHome(id, homejson, homeFile, true)
+        }
         addItem(id, pillName, want, null, e.group_id)
-        e.reply(`🧪 合成成功！消耗 ${recipe.mats.map(mat => `${QUALITY[MATERIAL_TPL[mat.name].quality].icon}${mat.name}×${mat.count * want}`).join(' + ')}，获得 ${ITEM_TPL[pillName].icon}${pillName}×${want}（${ITEM_TPL[pillName].desc}）`)
+        e.reply(`🧪 合成成功！消耗 ${recipe.mats.map(mat => `${QUALITY[MATERIAL_TPL[mat.name].quality].icon}${mat.name}×${mat.count * want}`).join(' + ')}${totalMoney > 0 ? ` + 💰${totalMoney}灵石` : ''}，获得 ${ITEM_TPL[pillName].icon}${pillName}×${want}（${ITEM_TPL[pillName].desc}）`)
         return true
     }
 

@@ -12,8 +12,8 @@ import { guardActionLocked } from '../../components/action_lock.js'
 import { resolvePuppetGift, resolveWanhunGift, transferArtifact } from '../../components/artifact_gift.js'
 import { raidHappened } from '../../components/raid_data.js'
 /*修仙世界: 赠送灵石纳入动态税率*/  
-import { REGIONS, getWorld, getLoc, getRate, addTax, saveWorld, bossOf, regionNameOf, taxFor } from '../../components/world_data.js'
-import { logPlayerTrade, getNick, playerSectName, getFake, saveFake } from '../../components/fake_data.js'
+import { REGIONS, getWorld, getLoc, getRate, addTax, saveWorld, bossOf, regionNameOf, taxFor, levelNameOf } from '../../components/world_data.js'
+import { logPlayerTrade, getNick, playerSectName, getFake, saveFake, fakeEatEmperorPill, logEvent } from '../../components/fake_data.js'
 
 const AUCTION_DIR = `${Save_Path}/auction`//拍卖行数据目录
 const DEFAULT_DURATION = 3//默认上架时长(小时)
@@ -879,10 +879,22 @@ export class trade extends plugin {
     if (!p.bag.items) p.bag.items = {}
     /* 使用统一背包写入，兼容伪玩家旧数字档与当前 { count } 格式，避免对象直接与数量相加变成 [object Object] */
     addItemToBag(p.bag, name, count, null, false)
+    /* 仙帝丹: 伪玩家拿到后当场自动服用(低于仙帝10重); 已达标则留在包中 */
+    let emperorTxt = ''
+    if (name === '仙帝丹') {
+      const ev = fakeEatEmperorPill(f, p, Date.now())
+      const left = p.bag.items[name] ? (Number(p.bag.items[name].count) || 0) : 0
+      if (ev) {
+        try { logEvent(f, ev.type, ev.txt, Date.now(), { ...ev }) } catch (err) { }
+        emperorTxt = `\n👑 ${pname} 当场服下1颗，已至${levelNameOf(p.level)}${left > 0 ? `（剩余 ${left} 颗留在包中）` : ''}`
+      } else {
+        emperorTxt = `\n👑 ${pname} 已是${levelNameOf(p.level)}，丹药留在包中未服用`
+      }
+    }
     saveFake(f, gid)
     const myNick = e.nickname || String(e.user_id)
     try { logPlayerTrade(gid, `【赠礼】散修 ${myNick} 赠送 ${itemIcon(name)}${name} ×${count} 给伪玩家 ${pname}`) } catch (err) { }
-    e.reply(`✅ 已赠送 ${itemIcon(name)}${name} ×${count} 给伪玩家 ${pname}`)
+    e.reply(`✅ 已赠送 ${itemIcon(name)}${name} ×${count} 给伪玩家 ${pname}${emperorTxt}`)
     return true
   }
 

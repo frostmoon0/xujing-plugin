@@ -2,6 +2,7 @@ import { getBag, getEquipLevelRand, getTotalAttr, getGongfaFx, isDingxianyouEqui
 import { getPuppetBattleBuff, getPuppetPower } from './puppet_data.js'
 import { getWanhunBattleBuff, getWanhunSoulPower } from './wanhun_data.js'
 import { getActivePetPower } from './pet_data.js'
+import { REALM_MAX_LEVEL } from './realm_cap.js'
 
 /**
  * 全游戏统一绝对战力体系：决斗、幻境试炼、守卫/伏击、宗门战斗必须复用本文件的战力计算，禁止各玩法另起一套战力。
@@ -16,7 +17,8 @@ export const MAX_WIN_RATE = 100
  * @returns {number}
  */
 export function realmPower (level) {
-  level = Number(level) || 0
+  /* 境界硬上限: 仙帝第499重(567级); 超出的旧档/异常档不再继续涨战力 */
+  level = Math.min(Number(level) || 0, REALM_MAX_LEVEL)
   return ((level % 4) + Math.floor(level / 4) * 6) * POWER_PER_LEVEL
 }
 
