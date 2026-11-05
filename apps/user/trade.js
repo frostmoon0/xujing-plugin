@@ -1,3 +1,4 @@
+import { withGameLock } from '../../components/game_lock.js'
 // 交易系统: 赠送道具/灵石 + 拍卖行(上架/下架/出价/一口价/过期结算)
 // 规范: 长文本/列表展示一律渲染图片,短提示才直接 e.reply
 import { BotApi, AlemonApi, plugin } from '../../model/api/api.js'
@@ -378,6 +379,10 @@ export class trade extends plugin {
 
   /** #虚境拍卖行: 查看本群拍卖(渲染图片) */
   async auctionList (e) {
+    return withGameLock(e.group_id, () => this.auctionListUnlocked(e))
+  }
+
+  async auctionListUnlocked (e) {
     if (!e.group_id) { e.reply('请在群内使用~'); return true }
     const gid = e.group_id
     const data = loadAuction(gid)
@@ -427,7 +432,11 @@ export class trade extends plugin {
   }
 
   /** 上架落库: 校验在架上限 → 扣除背包 → 写拍卖数据(单属性直发 / 多属性选件共用), 返回 {ok, msg} */
-  async commitList (gid, uid, { name, count, startPrice, buyNow, duration, attr }) {
+  async commitList (gid, uid, spec) {
+    return withGameLock(gid, () => this.commitListUnlocked(gid, uid, spec))
+  }
+
+  async commitListUnlocked (gid, uid, { name, count, startPrice, buyNow, duration, attr }) {
     const data = loadAuction(gid)
     await this.settleExpired(gid, data)
     const myOnSale = Object.keys(data).filter(k => k !== '_seq' && String(data[k].seller) === String(uid)).length
@@ -547,6 +556,10 @@ export class trade extends plugin {
 
   /** #虚境下架 编号 */
   async delist (e) {
+    return withGameLock(e.group_id, () => this.delistUnlocked(e))
+  }
+
+  async delistUnlocked (e) {
     if (!e.group_id) { e.reply('请在群内使用~'); return true }
     const gid = e.group_id
     const data = loadAuction(gid)
@@ -576,6 +589,10 @@ export class trade extends plugin {
 
   /** #虚境出价 编号 金额 */
   async bid (e) {
+    return withGameLock(e.group_id, () => this.bidUnlocked(e))
+  }
+
+  async bidUnlocked (e) {
     if (!e.group_id) { e.reply('请在群内使用~'); return true }
     const gid = e.group_id
     const data = loadAuction(gid)
@@ -628,6 +645,10 @@ export class trade extends plugin {
 
   /** #虚境一口价 编号: 直接买下 */
   async buyNow (e) {
+    return withGameLock(e.group_id, () => this.buyNowUnlocked(e))
+  }
+
+  async buyNowUnlocked (e) {
     if (!e.group_id) { e.reply('请在群内使用~'); return true }
     const gid = e.group_id
     const data = loadAuction(gid)

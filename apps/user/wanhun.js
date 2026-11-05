@@ -4,6 +4,7 @@ import { getWorld, getLoc } from '../../components/world_data.js'
 import { getBag, rainbowAtk, itemIcon } from '../../components/equip_data.js'
 import { getFake, getNick } from '../../components/fake_data.js'
 import { forceLock, isCurrent, unlock } from '../../components/interact.js'
+import { guardActionLocked } from '../../components/action_lock.js'
 import { textToImg } from '../../components/common-lib/reply-img.js'
 
 function notifyAt (gid, uid, text) {
@@ -257,6 +258,7 @@ export class wanhun extends plugin {
     const n = Number(String(e.msg || '').replace(/[^0-9]/g, ''))
     const cave = Wanhun.getCave(e.user_id, e.group_id)
     if (cave.cave?.inCave && cave.cave.pending && !cave.lostInCave) {
+      if (await guardActionLocked(e, undefined, { skipCave: true })) return true
       const p = cave.cave.pending
       if (n !== 1 && n !== 2) return reply(e, p.type === 'ghost' ? '遇到幽魂时，请回复1吸收或回复2放走。' : '万魂窟遇到阴魂时，请回复1战斗或回复2撤退。')
       if (p.type === 'ghost') {
@@ -280,6 +282,7 @@ export class wanhun extends plugin {
       if (!(await isCurrent(e.group_id, e.user_id, 'wanhun-craft'))) {
         return false
       }
+      if (await guardActionLocked(e, undefined, { skipCave: true })) return true
       if (n < 1 || n > st.list.length) return reply(e, `请输入 1~${st.list.length} 之间的数字`)
       const weapon = st.list[n - 1]
       pending.delete(k)
@@ -290,6 +293,7 @@ export class wanhun extends plugin {
     if (!(await isCurrent(e.group_id, e.user_id, 'wanhun-shop'))) {
       return false
     }
+    if (await guardActionLocked(e, undefined, { skipCave: true })) return true
     if (n < 1 || n > 12) return reply(e, '请输入1到12之间的兑换编号。')
     const ret = await Wanhun.buyShop(e.user_id, e.group_id, n)
     /* 购买成功或失败后都保留货单待选状态，玩家可连续回复数字兑换；每次操作重新续5分钟。 */

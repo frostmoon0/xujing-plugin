@@ -1,3 +1,4 @@
+import { withGameLock } from './game_lock.js'
 import fs from 'fs'
 import path from 'path'
 import { Save_Path } from './plugin.js'
@@ -35,7 +36,6 @@ const UPGRADE_SCALE = {
   9: 16,
   10: 18
 }
-const queues = new Map()
 
 function ensureDir () {
   if (!fs.existsSync(SAVE_DIR)) fs.mkdirSync(SAVE_DIR, { recursive: true })
@@ -96,17 +96,7 @@ function stateOf (gid, uid, create = false) {
   return { data, state: fresh }
 }
 
-function withLock (uid, gid, fn) {
-  /* 同一群共用一份阵法存档，群级串行可避免多人同时写入互相覆盖。 */
-  const key = String(gid)
-  const previous = queues.get(key) || Promise.resolve()
-  const current = previous.catch(() => {}).then(fn)
-  queues.set(key, current)
-  current.finally(() => {
-    if (queues.get(key) === current) queues.delete(key)
-  }).catch(() => {})
-  return current
-}
+function withLock (uid, gid, fn) { return withGameLock(gid, fn) }
 
 function countOf (bag, name) {
   return Number(bag.items?.[name]?.count) || 0

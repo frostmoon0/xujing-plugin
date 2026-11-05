@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
+import { rotateTrialPeriods } from '../components/trial_periods.js'
 
 // 执行真实指令方法；将 Redis、存档、转发和战斗依赖替换为内存实现。
 const source = fs.readFileSync(new URL('../apps/user/trial.js', import.meta.url), 'utf8')
@@ -25,7 +26,7 @@ for (const [gid, petPower] of [['pet-group', 1000], ['other-group', 0]]) {
       },
       readTrial: () => ({ groups: {}, weekGroups: {} }),
       saveTrial: data => { saved = data },
-      getNick: () => '测试玩家', getWeekStart: () => '2026-11-02',
+      getNick: () => '测试玩家', getWeekStart: () => '2026-10-31', rotateTrialPeriods,
       fightDesc: () => '', Config: { getforwardMsg: () => {} }, console
     })
     await run({ group_id: gid, user_id: 'player', reply: msg => assert.fail(String(msg)) })

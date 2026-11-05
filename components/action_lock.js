@@ -25,6 +25,7 @@ export async function isPlayerActionLocked (gid, uid, opts = {}) {
   uid = String(uid || '')
   if (!gid || !uid) return false
   const battleFree = !!opts.skipBattle
+  // skipToken 仅供持令旅行，skipCave 仅供窟内操作；均不豁免天牢/被俘/失魂等惩罚。
   try {
     /* 遗蜕秘境中(公开/专属, 屏障/探索阶段): 不能分心逛街/跨区/换队等外部动作 */
     if (!battleFree && !opts.skipRealm && playerInRealm(gid, uid)) return true
@@ -41,9 +42,9 @@ export async function isPlayerActionLocked (gid, uid, opts = {}) {
     /* 持续讨伐世界Boss(登仙令持令仍锁定) */
     const bs = getBoss(gid)
     if (!battleFree && bs && bs.auto && bs.auto[uid]) return true
-    if (bs && bs.token && bs.token.holder && String(bs.token.holder) === uid && bs.token.end > Date.now()) return true
+    if (!opts.skipToken && bs && bs.token && bs.token.holder && String(bs.token.holder) === uid && bs.token.end > Date.now()) return true
     /* 万魂窟探索(失魂是惩罚, 仍锁) */
-    if (Wanhun.isLocked(uid, gid) || (!battleFree && Wanhun.inCave(uid, gid))) return true
+    if (Wanhun.isLocked(uid, gid) || (!battleFree && !opts.skipCave && Wanhun.inCave(uid, gid))) return true
     /* 界壁跨越中 */
     const mv = getMoving(getWorld(gid), uid)
     if (mv && mv.end > Date.now()) return true

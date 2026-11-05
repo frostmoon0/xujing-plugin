@@ -1,3 +1,4 @@
+import { withGameLock } from '../../components/game_lock.js'
 /* ============================================================
  * 洗劫藏宝阁(隐藏玩法) - 指令与流程
  * 触发: #洗劫藏宝阁 / #夜袭宝阁 → 风险告知图 → #确认洗劫 → #洗劫 <1-20> 选档
@@ -416,7 +417,10 @@ async function raidTick () {
     const raids = await allRaids()
     const now = Date.now()
     /* 洗劫/逃亡阶段推进: 所有事件(战报/被抓/逃亡/围剿)累计入队, 5分钟统一渲染一张图 */
-    for (const { gid, uid, st } of raids) {
+    for (const { gid, uid } of raids) {
+      await withGameLock(gid, async () => {
+      const st = await getRaid(gid, uid)
+      if (!st) return
       const uname = await getNick(gid, uid)
       if (st.phase === 'raid') {
         /* 洗劫阶段推进 */
@@ -453,7 +457,7 @@ async function raidTick () {
             logPlayerEvent(gid, `【被捕】散修 ${uname} 洗劫藏宝阁被守卫抓获，押入天牢`)
             pushBcast(gid, `⛓️ 洗劫被抓！\n${st.guardNames.join('、')} 追上了 ${uname}，将其拿下！\n${msgs.join('\n')}\n（洗劫所得尽数散落）`)
             notifyAt(gid, uid, `⛓️ 洗劫被抓！\n${st.guardNames.join('、')} 追上了你，将你拿下！\n${msgs.join('\n')}\n（洗劫所得尽数散落）`)
-            continue
+            return
           }
           st.lastBcast = now
           await setRaid(gid, uid, st)
@@ -488,6 +492,7 @@ async function raidTick () {
           }
         }
       }
+      })
     }
     /* 统一冲刷: 距上次冲刷满 5 分钟才合并渲染一张图发送(首次事件立即发) */
     for (const gid of Object.keys(bcastPool)) {

@@ -1,3 +1,5 @@
+import { caveNight, syncCaveNightClock } from './cave_clock.js'
+import { withGameLock } from './game_lock.js'
 import fs from 'fs'
 import path from 'path'
 import { Plugin_Name, Save_Path } from './plugin.js'
@@ -28,7 +30,7 @@ const SOUL_TRAIN_COST = 50
 const SOUL_TRAIN_ITEM = '无主幽魂'
 /* 按万魂幡阶位允许的副魂数: 5阶1个 / 7阶2个 / 9阶3个 */
 const DEPUTY_MAX_BY_RANK = [0, 0, 0, 0, 0, 1, 1, 2, 2, 3]
-const GHOST_ENCOUNTER_CHANCE = 0.05
+const GHOST_ENCOUNTER_CHANCE = 0.08
 const UPGRADE = [
   null,
   { souls: 30, karma: 5 },
@@ -462,7 +464,8 @@ export const Wanhun = {
   },
   /* 升级到下一阶所需材料文本(含图标), 供路线展示, 与升级实际消耗同一来源 */
   upgradeCostText (rank) { return fmtUpgradeCost(rank) },
-  async upgrade (uid, gid = 'global') {
+  async upgrade (uid, gid = 'global') { return withGameLock(gid, () => this.upgradeUnlocked(uid, gid)) },
+  async upgradeUnlocked (uid, gid = 'global') {
     const bag = getBag(uid, gid)
     const artifact = artifactOf(bag)
     const name = artifactName(artifact)
@@ -494,7 +497,8 @@ export const Wanhun = {
     const u = userState(readGroup(gid), uid)
     return !!(u.cave && u.cave.inCave)
   },
-  async enterCave (uid, gid = 'global') {
+  async enterCave (uid, gid = 'global') { return withGameLock(gid, () => this.enterCaveUnlocked(uid, gid)) },
+  async enterCaveUnlocked (uid, gid = 'global') {
     const data = readGroup(gid)
     const u = userState(data, uid)
     const w = getWorld(gid)
@@ -506,6 +510,7 @@ export const Wanhun = {
     u.cave = {
       inCave: true,
       enteredAt,
+      nightClockAt: enteredAt,
       protectionUntil: protectedByStone ? enteredAt + 10 * 60 * 1000 : enteredAt,
       nextEncounterAt: enteredAt + randomInt(30000, 120000),
       nextRealmDropAt: protectedByStone ? 0 : enteredAt + 60 * 1000,
@@ -522,7 +527,8 @@ export const Wanhun = {
   /* 默认推送: 无论后台定时器还是命令路径(万魂幡面板/窟内状态/战斗撤退)生成遭遇,
      都要把阴魂/幽魂通知发给玩家——否则玩家在到点瞬间查询状态会静默生成遭遇,
      后台定时器看到 pending 已存在就跳过, 推送通知永远丢失 */
-  async tickCave (uid, gid = 'global', notify = (text) => notifyPlayer(gid, uid, text)) {
+  async tickCave (uid, gid = 'global', notify = (text) => notifyPlayer(gid, uid, text)) { return withGameLock(gid, () => this.tickCaveUnlocked(uid, gid, notify)) },
+  async tickCaveUnlocked (uid, gid = 'global', notify = (text) => notifyPlayer(gid, uid, text)) {
     const data = readGroup(gid)
     const u = userState(data, uid)
     const t = now()
@@ -538,6 +544,11 @@ export const Wanhun = {
       if (changed) saveGroup(gid, data)
       return { state: u, changed }
     }
+    if (caveNight(t)) {
+      if (changed) saveGroup(gid, data)
+      return { state: u, changed }
+    }
+    changed = syncCaveNightClock(cave, t) || changed
     if (!cave.nextRealmDropAt) cave.nextRealmDropAt = 0
     if (!cave.pending && cave.nextEncounterAt && cave.nextEncounterAt <= t) {
       const minutes = Math.floor((t - cave.enteredAt) / 60000)
@@ -599,7 +610,8 @@ export const Wanhun = {
     if (changed) saveGroup(gid, data)
     return { state: u, changed }
   },
-  async dropOneRealm (uid, gid, user = null) {
+  async dropOneRealm (uid, gid, user = null) { return withGameLock(gid, () => this.dropOneRealmUnlocked(uid, gid, user)) },
+  async dropOneRealmUnlocked (uid, gid, user = null) {
     const u = user || userState(readGroup(gid), uid)
     const battle = await xujing_data.getQQYUserBattle(uid, null, false, `${gid}.json`)
     const p = battle[uid]
@@ -612,7 +624,8 @@ export const Wanhun = {
     if (!u.realmDrop.nextRecoverAt) u.realmDrop.nextRecoverAt = now() + 60 * 60 * 1000
     return old !== p.level
   },
-  async recoverOneRealm (uid, gid, user) {
+  async recoverOneRealm (uid, gid, user) { return withGameLock(gid, () => this.recoverOneRealmUnlocked(uid, gid, user)) },
+  async recoverOneRealmUnlocked (uid, gid, user) {
     if (!user.realmDrop.count || !user.realmDrop.nextRecoverAt || user.realmDrop.nextRecoverAt > now()) return false
     const battle = await xujing_data.getQQYUserBattle(uid, null, false, `${gid}.json`)
     const p = battle[uid]
@@ -641,7 +654,8 @@ export const Wanhun = {
     }
     return out
   },
-  async caveStatus (uid, gid = 'global') {
+  async caveStatus (uid, gid = 'global') { return withGameLock(gid, () => this.caveStatusUnlocked(uid, gid)) },
+  async caveStatusUnlocked (uid, gid = 'global') {
     const ret = await this.tickCave(uid, gid)
     const u = ret.state
     const cave = u.cave
@@ -659,7 +673,8 @@ export const Wanhun = {
     }
     return `万魂窟探索${minutes}分钟，魂石保护还剩${protect}分钟，下一次阴魂即将出现。使用 #退出万魂窟 离开。${realmText}`
   },
-  async resolveCave (uid, gid = 'global', action) {
+  async resolveCave (uid, gid = 'global', action) { return withGameLock(gid, () => this.resolveCaveUnlocked(uid, gid, action)) },
+  async resolveCaveUnlocked (uid, gid = 'global', action) {
     await this.tickCave(uid, gid)
     const data = readGroup(gid)
     const u = userState(data, uid)
@@ -815,7 +830,8 @@ export const Wanhun = {
     return { ok: true, msg: `第${i}个副魂培育成功！副魂当前为【${soulLevelNameOf(s.level)}】，魂魄${s.souls}。用 #喂养副魂${i} <数量> 喂养。` }
   },
   /* 喂魂自动晋升: 魂魄>=下一级门槛即升级(免突破), 但不能超过玩家境界 */
-  async feedMainSoul (uid, gid = 'global', amount = 0) {
+  async feedMainSoul (uid, gid = 'global', amount = 0) { return withGameLock(gid, () => this.feedMainSoulUnlocked(uid, gid, amount)) },
+  async feedMainSoulUnlocked (uid, gid = 'global', amount = 0) {
     const bag = getBag(uid, gid)
     const artifact = artifactOf(bag)
     const name = artifactName(artifact)
@@ -835,7 +851,8 @@ export const Wanhun = {
     saveBag(uid, bag, gid)
     return { ok: true, msg: `喂养主魂${fed}魂魄！主魂现在是【${soulLevelNameOf(s.level)}】，魂魄${s.souls}${raised ? `，连续提升${raised}个小境界！` : ''}。` }
   },
-  async feedDeputySoul (uid, gid = 'global', index = 1, amount = 0) {
+  async feedDeputySoul (uid, gid = 'global', index = 1, amount = 0) { return withGameLock(gid, () => this.feedDeputySoulUnlocked(uid, gid, index, amount)) },
+  async feedDeputySoulUnlocked (uid, gid = 'global', index = 1, amount = 0) {
     const bag = getBag(uid, gid)
     const artifact = artifactOf(bag)
     const name = artifactName(artifact)
@@ -950,6 +967,7 @@ export const Wanhun = {
       `· 进入会优先消耗1颗${itemIcon('魂石')}魂石，获得10分钟保护；保护到期会每10分钟自动续扣1颗魂石。`,
       `· 没有${itemIcon('魂石')}魂石也能强行进入，但1分钟后开始每分钟临时掉1个境界；每个临时掉落的境界约1小时恢复1个，补充魂石后停止继续掉境界。`,
       '· 进入后每30秒~2分钟随机遇到阴魂或无主幽魂。阴魂出现时回复1战斗、回复2撤退，或使用 #万魂窟战 / #万魂窟撤退；遭遇未处理前不能退出。',
+      '· 每次遭遇有8%概率出现无主幽魂，回复1吸收获得1个。凌晨1~6点暂停玩家窟内遭遇、魂石保护和临时掉境界计时，6点继续。',
       '· 阴魂越晚出现越强；战斗胜利获得随机掉落，撤退成功安全离开但没有战利品。拥有定仙游时，阴魂撤退成功率为100%。',
       '· #万魂窟状态：查看探索时长、当前阴魂、魂石保护、临时掉境界和恢复时间；#万魂窟总览：查看本群所有玩家/伪玩家在窟内的状态与本次收获。#退出万魂窟：处理完遭遇后离开。',
       '',
@@ -1032,7 +1050,8 @@ export const Wanhun = {
     const name = pick(['玄阴玉', '镇魂晶', '血煞髓', '云裳仙蕊', '灵石'])
     return { name, kind: name === '灵石' ? 'money' : 'material', count: name === '灵石' ? randomInt(800000, 1800000) : randomInt(1, 5), reward: '还魂丹', used: false }
   },
-  async buyShop (uid, gid, index) {
+  async buyShop (uid, gid, index) { return withGameLock(gid, () => this.buyShopUnlocked(uid, gid, index)) },
+  async buyShopUnlocked (uid, gid, index) {
     const shop = this.shop(uid, gid)
     const slot = shop.demands[Number(index) - 1]
     if (!slot) return { ok: false, msg: '兑换编号应为1到12。' }
@@ -1088,6 +1107,7 @@ if (!global.__xujingWanhunTick__) {
         ensureDir()
         for (const file of fs.readdirSync(SAVE_DIR).filter(n => /^wanhun_.+\.json$/.test(n))) {
           const gid = file.replace(/^wanhun_|\.json$/g, '')
+          await withGameLock(gid, async () => {
           const data = readGroup(gid)
           Wanhun.tickShops(gid)
           for (const uid of Object.keys(data.users || {})) {
@@ -1097,6 +1117,7 @@ if (!global.__xujingWanhunTick__) {
               await Wanhun.tickCave(uid, gid, text => notifyPlayer(gid, uid, text))
             } catch (err) { }
           }
+          })
         }
       } catch (err) { } finally {
         global.__xujingWanhunTickRunning__ = false

@@ -1,3 +1,4 @@
+import { withGameLock } from '../../components/game_lock.js'
 //自动挂机:沉默满N小时(默认1天)再发言,自动结算挂机灵石(每天最多2400)+挂机灵力(每天最多300)
 //不足N小时只记录时间不提示;结算按挂机时长比例;灵力溢出走累积池(最多200),再多消散
 //使用全局消息监听 Bot.on('message') 实现,与插件规则系统完全独立,不会拦截任何其他指令
@@ -70,7 +71,8 @@ function bestBonus(housejson, homejson, xqjson, uid, key) {
 
 //结算挂机收益(自动/手动共用)
 //返回 { settled:true, finalGet, workBonus, silenceSec, hours, money } / { settled:false, cdSec, first } / null
-async function settleAfk(gid, uid) {
+async function settleAfk(gid, uid) { return withGameLock(gid, () => settleAfkUnlocked(gid, uid)) }
+async function settleAfkUnlocked(gid, uid) {
     const cfg = await getAfkCfg()
     if (cfg.notice !== 'T') return null
     const now = Date.now()

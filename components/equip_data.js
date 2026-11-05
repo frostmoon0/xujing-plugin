@@ -1045,6 +1045,18 @@ export function addItem(user_id, name, count = 1, attr = null, gid = 'global') {
   return { bag, changed }
 }
 
+/** 奖励和领取记录写进同一个背包文件，结算重试不会重复发放。 */
+export function grantItemOnce (uid, name, count, gid, receipt) {
+  const bag = getBag(uid, gid)
+  bag.rewardReceipts ||= {}
+  if (bag.rewardReceipts[receipt]) { saveBag(uid, bag, gid); return false }
+  if (!EQUIP_TPL[name] && !ITEM_TPL[name] && !MATERIAL_TPL[name] && !GONGFA_TPL[name]) throw new Error(`未知奖励：${name}`)
+  addItemToBag(bag, name, count, null, true)
+  bag.rewardReceipts[receipt] = Date.now()
+  saveBag(uid, bag, gid)
+  return true
+}
+
 /** 从已加载的背包消耗物品,成功返回true; 调用方负责保存 */
 export function consumeBagItem (bag, name, count = 1, attr = null) {
   count = Math.floor(Number(count) || 0)
@@ -1078,6 +1090,16 @@ export function consumeBagItem (bag, name, count = 1, attr = null) {
     it.count -= count
     if (it.count <= 0) delete bag.items[name]
   }
+  return true
+}
+
+/** 整批材料先在副本扣除；任一种不足时不改变原背包。调用方负责保存。 */
+export function consumeBagItems (bag, costs) {
+  const next = { items: structuredClone(bag.items || {}) }
+  for (const [name, count] of Object.entries(costs || {})) {
+    if (!consumeBagItem(next, name, count)) return false
+  }
+  bag.items = next.items
   return true
 }
 

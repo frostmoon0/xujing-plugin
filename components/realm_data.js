@@ -1,3 +1,4 @@
+import { withGameLock } from './game_lock.js'
 import { warActorOwner } from './sect/war_state.js'
 /* ============================================================
  * 遗蜕秘境 - 数据与核心逻辑
@@ -331,7 +332,8 @@ function saveRealmState (st, gid) {
 
 async function sleep (ms) { return new Promise(resolve => setTimeout(resolve, ms)) }
 /** 进程内串行 + Redis NX 锁, 防止同一群的两个动作互相覆盖 */
-export async function withRealmLock (gid, fn) {
+export function withRealmLock (gid, fn) { return withGameLock(gid, () => withRealmLockUnlocked(gid, fn)) }
+async function withRealmLockUnlocked (gid, fn) {
   const g = String(gid || '')
   const previous = localLocks.get(g) || Promise.resolve()
   let releaseLocal
@@ -1211,7 +1213,7 @@ export async function resolveNode (st, gid, team, node, idx, cfg) {
 }
 /** 灵材遗藏: 奖励始终使用本秘境固定灵材 */
 function grantScroll (st, team) {
-  const reward = rollReward(st, st.diff, Math.random, { special: true })
+  const reward = rollReward(st, st.diff, Math.random, { special: true, fake: team.kind === 'fake' })
   addPoolItem(team, reward)
   credit(team, reward.quality)
   return reward
@@ -1492,7 +1494,7 @@ export function applyEvent (st, gid, ev) {
   const msgs = []; const pushes = []; const name = ev.name
   if (ev.kind === 'treasure') {
     for (const t of Object.values(st.teams)) if (!t.dead && t.members.length) {
-      const r = rollRewardList(st, st.diff, Math.random, { special: true })
+      const r = rollRewardList(st, st.diff, Math.random, { special: true, fake: t.kind === 'fake' })
       const got = []
       for (const item of r) got.push(addToPool(st, t, item))
       msgs.push(`【${t.name}】获得秘藏：${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}。`)
@@ -1509,7 +1511,7 @@ export function applyEvent (st, gid, ev) {
     }
   } else if (name === '灵脉暴走' || name === '主棺异动' || name === '飞升残影' || name === '挖出禁忌' || name === '仙兵共鸣') {
     for (const t of Object.values(st.teams)) if (!t.dead && t.members.length) {
-      const r = rollRewardList(st, st.diff, Math.random, { special: true })
+      const r = rollRewardList(st, st.diff, Math.random, { special: true, fake: t.kind === 'fake' })
       const got = []
       for (const item of r) got.push(addToPool(st, t, item))
       msgs.push(`【${t.name}】在异变中获得${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}。`)

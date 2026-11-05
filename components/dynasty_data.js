@@ -1,3 +1,4 @@
+import { withGameLock } from './game_lock.js'
 /* ============================================================
  * 简月王朝(凡人王朝) - 数据与核心逻辑
  * 特殊大区: 不可占领/攻打; 9 座凡间城(含皇城)只产云裳仙蕊
@@ -168,21 +169,9 @@ export function saveDynasty (d) {
 
 /* ---------- 读阵锁内存缓存(供 api.js 读阵拦截) ---------- */
 const activeReads = new Map() // key=`gid:uid` → { city, end }
-const dynastyLocks = new Map() // key=gid → Promise, 同一群的布阵/阻止/结算串行
 const readKey = (gid, uid) => `${String(gid)}:${String(uid)}`
 
-async function withDynastyLock (gid, fn) {
-  const g = String(gid)
-  const previous = dynastyLocks.get(g) || Promise.resolve()
-  let release
-  const current = new Promise(resolve => { release = resolve })
-  dynastyLocks.set(g, current)
-  await previous
-  try { return await fn() } finally {
-    if (dynastyLocks.get(g) === current) dynastyLocks.delete(g)
-    release()
-  }
-}
+function withDynastyLock (gid, fn) { return withGameLock(gid, fn) }
 
 function trackRead (gid, city, read) { activeReads.set(readKey(gid, read.uid), { city, end: read.end }) }
 function untrackRead (gid, uid) { activeReads.delete(readKey(gid, uid)) }

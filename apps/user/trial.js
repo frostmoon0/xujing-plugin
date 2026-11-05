@@ -1,5 +1,8 @@
-// 幻境试炼: 挑战幻境守卫比拼伤害输出,日榜+周榜(周一0点重置),记录每日最佳/本周累计
-// 每天0点向白名单群渲染发送排行榜图片(日榜+周榜),并重置数据
+import { trialWeek, rotateTrialPeriods, settleTrialPeriods } from '../../components/trial_periods.js'
+import { writeJsonAtomic } from '../../components/json_store.js'
+import { withGameLock } from '../../components/game_lock.js'
+// 幻境试炼: 挑战幻境守卫比拼伤害输出,日榜+周榜(周六零点换期，00:05发奖),记录每日最佳/本周累计
+// 日榜按日期归档；每天00:05结算，周榜周六换期结算。
 // 规范: 长文本回复一律用合并转发(forward)包裹展示,避免刷屏;短提示才直接 e.reply
 import { BotApi, plugin } from '../../model/api/api.js'
 import fs from 'fs'
@@ -11,7 +14,7 @@ import puppeteer from '../../../../lib/puppeteer/puppeteer.js'
 import { Plugin_Name, Plugin_Path, Save_Path } from '../../components/plugin.js'
 import xujing_data from '../../components/xujing_data.js'
 import Config from '../../model/Config.js'
-import { getBag, addItem } from '../../components/equip_data.js'
+import { getBag, grantItemOnce } from '../../components/equip_data.js'
 import { calcDamage, calcCombatPower, realmPower, getBuffs, fightDesc } from '../../components/fight.js'
 import { getSubThreshold } from './duel_exercise.js'
 
@@ -59,16 +62,19 @@ function readTrial() {
     if (!fs.existsSync(trialPath())) {
         fs.writeFileSync(trialPath(), JSON.stringify({ date: '', groups: {}, week: '', weekGroups: {}, lastGroups: {} }))
     }
-    try {
-        const data = JSON.parse(fs.readFileSync(trialPath(), 'utf8'))
-        return data && typeof data === 'object' ? data : { date: '', groups: {}, week: '', weekGroups: {}, lastGroups: {} }
-    } catch (err) {
+    let data
+    try { data = JSON.parse(fs.readFileSync(trialPath(), 'utf8')) } catch (err) {
         return { date: '', groups: {}, week: '', weekGroups: {}, lastGroups: {} }
     }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return { date: '', groups: {}, week: '', weekGroups: {}, lastGroups: {} }
+    const before = JSON.stringify(data)
+    rotateTrialPeriods(data)
+    if (JSON.stringify(data) !== before) writeJsonAtomic(trialPath(), data)
+    return data
 }
 function saveTrial(data) {
     if (!fs.existsSync(dirpath)) fs.mkdirSync(dirpath, { recursive: true })
-    fs.writeFileSync(trialPath(), JSON.stringify(data, null, '\t'))
+    writeJsonAtomic(trialPath(), data)
 }
 
 /** 读取某用户境界 */
@@ -94,13 +100,8 @@ function getGroupRank(data, gid, n = 10) {
         .slice(0, n)
 }
 
-/** 本周起始日(周一,YYYY-MM-DD) */
-function getWeekStart() {
-    const d = new Date()
-    const diff = (d.getDay() + 6) % 7//距周一的天数(周日=6)
-    d.setDate(d.getDate() - diff)
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
+/** 周榜周期从周六零点开始。 */
+function getWeekStart () { return trialWeek() }
 
 /** 获取某群周榜(按本周总输出降序,取前N) */
 function getGroupWeekRank(data, gid, n = 10) {
@@ -261,10 +262,8 @@ export class trial extends plugin {
             }
             // 记录当日最佳(每群独立排名)
             const data = readTrial()
-            if (data.date !== today) {
-                data.date = today
-                data.groups = {}
-            }
+            const weekKey = getWeekStart()
+            rotateTrialPeriods(data, today, weekKey)
             data.groups[gid] = data.groups[gid] || {}
             const uid = String(user_id)
             const prev = data.groups[gid][uid]
@@ -278,12 +277,7 @@ export class trial extends plugin {
                     time: moment().format('HH:mm:ss')
                 }
             }
-            // 记录本周累计(每群独立周榜,周一0点重置)
-            const weekKey = getWeekStart()
-            if (data.week !== weekKey) {
-                data.week = weekKey
-                data.weekGroups = {}
-            }
+            // 本期累计；上一期成绩由 rotateTrialPeriods 归档，等待发奖。
             data.weekGroups = data.weekGroups || {}
             data.weekGroups[gid] = data.weekGroups[gid] || {}
             const wu = data.weekGroups[gid][uid]
@@ -449,83 +443,30 @@ schedule.scheduleJob('0 0 23 * * *', async () => {
     }
 })
 
-// 每天0点05分: 结算幻境日奖励(前5名灵宝盒 5/4/3/2/1 + 所有参与者1颗修为丹),提示幻境已重置并重置数据
-schedule.scheduleJob('0 5 0 * * *', async () => {
-    try {
-        const cfg = await getTrialCfg()
-        if (cfg.notice !== 'T') return
-        const data = readTrial()
-        const today = moment().format('YYYY-MM-DD')
-        // 注意: 结算的是"最近一次挑战日"(昨天)的榜单,这里不能清空 data.groups,否则奖励永远发不出去
-        // (data.date 是昨天 → 结算昨天的数据; 结算完下面 saveTrial 再重置为空榜)
-        // 排名奖励: 第1名5个, 2~5名递减(4/3/2/1), 第6名起无排名奖励
-        const counts = [5, 4, 3, 2, 1]
-        for (const gid of cfg.groups) {
-            try {
-                const rank = getGroupRank(data, gid, 5)
-                if (!rank.length) continue
-                rank.forEach(([uid, info], i) => {
-                    const n = counts[i] || 0
-                    if (n > 0) addItem(uid, '灵宝盒', n, null, gid)
-                })
-                // 所有参加试炼的用户各得1颗修为丹
-                const participants = Object.keys((data.groups && data.groups[gid]) || {})
-                for (const uid of participants) {
-                    addItem(uid, '修为丹', 1, null, gid)
-                }
-                await Bot.pickGroup(gid).sendMsg('🌟 幻境已重置！')
-            } catch (err) { console.log(`[幻境试炼]群${gid}结算失败:`, err.message) }
-        }
-        // 重置: 日榜清空; 跨周则周榜也清空(不跨周保留本周累计)
-        const weekKey = getWeekStart()
-        const weekChanged = data.week !== weekKey
-        saveTrial({
-            date: today,
-            groups: {},
-            week: weekKey,
-            weekGroups: weekChanged ? {} : (data.weekGroups || {}),
-            lastGroups: {}
-        })
-        console.log('[幻境试炼]0点结算完成')
-    } catch (err) {
-        console.log('[幻境试炼]0点结算失败:', err.message)
+/** 先同步完成读档、发奖和保存；通知在保存后发送，避免等待网络时覆盖新榜单。 */
+async function settleStoredTrials (options = {}) {
+    const cfg = await getTrialCfg()
+    if (cfg.notice !== 'T') return
+    const notices = []
+    for (const gid of cfg.groups) {
+        try {
+            const batch = await withGameLock(gid, () => {
+                // 排队后重新读全局榜单；锁内不等待网络，不覆盖其他群刚提交的成绩。
+                const data = readTrial()
+                try {
+                    return settleTrialPeriods(data, [gid], (g, uid, name, count, receipt) => {
+                        grantItemOnce(uid, name, count, g, receipt)
+                    }, options)
+                } finally { saveTrial(data) }
+            })
+            notices.push(...batch)
+        } catch (err) { console.log(`[幻境试炼]群${gid}发奖失败，保留待结算记录:`, err.message) }
     }
-})
+    for (const n of notices) {
+        try { await Bot.pickGroup(n.gid).sendMsg(n.kind === 'daily' ? '🌟 幻境日榜奖励已发放。' : '🌟 幻境周榜奖励已发放。') } catch (err) { console.log('[幻境试炼]结算通知失败:', err.message) }
+    }
+}
 
-// 每周六0点05分: 周结算(按本周累计输出发奖): 1=20 2=15 3=10 4~10=5 11名及以后=1灵宝盒
-schedule.scheduleJob('0 5 0 * * 6', async () => {
-    try {
-        const cfg = await getTrialCfg()
-        if (cfg.notice !== 'T') return
-        const data = readTrial()
-        const weekCount = (idx) => {
-            if (idx === 0) return 20
-            if (idx === 1) return 15
-            if (idx === 2) return 10
-            if (idx >= 3 && idx <= 9) return 5
-            return 1
-        }
-        for (const gid of cfg.groups) {
-            try {
-                const weekRank = getGroupWeekRank(data, gid, 999)//全部参与者
-                if (!weekRank.length) continue
-                weekRank.forEach(([uid, info], i) => {
-                    addItem(uid, '灵宝盒', weekCount(i), null, gid)
-                })
-                await Bot.pickGroup(gid).sendMsg('🌟 幻境周结算完成！')
-            } catch (err) { console.log(`[幻境试炼]群${gid}周结算失败:`, err.message) }
-        }
-        // 周结算完成: 清空本周累计,防止下周六重复结算(周一自动切换新周时也会清空)
-        const weekKey = getWeekStart()
-        saveTrial({
-            date: data.date,
-            groups: data.groups || {},
-            week: weekKey,
-            weekGroups: {},
-            lastGroups: data.lastGroups || {}
-        })
-        console.log('[幻境试炼]周六周结算完成')
-    } catch (err) {
-        console.log('[幻境试炼]周结算失败:', err.message)
-    }
-})
+// 每日补发已归档的日榜和周榜；周榜仅在周六进入下一期后可领取。
+schedule.scheduleJob('0 5 0 * * *', () => settleStoredTrials().catch(err => console.log('[幻境试炼]日结算失败:', err.message)))
+schedule.scheduleJob('0 5 0 * * 6', () => settleStoredTrials({ daily: false, weekly: true }).catch(err => console.log('[幻境试炼]周结算失败:', err.message)))

@@ -1,3 +1,4 @@
+import { withGameLock } from '../../components/game_lock.js'
 /*yunzai*/
 import plugin from '../../../../lib/plugins/plugin.js'
 /*bot*/
@@ -113,7 +114,7 @@ class YuePlugin extends plugin {
             if (typeof v === 'function') {
               const auth = authMap[prop]
               const orig = v.bind(target)
-              const wrapped = async (...args) => {
+              const wrapped = async (...args) => withGameLock(args[0]?.group_id, async () => {
                 const e = args[0]
                 // 0. 全角数字转半角(中文输入法常把数字打成全角, 统一转半角保证所有数字参数解析正常)
                 if (e && typeof e.msg === 'string' && /[０-９]/.test(e.msg)) {
@@ -315,7 +316,7 @@ class YuePlugin extends plugin {
                 }
                 // 4.5 活跃度统计(供三阁动态补货): 有效互动计入该群, 玩的人越多货越多
                 try {
-                  if (e && e.group_id) await recordActive(e.group_id, e.user_id)
+                  if (e && e.group_id) await recordActive(e.group_id, e.user_id, getLoc(getWorld(e.group_id), e.user_id))
                 } catch (err) {}
                 // 4.6 记录最后使用虚境指令时间(闲置灵石清理: 超期未使用自动清空灵石)
                 try {
@@ -333,7 +334,7 @@ class YuePlugin extends plugin {
                   } catch (_e) {}
                   return false
                 }
-              }
+              })
               wrappedCache.set(prop, wrapped)
               return wrapped
             }

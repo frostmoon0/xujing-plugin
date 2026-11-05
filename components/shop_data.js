@@ -1,3 +1,4 @@
+import { withGameLock } from './game_lock.js'
 /* ============================================================
  * 虚境三阁 · 动态补货系统
  * - 丹阁(dange)/器阁(qige)/藏宝阁(cangbaoge) 每群独立库存
@@ -114,7 +115,8 @@ function genStock (shop, act) {
 
 /** 检查并补货(惰性): 到点或首次则补货, 返回是否补了; region=大区key(各区独立)
  *  丹阁: 到点但丹药还有剩余 → 跳过本次补货, 只进入下一次冷却 */
-export async function ensureRestock (gid, shop, region) {
+export function ensureRestock (gid, shop, region) { return withGameLock(gid, () => ensureRestockUnlocked(gid, shop, region)) }
+async function ensureRestockUnlocked (gid, shop, region) {
   const g = String(gid)
   const rg = region || 'center'
   try {
@@ -164,7 +166,8 @@ export async function getStock (gid, shop, region) {
 }
 
 /** 购买扣库存: 返回 { ok, soldout, count }; region=大区key */
-export async function buyStock (gid, shop, name, want = 1, region) {
+export function buyStock (gid, shop, name, want = 1, region) { return withGameLock(gid, () => buyStockUnlocked(gid, shop, name, want, region)) }
+async function buyStockUnlocked (gid, shop, name, want = 1, region) {
   const g = String(gid)
   const rg = region || 'center'
   await ensureRestock(g, shop, rg)

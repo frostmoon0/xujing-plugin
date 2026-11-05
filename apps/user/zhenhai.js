@@ -1,6 +1,7 @@
+import { withGameLock } from '../../components/game_lock.js'
 import { plugin } from '../../model/api/api.js'
 import xujing_data from '../../components/xujing_data.js'
-import { getBag, saveBag, consumeItem, itemIcon } from '../../components/equip_data.js'
+import { getBag, saveBag, consumeBagItems, itemIcon } from '../../components/equip_data.js'
 import { getWorld, saveWorld, getLoc, setSeal, clearSeal, getSeal, regionNameOf, REGION_KEYS, REGIONS } from '../../components/world_data.js'
 import { calcCombatPower, getBuffs } from '../../components/fight.js'
 import { getFake, logEvent } from '../../components/fake_data.js'
@@ -33,8 +34,9 @@ async function takeMoney (uid, gid, amount) {
 function lackMats (bag, mats) {
   return Object.entries(mats || {}).filter(([name, count]) => ((bag.items[name] && bag.items[name].count) || 0) < count)
 }
-function consumeMats (uid, mats, gid) {
-  for (const [name, count] of Object.entries(mats || {})) consumeItem(uid, name, count, null, gid)
+function prepareMats (bag, mats) {
+  const next = { items: bag.items || {} }
+  return consumeBagItems(next, mats) ? next.items : null
 }
 function fmtMats (mats) {
   return Object.entries(mats || {}).map(([name, count]) => `${itemIcon(name)}${name}×${count}`).join('、')
@@ -140,6 +142,10 @@ export class zhenhai extends plugin {
   }
 
   async craft (e) {
+    return withGameLock(e.group_id, () => this.craftUnlocked(e))
+  }
+
+  async craftUnlocked (e) {
     if (!e.group_id) { e.reply('请在群内使用~'); return true }
     const gid = String(e.group_id)
     const bag = getBag(e.user_id, gid)
@@ -150,9 +156,11 @@ export class zhenhai extends plugin {
       e.reply(`材料不足！打造${ZHENHAI_NAME}需要：${fmtMats(recipe.mats)} + 💰${recipe.money}灵石\n${lack.map(([n, c]) => `${itemIcon(n)}${n}还差${c - ((bag.items[n] && bag.items[n].count) || 0)}`).join('、')}\n（材料仅东海秘境掉落）`)
       return true
     }
+    const prepared = prepareMats(bag, recipe.mats)
+    if (!prepared) { e.reply('材料状态已变化，请重新检查背包。'); return true }
     const paid = await takeMoney(e.user_id, gid, recipe.money)
     if (!paid.ok) { e.reply(`灵石不足！打造${ZHENHAI_NAME}需要 ${recipe.money} 灵石，你只有 ${paid.have}。`); return true }
-    consumeMats(e.user_id, recipe.mats, gid)
+    bag.items = prepared
     createZhenhai(bag)
     saveBag(e.user_id, bag, gid)
     e.reply(`🔮 打造成功！获得${ZHENHAI_ICON}${ZHENHAI_NAME}（1阶·镇浪）。\n拥有即生效：使用 #镇海珠封海 可封锁你当前所在的大区。`)
@@ -160,6 +168,10 @@ export class zhenhai extends plugin {
   }
 
   async upgrade (e) {
+    return withGameLock(e.group_id, () => this.upgradeUnlocked(e))
+  }
+
+  async upgradeUnlocked (e) {
     if (!e.group_id) { e.reply('请在群内使用~'); return true }
     const gid = String(e.group_id)
     const bag = getBag(e.user_id, gid)
@@ -179,9 +191,11 @@ export class zhenhai extends plugin {
       e.reply(`材料不足！升级到${tierInfo(next).name}需要：${fmtMats(recipe.mats)} + 💰${recipe.money}灵石\n${lack.map(([n, c]) => `${itemIcon(n)}${n}还差${c - ((bag.items[n] && bag.items[n].count) || 0)}`).join('、')}`)
       return true
     }
+    const prepared = prepareMats(bag, recipe.mats)
+    if (!prepared) { e.reply('材料状态已变化，请重新检查背包。'); return true }
     const paid = await takeMoney(e.user_id, gid, recipe.money)
     if (!paid.ok) { e.reply(`灵石不足！升级需要 ${recipe.money} 灵石，你只有 ${paid.have}。`); return true }
-    consumeMats(e.user_id, recipe.mats, gid)
+    bag.items = prepared
     art.rank = next
     saveBag(e.user_id, bag, gid)
     e.reply(`🔮 升级成功！${ZHENHAI_NAME}现在是${rankName(next)}。`)
@@ -189,6 +203,10 @@ export class zhenhai extends plugin {
   }
 
   async seal (e) {
+    return withGameLock(e.group_id, () => this.sealUnlocked(e))
+  }
+
+  async sealUnlocked (e) {
     if (!e.group_id) { e.reply('请在群内使用~'); return true }
     const gid = String(e.group_id)
     const w = getWorld(gid)
@@ -289,6 +307,10 @@ export class zhenhai extends plugin {
   }
 
   async attackSeal (e) {
+    return withGameLock(e.group_id, () => this.attackSealUnlocked(e))
+  }
+
+  async attackSealUnlocked (e) {
     if (!e.group_id) { e.reply('请在群内使用~'); return true }
     const gid = String(e.group_id)
     const w = getWorld(gid)

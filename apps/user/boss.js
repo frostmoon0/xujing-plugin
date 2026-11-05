@@ -1,3 +1,4 @@
+import { withGameLock } from '../../components/game_lock.js'
 /* ============================================================
  * 世界Boss系统 - 指令与流程
  * #攻击boss(持续讨伐·自动攻击) / #停止攻击 / #boss状态 / #抢夺登仙令 / #抢夺登仙令 @x / #boss白名单
@@ -451,6 +452,6 @@ async function bossTick (gid) {
 /* ---------- 每分钟推进(所有活跃群, 每群独立Boss) ---------- */
 async function bossTickAll () {
   for (const gid of activeBossGroups()) {
-    try { await bossTick(gid) } catch (err) { logger.error('[世界boss]推进异常:' + (err && err.stack)) }
+    try { await withGameLock(gid, () => bossTick(gid)) } catch (err) { logger.error('[世界boss]推进异常:' + (err && err.stack)) }
   }
 }

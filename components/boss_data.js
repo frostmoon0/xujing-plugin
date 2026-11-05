@@ -354,8 +354,8 @@ export async function attackHit (st, uid, gid) {
   const battle = await xujing_data.getQQYUserBattle(uid, null, false, `${gid}.json`)
   const level = Number(battle[uid] && battle[uid].level) || 0
   const bag = getBag(uid, gid)
-  const buff = await getBuffs(uid)
-  const { dmg } = calcDamage(level, bag, 0.15, buff)
+  const buff = await getBuffs(uid, gid)
+  const { dmg } = calcDamage(level, bag, 0.15, buff, gid, uid)
   st.damage[String(uid)] = (st.damage[String(uid)] || 0) + dmg
   st.attackGid[String(uid)] = String(gid)
   st.hp = Math.max(0, st.hp - dmg)
@@ -446,8 +446,8 @@ export async function stealGrab (st, challengerUid, gid) {
   const w = getWorld(gid)
   if (getLocOf(w, challengerUid) !== getLocOf(w, holderUid)) return { ok: false, msg: '你与被抢者不在同一大区，无法抢夺~' }
   /* 比拼: 持令者初始战力不减, 每成功防守一次削减5%(累积) */
-  const hb = await getBuffs(holderUid)
-  const cb = await getBuffs(challengerUid)
+  const hb = await getBuffs(holderUid, gid)
+  const cb = await getBuffs(challengerUid, gid)
   const hLevel = await levelOf(holderUid, gid)
   const cLevel = await levelOf(challengerUid, gid)
   const powerFactor = Math.max(0, TOKEN_HOLDER_POWER - TOKEN_HOLDER_POWER_DROP * (Number(t.defended) || 0))

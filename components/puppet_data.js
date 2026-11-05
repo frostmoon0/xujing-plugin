@@ -1,3 +1,4 @@
+import { withGameLock } from './game_lock.js'
 import fs from 'fs'
 import path from 'path'
 import xujing_data from './xujing_data.js'
@@ -476,7 +477,8 @@ async function chargeDeployment (uid, gid, puppet, bag, notifyOnStop = true) {
 }
 
 /** 读取战力前的懒推进；后台定时器也会调用同一函数。 */
-export async function tickPuppet (uid, gid = 'global', notifyOnStop = true) {
+export function tickPuppet (uid, gid = 'global', notifyOnStop = true) { return withGameLock(gid, () => tickPuppetUnlocked(uid, gid, notifyOnStop)) }
+async function tickPuppetUnlocked (uid, gid, notifyOnStop) {
   const bag = getBag(uid, gid)
   const puppet = currentOfBag(bag)
   if (!puppet?.deployed) return { changed: false, active: false, charged: 0, due: 0 }

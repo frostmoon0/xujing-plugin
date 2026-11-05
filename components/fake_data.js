@@ -1,3 +1,4 @@
+import { withGameLock } from './game_lock.js'
 import { sectMemberCapacity, sectOccupancy, canAdmitSectNpc, admitSectNpc } from './sect/capacity.js'
 import { takeVaultEquipAttrs } from './sect/war_loot.js'
 import { warActorOwner } from './sect/war_state.js'
@@ -4649,19 +4650,7 @@ export function fakePetTick (f, gid, now = Date.now()) {
 }
 
 /* ---------- 进程内按群串行锁 ---------- */
-const fakeLocks = new Map()
-export async function withFakeLock (gid, fn) {
-  const g = String(gid || '')
-  const previous = fakeLocks.get(g) || Promise.resolve()
-  let release
-  const current = new Promise(resolve => { release = resolve })
-  fakeLocks.set(g, current)
-  await previous
-  try { return await fn() } finally {
-    if (fakeLocks.get(g) === current) fakeLocks.delete(g)
-    release()
-  }
-}
+export function withFakeLock (gid, fn) { return withGameLock(gid, fn) }
 
 /* ---------- 每分钟推进(存档每3分钟批量落盘) ---------- */
 export async function fakeTick (gid) {

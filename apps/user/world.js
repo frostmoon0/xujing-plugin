@@ -11,6 +11,8 @@ import schedule from 'node-schedule'
 import xujing_data from '../../components/xujing_data.js'
 import { textToImg } from '../../components/common-lib/reply-img.js'
 import { forceLock, isCurrent, unlock } from '../../components/interact.js'
+import { guardActionLocked } from '../../components/action_lock.js'
+import { withGameLock } from '../../components/game_lock.js'
 import {
   REGIONS, REGION_KEYS, SECTS, BOSS_TITLE,
   regionKeyOf, regionNameOf, getWorld, saveWorld, activeWorldGroups,
@@ -124,7 +126,8 @@ export class world extends plugin {
     if (!(await isCurrent(e.group_id, e.user_id, 'go'))) {
       return false
     }
-    /* 不在此处加状态锁守卫: 登仙令持令者倒计时内必须能跨区逃跑(统一 Proxy 已放行 go/goPick), 不能误拦 */
+    /* 持令旅行仅豁免登仙令；天牢、被俘、秘境等状态仍禁止移动。 */
+    if (await guardActionLocked(e, undefined, { skipToken: true })) return true
     let st = null
     try { st = JSON.parse(raw) } catch (err) { }
     if (!st || !st.to) { await redis.del(key); await unlock(e.group_id, e.user_id, 'go'); return false }
@@ -374,6 +377,7 @@ async function worldTick () {
     if (!gids.length) return
     const now = Date.now()
     for (const gid of gids) {
+      await withGameLock(gid, async () => {
       try {
         const w = getWorld(gid)
         tickShenyou(gid, true, now)
@@ -422,6 +426,7 @@ async function worldTick () {
       } catch (err) {
         logger.error('[修仙世界]群推进异常:', err && err.stack)
       }
+      })
     }
   } catch (err) {
     logger.error('[修仙世界]tick异常:', err && err.stack)

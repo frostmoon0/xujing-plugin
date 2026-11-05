@@ -1,3 +1,4 @@
+import { withGameLock } from '../../components/game_lock.js'
 import { BotApi, AlemonApi, plugin } from '../../model/api/api.js'
 import fs from 'fs'
 import path from 'path'
@@ -6,7 +7,7 @@ import { Plugin_Name, Plugin_Path } from '../../components/plugin.js'
 import xujing_data from '../../components/xujing_data.js'
 import Yanghun from '../../components/yanghun_data.js'
 import { DEPLOY_MATS } from '../../components/dynasty_data.js'
-import { addItem, addItemToBag, consumeItem, consumeBagItem, getBag, getItemAttr, saveBag, hasDingxianyou, ITEM_TPL, MATERIAL_TPL, QUALITY, EQUIP_TPL, rollEquipAttr, rollRandomColorEquip, fmtAttr, ownedRedWeapons, craftRainbow, renameRainbow, rainbowInfoLines, itemIcon, yaodanName, rollYaodanTierFromRemnant } from '../../components/equip_data.js'
+import { addItem, addItemToBag, consumeItem, consumeBagItem, consumeBagItems, getBag, getItemAttr, saveBag, hasDingxianyou, ITEM_TPL, MATERIAL_TPL, QUALITY, EQUIP_TPL, rollEquipAttr, rollRandomColorEquip, fmtAttr, ownedRedWeapons, craftRainbow, renameRainbow, rainbowInfoLines, itemIcon, yaodanName, rollYaodanTierFromRemnant } from '../../components/equip_data.js'
 import { forceLock, isCurrent, unlock } from '../../components/interact.js'
 import { guardActionLocked } from '../../components/action_lock.js'
 import { PUPPET_INITIAL_COST, PUPPET_UPGRADE_COSTS } from '../../components/puppet_data.js'
@@ -332,7 +333,11 @@ export class MIX extends plugin {
     }
 
     /** #合成[丹药名] [数量]: 按配方扣除药材,批量合成丹药(默认1颗,上限99) */
-    async mixCraft(e) {
+    async mixCraft (e) {
+        return withGameLock(e.group_id, () => this.mixCraftUnlocked(e))
+    }
+
+    async mixCraftUnlocked(e) {
         const id = e.user_id
         const m = String(e.msg || '').match(/(惊鸿丹|聚宝丹|灵犀丹|行运丹|同心丹|玉甲丹|凝露丹|慧心丹|摄魂丹|还魂丹|仙帝丹)/)
         const pillName = m ? m[1] : null
@@ -374,12 +379,18 @@ export class MIX extends plugin {
             }
         }
         /* 扣材料 + 加丹药 */
-        for (const mat of recipe.mats) consumeItem(id, mat.name, mat.count * want, null, e.group_id)
+        const prepared = { items: bag.items || {} }
+        if (!consumeBagItems(prepared, Object.fromEntries(recipe.mats.map(mat => [mat.name, mat.count * want])))) {
+            e.reply('材料状态已变化，请重新检查背包后再合成。')
+            return true
+        }
         if (totalMoney > 0) {
             homejson[id].money = (Number(homejson[id].money) || 0) - totalMoney
             await xujing_data.getQQYUserHome(id, homejson, homeFile, true)
         }
-        addItem(id, pillName, want, null, e.group_id)
+        bag.items = prepared.items
+        addItemToBag(bag, pillName, want, null, false)
+        saveBag(id, bag, e.group_id)
         e.reply(`🧪 合成成功！消耗 ${recipe.mats.map(mat => `${QUALITY[MATERIAL_TPL[mat.name].quality].icon}${mat.name}×${mat.count * want}`).join(' + ')}${totalMoney > 0 ? ` + 💰${totalMoney}灵石` : ''}，获得 ${ITEM_TPL[pillName].icon}${pillName}×${want}（${ITEM_TPL[pillName].desc}）`)
         return true
     }
