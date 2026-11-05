@@ -50,7 +50,7 @@ export async function isPlayerActionLocked (gid, uid, opts = {}) {
     /* 简月王朝屠城读阵 */
     if (dynastyReadActive(gid, uid)) return true
     /* 宗门攻防战参与 */
-    if (!battleFree && isSectWarParticipant(getFake(gid), uid)) return true
+    if (!battleFree && !opts.skipSectWar && isSectWarParticipant(getFake(gid), uid)) return true
   } catch (err) { }
   return false
 }

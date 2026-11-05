@@ -1,46 +1,89 @@
+import { commonTerritoryThreat } from './ai_strategy.js'
+import { diplomacyPair, setDiplomacyRelation, normalizeDiplomacy, hasTruce, recordDiplomacyAid } from './diplomacy_state.js'
+import { defenderOf, initWarState, warActorAvailable } from './war_state.js'
+import { planWarDeployment, commitWarDeployment, releaseWarFake, withHomeReserve } from './war_roster.js'
 /* 由 sect_system.js 拆分自动生成: diplomacy.js */
 import { sectName, sectIdByName, sectAlive, sectPower, personPower, logEvent, saveFake } from '../fake_data.js'
 import { getWorld, getLoc, regionNameOf, DEFAULT_REGION } from '../world_data.js'
-import { playerPower, willFight, getVault, atkLog, pick, clamp, uniqueIdList, sectRegion, regionOfArea, CFG, warTargetTxt, targetRawTxt } from './utils.js'
+import { playerPower, willFight, getVault, atkLog, pick, clamp, uniqueIdList, markSectWar, markAreaRaid, sectRegion, regionOfArea, CFG, warTargetTxt, targetRawTxt } from './utils.js'
 
 /* ---------- 宣战 / 议和 ---------- */
 export function declareWar (f, gid, id, targetName) {
+  normalizeDiplomacy(f)
   const sid = sectIdByName(f, targetName)
-  if (!sid) return { ok: false, msg: '没有找到该宗门~' }
-  if (sid === id) return { ok: false, msg: '不能向自己宣战~' }
+  if (!sid) return { ok: false, msg: '没有找到该宗门' }
+  if (sid === id) return { ok: false, msg: '不能向自己宣战' }
   const s = f.sects[id]
-  if ((s.allies || []).includes(sid)) return { ok: false, msg: '对方是你的盟友，不可宣战（可 #退盟 解除结盟）~' }
-  if (s.enemies.includes(sid)) return { ok: false, msg: '双方已是对敌状态~' }
-  s.enemies.push(sid)
-  const ds = f.sects[sid]
-  if (ds && !ds.enemies.includes(id)) ds.enemies.push(id)
+  if (hasTruce(f, id, sid)) return { ok: false, msg: '双方仍在议和停战期' }
+  if ((s.allies || []).includes(sid)) return { ok: false, msg: '对方是你的盟友，不可宣战（可 #退盟 解除结盟）' }
+  if (s.enemies.includes(sid)) return { ok: false, msg: '双方已是对敌状态' }
+  setDiplomacyRelation(f, id, sid, 'hostile', Date.now(), '主动宣战')
   logEvent(f, 'attack', `【宣战】${sectName(f, id)} 正式向 ${sectName(f, sid)} 宣战！`, Date.now(), { major: true })
   saveFake(f, gid)
   return { ok: true, msg: `⚔️ 已向【${sectName(f, sid)}】宣战，双方互为敌人！` }
 }
 
-export function makePeace (f, gid, id, targetName) {
-  const sid = sectIdByName(f, targetName)
-  if (!sid) return { ok: false, msg: '没有找到该宗门~' }
-  if (sid === id) return { ok: false, msg: '不能和自己议和~' }
-  const s = f.sects[id]
-  if (!s.enemies.includes(sid)) return { ok: false, msg: '双方并非敌对，无需议和~' }
-  const ds = f.sects[sid]
-  const w = getWorld(gid)
-  const myPower = sectPower(f, id)
-  const tPower = sectPower(f, sid)
-  /* 明显弱势方需赔款5%宝库才能谈和 */
-  let comp = 0
-  if (myPower < tPower * 0.6) comp = Math.floor((getVault(f, id).stones || 0) * 0.05)
-  s.enemies = s.enemies.filter(x => x !== sid)
-  if (ds) ds.enemies = ds.enemies.filter(x => x !== id)
-  if (comp > 0 && (getVault(f, id).stones || 0) >= comp) {
-    getVault(f, id).stones -= comp
-    if (ds) getVault(f, sid).stones = (getVault(f, sid).stones || 0) + comp
+/** 双方同意后中立停战；俘虏互放，保留战争维护与攻打冷却。 */
+export function ceasefireBetween (f, gid, first, second, now = Date.now()) {
+  let stopped = 0
+  for (const war of f.sectAttacks || []) {
+    if (!['prep', 'fight'].includes(war.phase)) continue
+    const def = defenderOf(f, war)
+    if (!((war.atkSect === first && def === second) || (war.atkSect === second && def === first))) continue
+    initWarState(f, war, now)
+    for (const field of ['atkFakes', 'defFakes']) for (const name of war[field] || []) releaseWarFake(f, war, name, '议和', now)
+    for (const uid of war.captives?.players || []) { try { Promise.resolve(redis.del(`xujing:captive:${gid}:${uid}`)).catch(() => {}) } catch (err) {} }
+    war.captives = { fakes: [], players: [] }
+    war.phase = 'done'; war.result = 'peace'; war.endAt = now
+    war.withdrawals = []
+    markSectWar(f, war.atkSect, now); markSectWar(f, def, now)
+    if (war.targetType === 'area') markAreaRaid(f, war.target, now)
+    if (f.sects[war.atkSect]) f.sects[war.atkSect].atkCdUntil = now + (war.by === 'ai' ? CFG.FAKE_ATK_CD : CFG.PLAYER_ATK_CD) * 60000
+    atkLog(war, '【议和】双方罢兵，互放俘虏，领地保持战前归属', now)
+    stopped++
   }
-  logEvent(f, 'attack', `【议和】${sectName(f, id)} 与 ${sectName(f, sid)} 握手言和，停战罢兵${comp ? `（赔款 ${comp} 灵石）` : ''}`, Date.now())
+  setDiplomacyRelation(f, first, second, 'neutral', now, '议和', { truce: true })
+  return stopped
+}
+
+export function makePeace (f, gid, id, targetName, response = 'offer') {
+  normalizeDiplomacy(f)
+  const sid = sectIdByName(f, targetName)
+  if (!sid || !f.sects[id]) return { ok: false, msg: '没有找到该宗门' }
+  if (sid === id) return { ok: false, msg: '不能和自己议和' }
+  const s = f.sects[id]; const ds = f.sects[sid]; const now = Date.now()
+  f.peaceOffers ||= {}
+  const incomingKey = `${sid}:${id}`
+  const incoming = f.peaceOffers[incomingKey]
+  if (response !== 'reject' && (f.sectAttacks || []).some(w => w.phase === 'settling' && [w.atkSect, defenderOf(f, w)].includes(id) && [w.atkSect, defenderOf(f, w)].includes(sid))) return { ok: false, msg: '战事正在结算，无法议和' }
+  if (response === 'reject') {
+    if (!incoming || incoming.expires <= now) return { ok: false, msg: '没有对方发来的有效议和请求' }
+    delete f.peaceOffers[incomingKey]; saveFake(f, gid)
+    return { ok: true, msg: '已拒绝议和，战争继续。' }
+  }
+  let proposer = id; let receiver = sid; let comp = 0
+  if (response === 'accept') {
+    if (!incoming || incoming.expires <= now) return { ok: false, msg: '没有对方发来的有效议和请求' }
+    proposer = sid; receiver = id; comp = incoming.comp
+  } else {
+    if (!(s.enemies || []).includes(sid)) return { ok: false, msg: '双方并非敌对，无需议和' }
+    if (Object.values(f.sectAttacks || {}).some(a => a.phase === 'settling' && [a.atkSect, defenderOf(f, a)].includes(id) && [a.atkSect, defenderOf(f, a)].includes(sid))) return { ok: false, msg: '战事正在结算，无法议和' }
+    if ((s.peaceCdUntil || 0) > now) return { ok: false, msg: '本宗议和冷却中（24小时）' }
+    if (sectPower(f, id) < sectPower(f, sid) * 0.6) comp = Math.floor(getVault(f, id).stones * 0.05)
+    if (ds.owner) {
+      f.peaceOffers[`${id}:${sid}`] = { from: id, to: sid, comp, at: now, expires: now + 30 * 60000 }
+      saveFake(f, gid)
+      return { ok: true, msg: `已向【${ds.name}】提出议和${comp ? `（赔款 ${comp} 灵石）` : ''}。对方高层须在30分钟内 #同意议和 ${s.name} 或 #拒绝议和 ${s.name}；同意前战争继续。` }
+    }
+  }
+  if ((getVault(f, proposer).stones || 0) < comp) return { ok: false, msg: '求和方当前赔款不足，尚未停战' }
+  getVault(f, proposer).stones -= comp; getVault(f, receiver).stones += comp
+  const stopped = ceasefireBetween(f, gid, id, sid, now)
+  f.sects[proposer].peaceCdUntil = now + 24 * 3600000
+  delete f.peaceOffers[incomingKey]; delete f.peaceOffers[`${id}:${sid}`]
+  logEvent(f, 'attack', `【议和】${s.name} 与 ${ds.name} 停战，结束 ${stopped} 场战事${comp ? `（赔款 ${comp} 灵石）` : ''}`, now)
   saveFake(f, gid)
-  return { ok: true, msg: `🕊️ 已与【${sectName(f, sid)}】议和停战${comp ? `，支付赔款 ${comp} 灵石` : ''}~` }
+  return { ok: true, msg: `已与【${ds.name}】议和，结束 ${stopped} 场战事，双方互放本场俘虏${comp ? `（赔款 ${comp} 灵石）` : ''}。` }
 }
 
 
@@ -51,7 +94,10 @@ export function makePeace (f, gid, id, targetName) {
  *  ③断交: 已结盟的 AI 对中, 好斗/嗜杀/魔修宗主或强弱悬殊时更易撕毁盟约
  *  返回是否有变更(供 sectTick 保存) */
 export function aiDiplomacy (f, gid, now = Date.now()) {
-  let changed = false
+  let changed = normalizeDiplomacy(f, now)
+  f.targetCd ||= {}
+  const touched = new Set()
+  const keyOf = (a, b) => JSON.stringify([a, b].sort())
   const aiIds = Object.keys(f.sects).filter(id => {
     const s = f.sects[id]
     return s && !s.owner && !s.wipeAt && sectAlive(f, id).length > 0
@@ -72,7 +118,8 @@ export function aiDiplomacy (f, gid, now = Date.now()) {
       for (let j = i + 1; j < aiIds.length; j++) {
         const a = aiIds[i], b = aiIds[j]
         const sa = f.sects[a], sb = f.sects[b]
-        if ((sa.allies || []).includes(b) || (sa.enemies || []).includes(b)) continue
+        const relation = diplomacyPair(f, a, b, now)
+        if ((sa.allies || []).includes(b) || (sa.enemies || []).includes(b) || relation.breakUntil > now) continue
         if ((f.targetCd['ally:' + [a, b].sort().join('&')] || 0) > now) continue // 刚断交的短时不复盟
         if ((sb.allies || []).length >= 2 || (sa.allies || []).length >= 2) continue
         pairs.push([a, b])
@@ -86,6 +133,11 @@ export function aiDiplomacy (f, gid, now = Date.now()) {
       if (peaceLike(zb)) want += 0.25
       if (warLike(za)) want -= 0.2
       if (warLike(zb)) want -= 0.2
+      const memory = diplomacyPair(f, a, b, now)
+      want += memory.trust / 500 - memory.grievance / 500 - ((f.sects[a].grudges?.[b] || 0) + (f.sects[b].grudges?.[a] || 0)) / 500
+      if ((f.sects[a].enemies || []).some(id => (f.sects[b].enemies || []).includes(id))) want += 0.15
+      const threat = commonTerritoryThreat(f, a, b)
+      if (threat && !(f.sects[a].allies || []).includes(threat) && !(f.sects[b].allies || []).includes(threat)) want += 0.3
       if (za && zb && za.path === zb.path) want += 0.15
       if (regionOfS(a) && regionOfS(a) === regionOfS(b)) want += 0.15
       const pa = sectPower(f, a), pb = sectPower(f, b)
@@ -102,10 +154,8 @@ export function aiDiplomacy (f, gid, now = Date.now()) {
           enforceAllianceLimit(f, a)
           enforceAllianceLimit(f, b)
         } else {
-          if (!sa.allies.includes(b)) sa.allies.push(b)
-          if (!sb.allies.includes(a)) sb.allies.push(a)
-          sa.allies = uniqueIdList(sa.allies)
-          sb.allies = uniqueIdList(sb.allies)
+          setDiplomacyRelation(f, a, b, 'allied', now, 'AI结盟')
+          touched.add(keyOf(a, b))
           enforceAllianceLimit(f, a)
           enforceAllianceLimit(f, b)
           logEvent(f, 'attack', `【结盟】${sectName(f, a)} 与 ${sectName(f, b)} 缔结盟约，同气连枝、共御外敌！`, now, { major: true })
@@ -121,7 +171,7 @@ export function aiDiplomacy (f, gid, now = Date.now()) {
     for (let i = 0; i < aiIds.length; i++) {
       for (let j = i + 1; j < aiIds.length; j++) {
         const a = aiIds[i], b = aiIds[j]
-        if ((f.sects[a].enemies || []).includes(b)) hostile.push([a, b])
+        if (!touched.has(keyOf(a, b)) && (f.sects[a].enemies || []).includes(b) && !(f.sectAttacks || []).some(w => w.phase === 'settling' && [w.atkSect, defenderOf(f, w)].includes(a) && [w.atkSect, defenderOf(f, w)].includes(b))) hostile.push([a, b])
       }
     }
     if (hostile.length) {
@@ -137,12 +187,12 @@ export function aiDiplomacy (f, gid, now = Date.now()) {
       if (pleader) {
         const other = pleader === a ? b : a
         const sa = f.sects[pleader], so = f.sects[other]
-        sa.enemies = (sa.enemies || []).filter(x => x !== other)
-        so.enemies = (so.enemies || []).filter(x => x !== pleader)
         if (comp > 0 && (getVault(f, pleader).stones || 0) >= comp) {
           getVault(f, pleader).stones -= comp
           getVault(f, other).stones = (getVault(f, other).stones || 0) + comp
         }
+        ceasefireBetween(f, gid, pleader, other, now)
+        touched.add(keyOf(pleader, other))
         logEvent(f, 'attack', `【议和】${sectName(f, pleader)} 主动向 ${sectName(f, other)} 求和停战${comp ? `（赔款 ${comp} 灵石）` : ''}`, now)
         changed = true
       }
@@ -159,7 +209,8 @@ export function aiDiplomacy (f, gid, now = Date.now()) {
     for (let i = 0; i < allIds.length; i++) {
       for (let j = i + 1; j < allIds.length; j++) {
         const a = allIds[i], b = allIds[j]
-        if (!(f.sects[a].allies || []).includes(b)) continue
+        const relation = diplomacyPair(f, a, b, now)
+        if (touched.has(keyOf(a, b)) || relation.allyUntil > now || !(f.sects[a].allies || []).includes(b)) continue
         if (f.sects[a].owner && f.sects[b].owner) continue // 双方皆玩家宗门: 不自动断盟
         allied.push([a, b])
       }
@@ -167,7 +218,8 @@ export function aiDiplomacy (f, gid, now = Date.now()) {
     if (allied.length) {
       const [a, b] = pick(allied)
       const za = zzOf(a), zb = zzOf(b)
-      let want = 0.18
+      const memory = diplomacyPair(f, a, b, now)
+      let want = 0.18 - memory.trust / 500 + memory.grievance / 500
       if (warLike(za)) want += 0.15
       if (warLike(zb)) want += 0.15
       if (peaceLike(za)) want -= 0.12
@@ -180,8 +232,8 @@ export function aiDiplomacy (f, gid, now = Date.now()) {
       want = clamp(want, 0, 0.9)
       if (Math.random() < want) {
         const sa = f.sects[a], sb = f.sects[b]
-        sa.allies = (sa.allies || []).filter(x => x !== b)
-        sb.allies = (sb.allies || []).filter(x => x !== a)
+        setDiplomacyRelation(f, a, b, 'neutral', now, 'AI断交')
+        touched.add(keyOf(a, b))
         /* 断交后互不敌对、各自为政; 记入盟约破碎冷却, 短期不再复盟 */
         f.targetCd['ally:' + [a, b].sort().join('&')] = now + 6 * 3600000
         logEvent(f, 'attack', `【断交】${sectName(f, a)} 与 ${sectName(f, b)} 盟约作废、各自为政！`, now, { major: true })
@@ -212,13 +264,17 @@ export async function recordCoalition (f, gid, atk, sid) {
     if (pp && pp.sect === sid) { count++; power += await playerPower(f, gid, u) }
   }
   if (!atk.coalition) atk.coalition = {}
-  atk.coalition[sid] = { count, power }
+  const history = Object.values(atk.actors || {}).filter(a => a.side === 'atk' && a.sect === sid && a.contribution > 0)
+  atk.coalition[sid] = (atk.roundHistory?.length || history.length) ? { count: history.length, power: history.reduce((n, a) => n + a.contribution, 0) } : { count, power }
 }
 
 /** 结算前重算联盟贡献(含中途加入/退出的盟友) */
 export async function recomputeCoalition (f, gid, atk) {
   const members = new Set([atk.atkSect, ...Object.keys(atk.coalition || {})].filter(Boolean))
-  for (const sid of members) await recordCoalition(f, gid, atk, sid)
+  for (const sid of members) {
+    if (!f.sects[sid] || f.sects[sid].wipeAt) { if (atk.coalition) delete atk.coalition[sid]; continue }
+    await recordCoalition(f, gid, atk, sid)
+  }
 }
 
 /** 联盟中贡献最高者(战力优先, 人次次之, 平局归发起方) */
@@ -292,13 +348,10 @@ export function enforceAllianceLimit (f, sid) {
   s.allies = uniqueIdList(s.allies).filter(id => !!f.sects[id] && id !== sid)
   if (s.allies.length <= 2) return false
   const extra = s.allies.slice(2)
-  s.allies = s.allies.slice(0, 2)
   for (const oid of extra) {
     const os = f.sects[oid]
     if (!os) continue
-    s.enemies = uniqueIdList([...(s.enemies || []), oid])
-    os.enemies = uniqueIdList([...(os.enemies || []), sid])
-    os.allies = uniqueIdList((os.allies || []).filter(x => x !== sid))
+    setDiplomacyRelation(f, sid, oid, hasTruce(f, sid, oid) ? 'neutral' : 'hostile', Date.now(), '盟友超额解除')
     logEvent(f, 'attack', `【反目成仇】${sectName(f, sid)} 与 ${sectName(f, oid)} 盟友超出 2 个上限，双方反目成仇！`, Date.now(), { major: true })
   }
   return true
@@ -307,29 +360,25 @@ export function enforceAllianceLimit (f, sid) {
 /** 结盟: 双方互为盟友(不限制宗门类型, 玩家/伪玩家宗门皆可); 宗主/副宗可发起 */
 export function allySect (f, gid, uid, targetName) {
   const p = f.players && f.players[String(uid)]
-  if (!p) return { ok: false, msg: '你不是宗门成员~' }
-  if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') return { ok: false, msg: '只有宗主/副宗主/太上长老可以结盟~' }
+  if (!p) return { ok: false, msg: '你不是宗门成员' }
+  if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') return { ok: false, msg: '只有宗主/副宗主/太上长老可以结盟' }
+  normalizeDiplomacy(f)
   const sid = p.sect
   const tsid = sectIdByName(f, targetName)
-  if (!tsid) return { ok: false, msg: '没有找到该宗门~' }
-  if (tsid === sid) return { ok: false, msg: '不能和自己结盟~' }
+  if (!tsid) return { ok: false, msg: '没有找到该宗门' }
+  if (tsid === sid) return { ok: false, msg: '不能和自己结盟' }
   const s = f.sects[sid]
   const ts = f.sects[tsid]
-  if (!s || !ts) return { ok: false, msg: '宗门不存在~' }
-  if ((s.enemies || []).includes(tsid)) return { ok: false, msg: '双方正在敌对，请先 #议和 再结盟~' }
+  if (!s || !ts) return { ok: false, msg: '宗门不存在' }
+  if ((s.enemies || []).includes(tsid)) return { ok: false, msg: '双方正在敌对，请先 #议和 再结盟' }
   if (!s.allies) s.allies = []
-  if (s.allies.includes(tsid)) return { ok: false, msg: '你们已经是盟友了~' }
-  if (s.allies.length >= 2) return { ok: false, msg: '本宗已达盟友上限（2个），请先 #退盟 解除或反目成仇后再结新盟~' }
+  if (s.allies.includes(tsid)) return { ok: false, msg: '你们已经是盟友了' }
+  if (s.allies.length >= 2) return { ok: false, msg: '本宗已达盟友上限（2个），请先 #退盟 解除或反目成仇后再结新盟' }
   if (!ts.allies) ts.allies = []
-  if (ts.allies.length >= 2) return { ok: false, msg: `【${sectName(f, tsid)}】已达盟友上限（2个），无法再结盟~` }
-  s.allies.push(tsid)
-  if (!ts.allies.includes(sid)) ts.allies.push(sid)
-  s.allies = uniqueIdList(s.allies)
-  ts.allies = uniqueIdList(ts.allies)
+  if (ts.allies.length >= 2) return { ok: false, msg: `【${sectName(f, tsid)}】已达盟友上限（2个），无法再结盟` }
+  setDiplomacyRelation(f, sid, tsid, 'allied', Date.now(), '玩家结盟')
   enforceAllianceLimit(f, sid)
   enforceAllianceLimit(f, tsid)
-  s.enemies = uniqueIdList((s.enemies || []).filter(x => x !== tsid))
-  ts.enemies = uniqueIdList((ts.enemies || []).filter(x => x !== sid))
   logEvent(f, 'attack', `【结盟】${sectName(f, sid)} 与 ${sectName(f, tsid)} 结为盟友，同气连枝！`, Date.now(), { major: true })
   saveFake(f, gid)
   return { ok: true, msg: `🤝 【${sectName(f, sid)}】与【${sectName(f, tsid)}】已结盟！可 #盟友助战 [目标] 一起攻打` }
@@ -338,47 +387,49 @@ export function allySect (f, gid, uid, targetName) {
 /** 解除结盟 */
 export function breakAlly (f, gid, uid, targetName) {
   const p = f.players && f.players[String(uid)]
-  if (!p) return { ok: false, msg: '你不是宗门成员~' }
-  if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') return { ok: false, msg: '只有宗主/副宗主/太上长老可以解除结盟~' }
+  if (!p) return { ok: false, msg: '你不是宗门成员' }
+  if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') return { ok: false, msg: '只有宗主/副宗主/太上长老可以解除结盟' }
+  normalizeDiplomacy(f)
   const sid = p.sect
   const tsid = sectIdByName(f, targetName)
-  if (!tsid) return { ok: false, msg: '没有找到该宗门~' }
+  if (!tsid) return { ok: false, msg: '没有找到该宗门' }
   const s = f.sects[sid]
   const ts = f.sects[tsid]
-  if (!s || !ts) return { ok: false, msg: '宗门不存在~' }
-  if (!s.allies || !s.allies.includes(tsid)) return { ok: false, msg: '你们并未结盟~' }
-  s.allies = s.allies.filter(x => x !== tsid)
-  if (ts.allies) ts.allies = ts.allies.filter(x => x !== sid)
+  if (!s || !ts) return { ok: false, msg: '宗门不存在' }
+  if (!s.allies || !s.allies.includes(tsid)) return { ok: false, msg: '你们并未结盟' }
+  setDiplomacyRelation(f, sid, tsid, 'neutral', Date.now(), '玩家退盟')
   logEvent(f, 'attack', `【退盟】${sectName(f, sid)} 与 ${sectName(f, tsid)} 解除结盟`, Date.now())
   saveFake(f, gid)
-  return { ok: true, msg: '你们已解除结盟~' }
+  return { ok: true, msg: '你们已解除结盟' }
 }
 
 /** 盟友助战: 盟友宗门派兵协助盟友攻打目标, 贡献计入联盟(打赢归贡献最高者); count>0 时限定派出人数 */
 export async function allyAssist (f, gid, uid, rawTarget, count = 0) {
   count = Math.max(0, Math.floor(Number(count) || 0))
   const p = f.players && f.players[String(uid)]
-  if (!p) return { ok: false, msg: '你不是宗门成员~' }
-  if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') return { ok: false, msg: '只有宗主/副宗主/太上长老可以派兵助战~' }
+  if (!p) return { ok: false, msg: '你不是宗门成员' }
+  if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') return { ok: false, msg: '只有宗主/副宗主/太上长老可以派兵助战' }
   const sid = p.sect
   const s = f.sects[sid]
-  if (!s) return { ok: false, msg: '宗门不存在~' }
+  if (!s) return { ok: false, msg: '宗门不存在' }
   rawTarget = String(rawTarget || '').trim()
   const atks = (f.sectAttacks || []).filter(a => {
     if (!a || (a.phase !== 'prep' && a.phase !== 'fight')) return false
     if (a.atkSect === sid || !(s.allies || []).includes(a.atkSect)) return false
-    return a.targetType !== 'area' || f.areas[a.target] !== sid
+    return defenderOf(f, a) !== sid
   })
   let atk = null
+  const idMatch = atks.find(a => String(a.id) === String(rawTarget).replace(/^[#＃]/, ''))
   const tReg = regionOfArea(rawTarget)
   if (rawTarget) {
-    if (tReg) {
+    if (idMatch) atk = idMatch
+    else if (tReg) {
       atk = atks.find(a => a.targetType === 'area' && a.target === rawTarget)
     } else {
       const tsid = sectIdByName(f, rawTarget)
       if (tsid) atk = atks.find(a => a.targetType === 'sect' && a.target === tsid)
     }
-    if (!atk) return { ok: false, msg: `没有找到盟友正在攻打${targetRawTxt(f, rawTarget)}~` }
+    if (!atk) return { ok: false, msg: `没有找到盟友正在攻打${targetRawTxt(f, rawTarget)}` }
   } else if (atks.length > 1) {
     const lines = atks.map(a => {
       const n = (a.atkFakes || []).length + (a.atkPlayers || []).length
@@ -390,57 +441,42 @@ export async function allyAssist (f, gid, uid, rawTarget, count = 0) {
   } else {
     atk = atks[0]
   }
-  if (!atk) return { ok: false, msg: rawTarget ? `没有找到盟友正在攻打${targetRawTxt(f, rawTarget)}~` : '当前没有盟友正在进行的攻打~' }
-  if (atk.coalition && atk.coalition[sid]) return { ok: false, msg: '你宗已加入该场战斗~' }
+  if (atk && hasTruce(f, sid, defenderOf(f, atk))) return { ok: false, msg: '本宗与目标仍在议和停战期，不能派兵助攻' }
+  if (!atk) return { ok: false, msg: rawTarget ? `没有找到盟友正在攻打${targetRawTxt(f, rawTarget)}` : '当前没有盟友正在进行的攻打' }
   const now = Date.now()
   const tRegion = atk.targetType === 'area' ? regionOfArea(atk.target) : sectRegion(f, atk.target)
   const taiSet = new Set((f.sectMap[sid] && f.sectMap[sid].taishang) || [])
   const field = []
   const away = []
   for (const q of sectAlive(f, sid)) {
-    if (taiSet.has(q.name) || !willFight(q, false, f)) continue
+    if ((atk.atkFakes || []).includes(q.name) || taiSet.has(q.name) || !warActorAvailable(f, 'fake', q.name, atk) || q.fakeTravel || !willFight(q, false, f)) continue
     if ((q.loc || DEFAULT_REGION) === tRegion) field.push(q)
     else away.push(q)
   }
   /* 盟友驰援也支持跨区调兵，费用由助战宗门宝库承担；count>0 时限定总派出人数(先派在场免费门人) */
   const vault = getVault(f, sid)
-  const canDeploy = Math.floor((vault.stones || 0) / CFG.SECT_DEPLOY_COST)
-  const fieldUse = count > 0 ? field.slice(0, count) : field
-  const remainNeed = count > 0 ? Math.max(0, count - fieldUse.length) : Infinity
-  const toDeploy = Math.min(away.length, canDeploy, remainNeed)
-  const deployed = away.slice(0, toDeploy)
-  for (const q of deployed) {
-    q.loc = tRegion
-    fieldUse.push(q)
-  }
-  if (toDeploy > 0) {
-    vault.stones -= toDeploy * CFG.SECT_DEPLOY_COST
-    logEvent(f, 'attack', `【盟友驰援】${sectName(f, sid)} 出资 ${toDeploy * CFG.SECT_DEPLOY_COST} 灵石，调回 ${toDeploy} 名弟子奔赴${regionNameOf(tRegion)}`, now)
-  }
+  const plan = planWarDeployment(f, gid, sid, tRegion, [...field, ...away].filter(q => warActorAvailable(f, 'fake', q.name, atk)), count, atk)
+  const canDeploy = plan.units.length
+  const fieldUse = plan.units.map(x => f.roster[x.name])
+  commitWarDeployment(f, sid, atk, 'atk', plan)
+  initWarState(f, atk)
   /* 本方门人(在目标大区或已由宝库调回)参战 */
   for (const q of fieldUse) {
     if (!(atk.atkFakes || []).includes(q.name)) atk.atkFakes.push(q.name)
   }
-  /* 本方玩家(在目标大区)参战 */
-  const w = getWorld(gid)
-  const joinedPlayers = []
-  for (const [u2, pp] of Object.entries(f.players || {})) {
-    if (pp && pp.sect === sid && getLoc(w, u2) === tRegion && !(atk.atkPlayers || []).includes(u2)) {
-      atk.atkPlayers.push(u2)
-      joinedPlayers.push(u2)
-    }
-  }
+  const joinedPlayers = [] // 真人成员使用 #参战 自行报名。
   const joined = fieldUse.length + joinedPlayers.length
   if (!joined) return { ok: false, msg: count > 0
-    ? `【${sectName(f, sid)}】可派出的门人不足 ${count} 人（在场 ${field.length} 人，宝库可跨区调 ${canDeploy} 人）~`
-    : `【${sectName(f, sid)}】暂无可驰援前线的门人或玩家（门人需在目标大区，或宝库有 ${CFG.SECT_DEPLOY_COST} 灵石/人的调兵费用）~` }
+    ? `【${sectName(f, sid)}】可派出的门人不足 ${count} 人（在场 ${field.length} 人，宝库可跨区调 ${canDeploy} 人）`
+    : `【${sectName(f, sid)}】暂无可驰援前线的门人或玩家（门人需在目标大区，或宝库有 ${CFG.SECT_DEPLOY_COST} 灵石/人的调兵费用）` }
+  recordDiplomacyAid(f, sid, atk.atkSect, now)
   /* 记录贡献 */
   await recordCoalition(f, gid, atk, sid)
   const info = atk.coalition[sid] || { count: 0, power: 0 }
   atkLog(atk, `【助战】${sectName(f, sid)} 派 ${info.count} 人（战力${info.power}）助 ${sectName(f, atk.atkSect)} 攻打${warTargetTxt(f, atk)}`, now)
   logEvent(f, 'attack', `【助战】${sectName(f, sid)} 派 ${info.count} 人助 ${sectName(f, atk.atkSect)} 攻打${warTargetTxt(f, atk)}！`, now)
   saveFake(f, gid)
-  return { ok: true, msg: `⚔️ 【${sectName(f, sid)}】已派 ${info.count} 人（战力${info.power}）协助盟友攻打！\n打赢后贡献最高者将获得地盘~` }
+  return { ok: true, msg: `⚔️ 【${sectName(f, sid)}】已派 ${info.count} 人（战力${info.power}）协助盟友攻打！\n打赢后贡献最高者将获得地盘` }
 }
 
 /** AI 盟友自动助战: 盟友宗门(无玩家宗主, 由 AI 自主)自动派本大区门人加入盟友的攻打
@@ -452,19 +488,23 @@ export async function aiAllyAssist (f, gid, atk, now = Date.now()) {
   const tRegion = atk.targetType === 'area' ? regionOfArea(atk.target) : sectRegion(f, atk.target)
   for (const sid of allies) {
     const s = f.sects[sid]
-    if (!s || s.owner || s.wipeAt) continue // 只 AI 盟友自动; 玩家宗主宗门由玩家 #盟友助战
+    if (!s || s.owner || s.wipeAt || hasTruce(f, sid, defenderOf(f, atk), now)) continue // 只 AI 盟友自动; 玩家宗主宗门由玩家 #盟友助战
     if (atk.coalition && atk.coalition[sid]) continue // 已加入
-    const busy = (f.sectAttacks || []).some(a => a.phase !== 'done' && a.atkSect === sid)
+    const busy = (f.sectAttacks || []).some(a => a.phase !== 'done' && (a.atkSect === sid || defenderOf(f, a) === sid))
     if (busy) continue // 自己也有在途攻打, 不分身
     const taiSet = new Set((f.sectMap[sid] && f.sectMap[sid].taishang) || [])
     let cnt = 0
+    const legal = new Set(planWarDeployment(f, gid, sid, tRegion, withHomeReserve(f, sid, sectAlive(f, sid).filter(q => (q.loc || DEFAULT_REGION) === tRegion), atk), 0, atk).units.map(x => x.name))
     for (const q of sectAlive(f, sid)) {
-      if (taiSet.has(q.name)) continue
+      if (!legal.has(q.name)) continue
+      if ((atk.atkFakes || []).includes(q.name) || taiSet.has(q.name) || !warActorAvailable(f, 'fake', q.name, atk) || q.fakeTravel) continue
       if ((q.loc || DEFAULT_REGION) !== tRegion) continue
       if (!willFight(q, false, f)) continue
       if (!(atk.atkFakes || []).includes(q.name)) { atk.atkFakes.push(q.name); cnt++ }
     }
     if (!cnt) continue
+    recordDiplomacyAid(f, sid, atk.atkSect, now)
+    initWarState(f, atk)
     await recordCoalition(f, gid, atk, sid)
     const info = atk.coalition[sid] || { count: 0, power: 0 }
     atkLog(atk, `【驰援】盟军【${sectName(f, sid)}】派 ${info.count} 人（战力${info.power}）助阵`, now)

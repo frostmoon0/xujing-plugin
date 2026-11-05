@@ -1,0 +1,16 @@
+[
+  {
+    "seed": 233,
+    "hours": 6,
+    "baseline_seconds": 19,
+    "fast_seconds": 15,
+    "differences": []
+  },
+  {
+    "seed": 907,
+    "hours": 6,
+    "baseline_seconds": 26,
+    "fast_seconds": 16,
+    "differences": []
+  }
+]

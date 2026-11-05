@@ -1,3 +1,4 @@
+import { warActorOwner } from './sect/war_state.js'
 /* ============================================================
  * 伏击玩法 · 核心逻辑 (状态机)
  * #伏击 → 10分钟准备 → 0~30分钟随机触发事件
@@ -15,7 +16,7 @@ import { getFake, saveFake, personPower, getNick, killPerson, logEvent, sectName
 import { playerPower, applyInjury } from './sect_system.js'
 import { absoluteWinRate, MAX_WIN_RATE } from './fight.js'
 import { getWorld, getLoc, regionNameOf, DEFAULT_REGION, levelNameOf } from './world_data.js'
-import { addItem, addItemToBag, isBound, getBag, saveBag, GONGFA_TPL, MATERIAL_TPL, itemIcon } from './equip_data.js'
+import { addItem, addItemToBag, isBound, getBag, saveBag, GONGFA_TPL, MATERIAL_TPL, EQUIP_TPL, itemIcon } from './equip_data.js'
 import { Wanhun } from './wanhun_data.js'
 import { forceLock, unlock } from './interact.js'
 import xujing_data from './xujing_data.js'
@@ -333,7 +334,7 @@ function heatAdd (f, loc) {
  *  myPw: 玩家当前战力, 用于类型匹配实力(肥羊=富且弱, 劫修=凶且强) */
 export function genPassers (f, loc, exclude = null, myPw = 0) {
   const ex = exclude || new Set()
-  const pool = Object.values(f.roster).filter(p => p && p.alive && !p.servantOf && p.status !== 'mine' && !p.mineOf && (p.loc || DEFAULT_REGION) === loc && !ex.has(p.name))
+  const pool = Object.values(f.roster).filter(p => p && p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !p.servantOf && p.status !== 'mine' && !p.mineOf && (p.loc || DEFAULT_REGION) === loc && !ex.has(p.name))
   if (!pool.length) return null
   const heat = heatOf(f, loc)
   /* 风声紧(≥3次) → 结伴概率翻倍(世界会躲落单) */
@@ -759,7 +760,7 @@ export async function startAmbush (gid, uid) {
   const f = getFake(gid)
   const w = getWorld(gid)
   const loc = getLoc(w, uid)
-  const pool = Object.values(f.roster).filter(p => p && p.alive && !p.servantOf && p.status !== 'mine' && !p.mineOf && (p.loc || DEFAULT_REGION) === loc)
+  const pool = Object.values(f.roster).filter(p => p && p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !p.servantOf && p.status !== 'mine' && !p.mineOf && (p.loc || DEFAULT_REGION) === loc)
   if (!pool.length) return { ok: false, msg: `${regionNameOf(loc)} 空无一人，无处可伏击~` }
   const st = { phase: 'prep', gid, uid, loc, startedAt: Date.now(), prepEnd: Date.now() + AMBUSH_PREP_MIN * 60000 }
   await redis.set(key, JSON.stringify(st), { EX: 3600 })
@@ -945,7 +946,7 @@ async function ambushDisposeUnlocked (gid, uid, action) {
     for (const p of targets) {
       const info = await intelOf(f, p, gid, uid)
       if (info) intel = `\n🗣️ ${info}`
-      killPerson(f, p, `被伏击者 ${nick} 先杀后搜斩杀`, Date.now())
+      killPerson(f, p, `被伏击者 ${nick} 先杀后搜斩杀`, Date.now(), { inherit: false })
     }
     markSectHate(f, gid, uid, targets, nick)
   }
@@ -977,6 +978,20 @@ async function ambushDisposeUnlocked (gid, uid, action) {
         }
         if (foundHidden) hiddenTxt = `\n🎒 你从其贴身暗袋里翻出 ${precious.map(n => `${itemIcon(n)}${n}`).join('、')}——竟是藏起来的宝贝！`
         p.bag.items = {}
+      }
+      /* 搜刮穿在身上的装备: 与宗门战俘搜刮一致, 玩家选择搜刮就应连身上装备一起拿到 */
+      if (p.bag && p.bag.equipped) {
+        for (const slot of Object.keys(p.bag.equipped)) {
+          const name = p.bag.equipped[slot]
+          if (!name || isBound(name) || !EQUIP_TPL[name]) continue
+          const attr = p.bag.equippedAttr?.[slot] || null
+          try {
+            addItem(String(uid), name, 1, attr, gid)
+            gotItems.push(`${itemIcon(name)}${name}×1`)
+          } catch (err) { }
+          p.bag.equipped[slot] = ''
+          if (p.bag.equippedAttr) p.bag.equippedAttr[slot] = null
+        }
       }
     }
     if (lootMoney > 0) await playerMoney(gid, uid, lootMoney)

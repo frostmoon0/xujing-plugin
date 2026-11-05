@@ -16,6 +16,7 @@ import {
   regionKeyOf, regionNameOf, getWorld, saveWorld, activeWorldGroups,
   getLoc, setLoc, getMoving, setMoving,
   bossOf, addTax, getRate, collectorSects, settleEconomy, dueSettle, dropRealms, taxFor,
+  getSeal, sealBlocksTravel, clearSeal,
   FORCE_SUCCESS, FORCE_MIN, FORCE_DROP_MAX, TELEPORT_COST
 } from '../../components/world_data.js'
 import { playerSectName, getFake } from '../../components/fake_data.js'
@@ -81,6 +82,11 @@ export class world extends plugin {
     const w = getWorld(e.group_id)
     const cur = getLoc(w, e.user_id)
     const pass = teleportPass(e.user_id, String(e.group_id))
+    const seal = sealBlocksTravel(w, e.user_id, cur, key, { allowDingxianyou: pass.free })
+    if (seal) {
+      e.reply(`🌊【${REGIONS[seal.region].name}】已被${seal.ownerName || seal.owner}的镇海珠封锁，无法进出！`)
+      return true
+    }
     if (cur !== key && pass.blocked) {
       e.reply(TOKEN_TRAVEL_BLOCK_MSG)
       return true
@@ -143,6 +149,11 @@ export class world extends plugin {
     if (getMoving(w, uid)) { e.reply('你已在跨越界壁途中，稍安勿躁~'); return true }
     const pass = teleportPass(uid, String(e.group_id))
     if (pass.blocked) { e.reply(TOKEN_TRAVEL_BLOCK_MSG); return true }
+    const seal = sealBlocksTravel(w, uid, getLoc(w, uid), key, { allowDingxianyou: false })
+    if (seal) {
+      e.reply(`🌊【${REGIONS[seal.region].name}】已被镇海珠封锁，无法强行跨越！`)
+      return true
+    }
     /* 交互压栈: 压到栈顶, 不终止下层交互, 避免之后数字回复错路由 */
     await forceLock(e.group_id, e.user_id, 'go')
     setMoving(w, uid, { to: key, end: Date.now() + FORCE_MIN * 60 * 1000, from: String(e.group_id) })
@@ -164,6 +175,11 @@ export class world extends plugin {
     const gid = String(e.group_id)
     const pass = teleportPass(uid, gid)
     if (pass.blocked) { e.reply(TOKEN_TRAVEL_BLOCK_MSG); return true }
+    const seal = sealBlocksTravel(w, uid, cur, key, { allowDingxianyou: pass.free })
+    if (seal) {
+      e.reply(`🌊【${REGIONS[seal.region].name}】已被镇海珠封锁，无法传送！`)
+      return true
+    }
     /* 交互压栈: 压到栈顶, 不终止下层交互, 避免之后数字回复错路由 */
     await forceLock(e.group_id, e.user_id, 'go')
     const filename = `${gid}.json`
@@ -362,12 +378,28 @@ async function worldTick () {
         const w = getWorld(gid)
         tickShenyou(gid, true, now)
         let changed = false
+        /* 0. 镇海珠封海到期解除 */
+        const activeSeal = getSeal(w)
+        if (activeSeal && Number(activeSeal.until) <= now) {
+          w.seal = null
+          changed = true
+          try {
+            Bot.pickGroup(gid).sendMsg(`🌊【${regionNameOf(activeSeal.region)}】的镇海珠封锁已到期解除。`)
+          } catch (err) { }
+        }
         /* 1. 界壁跨越到点结算 */
         for (const uid of Object.keys(w.moving || {})) {
           const mv = w.moving[uid]
           if (!mv || now < mv.end) continue
           delete w.moving[uid]
           changed = true
+          const seal = sealBlocksTravel(w, uid, getLoc(w, uid), mv.to)
+          if (seal) {
+            try {
+              Bot.pickGroup(gid).sendMsg([segment.at(typeof uid === 'string' ? Number(uid) : uid), `\n🌊 界壁被【${regionNameOf(seal.region)}】的镇海珠封锁，跨界失败，你被挡了回来。`])
+            } catch (err) { }
+            continue
+          }
           const toName = regionNameOf(mv.to)
           try {
             if (Math.random() < FORCE_SUCCESS) {

@@ -1,0 +1,20 @@
+{
+  "components/npc_action.js": "cab4ec74e775d8e0de5d5fc564f4a7c6385c7af104d053dead553e3aa404a936",
+  "components/sect/succession.js": "84000885184aec895c847544b20632736d04297eafb5786570528c66bce8f721",
+  "components/sect/diplomacy_state.js": "1fc4b90b913d141be5f665af6513507c67089a5650b839340e63de2539a63b4f",
+  "components/fake_data.js": "7fe9f7f2bf56e1c92f5016e0e45c241843ea1cf1c707fde549f6958367c9d21a",
+  "components/sect/war.js": "ae86369de4c8db06626f8fafa427be6778cdeec4537492c357e3b0f4ba8bf638",
+  "components/sect/war_roster.js": "6582652d48d6780dea935148a8630e8681d5134c91e1a1ed404d93e7a6afb821",
+  "components/sect/diplomacy.js": "a57297790b3911526752786e33f02af61977daa08c94b978e4d5428dec846f30",
+  "components/sect/captive.js": "cf1baa9be7f70933eba8da98f4c834a0e3b54301732daa92a19c220ff2207e5d",
+  "components/sect/hr.js": "5fc7a9d6caa1e3282c488c2045ec1d08d8b2c72ddf7cbc2975029b09a704508e",
+  "components/sect/tick.js": "65f5d9d3766c8fd63e68179e9f86b73c03ab5fc25477ff4f7bb5ced88cd11ad8",
+  "apps/user/play_guide.js": "78b5eb2a29e2867806dbddfb5204c5537f6e2a390b85ba2c615161938cd46575",
+  "test/npc_world_evolution.test.js": "b6f46c93a13563597d9d339b3a2c2da9e458fad51da8a8abde826ebdca3126eb",
+  "components/sect/ai_strategy.js": "c2539e84fa334bd87f8e883f99dca38253b1ea5f57b85ead6bd74fda3bb085fb",
+  "components/sect/utils.js": "ba2055442f2548e386e03a981c4d628240019bf8f5e074b7f2af3ad2f01e3604",
+  "apps/user/sect_system.js": "a91c6ba27b3ac51ae385997cd021df58d7f0fdcfde51b760cc24e195a9588c71",
+  "apps/user/world_news.js": "f0480b31fe8deed3e484663661879189c04c3975da9b9c7e63f68444128df0a0",
+  "components/sect/war_commands.js": "5e598b3d1285ba22e93bcaf2c16e91b5d881e45a87f8a1b9d74938e340461072",
+  "components/sect/war_interaction.js": "036680dcadec7beb8056bb39e4ffd57c09c06b67c946236b4935f7f8956e4505"
+}

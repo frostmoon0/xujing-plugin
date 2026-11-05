@@ -100,10 +100,10 @@ async function teamRows (st, gid) {
   for (const t of teams) {
     let action
     if (t.node) action = t.node.title
-    else if (t.arrivalAt && Date.now() < t.arrivalAt) action = `🛣️ 赶路中（约${Math.max(1, Math.ceil((t.arrivalAt - Date.now()) / 60000))}分钟到）`
+    else if (t.arrivalAt && Date.now() < t.arrivalAt) action = `🛣️ 赶路（约${Math.max(1, Math.ceil((t.arrivalAt - Date.now()) / 60000))}分钟后到达）`
     else if (t.kind === 'fake' && st.phase === 'barrier') action = '⚔️ 持续攻击屏障（每20秒）'
-    else if (t.kind === 'fake' && t.entered === false) action = '🚪 即将进入秘境'
-    else action = '⏳ 待命'
+    else if (t.kind === 'fake' && t.entered === false) action = '🚪 待入场'
+    else action = '⏳ 等待行动'
     let name = t.name
     let tag = t.kind === 'fake' ? '伪玩家' : `${(t.members || []).length}人`
     if (t.kind === 'fake') {
@@ -191,7 +191,7 @@ function buildRealmText (data) {
       lines.push(`🛡️ ${r.barrierName} ${r.barrierPct}% · ${r.barrierHp}/${r.barrierMax}`)
       if (r.autoPlayers) lines.push(`⚔️ 玩家持续破界：${r.autoPlayers}（每20秒自动攻击）`)
     } else {
-      lines.push(`⏳ 探索中 · 剩余 ${r.exploreLeft} 分钟`)
+      lines.push(`⏳ 等待行动 · 剩余 ${r.exploreLeft} 分钟`)
     }
     if (r.rewards.length) lines.push(`🎁 品质掉落：${r.rewards.map(x => `${x.icon}${x.name} ${x.pct}%`).join('、')}`)
     if (!r.teams.length) { lines.push('👥 场内暂无队伍'); continue }
@@ -262,8 +262,7 @@ export class realm extends plugin {
   async enter (e) {
     if (!e.group_id) return false
     const gid = String(e.group_id); const cfg = await getRealmCfg()
-    if (!cfg.group.includes(gid)) return false
-    /* 专属秘境: 本队成员任何时候可进(钥匙开的, 不受自动刷新开关限制) */
+    /* 专属秘境(遗蜕古钥)不受 realm_cfg.group 白名单限制; 公开秘境仍受白名单控制 */
     const partyId = partyIdOf(gid, e.user_id)
     const p = getPrivateRealms(gid).find(x => ['barrier', 'explore'].includes(x.phase) && (
       partyId === x.ownerPartyId || Object.values(x.teams || {}).some(t => t.kind === 'player' && (t.partyMembers || []).map(String).includes(String(e.user_id)))
@@ -274,15 +273,20 @@ export class realm extends plugin {
         return current ? enterRealm(current, gid, e.user_id) : null
       }))
       if (r?.ok) { e.reply([segment.at(e.user_id), `\n🗝️ ${r.msg}`]); return true }
+      if (r?.msg) { e.reply([segment.at(e.user_id), `\n${r.msg}`]); return true }
       return false
     }
-    /* 公开秘境: 受开关控制 */
+    /* 公开秘境: 受开关与白名单控制 */
+    if (!cfg.group.includes(gid)) return false
     const ok = cfg.enable === 'T' || cfg.enable === true
     if (!ok) return false
     const st = getRealm(gid)
     if (!['barrier', 'explore'].includes(st.phase)) return false
     const r = await withRealmLock(gid, async () => await withFakeLock(gid, async () => enterRealm(getRealm(gid), gid, e.user_id)))
-    if (!r?.ok) return false
+    if (!r?.ok) {
+      if (r?.msg) { e.reply([segment.at(e.user_id), `\n${r.msg}`]); return true }
+      return false
+    }
     e.reply([segment.at(e.user_id), `\n🌌 ${r.msg}`]); return true
   }
 
@@ -304,13 +308,13 @@ export class realm extends plugin {
       return b
     }))
     if (!r) return false
-    if (r.cd) { e.reply([segment.at(e.user_id), `\n🛡️ 你刚攻击过屏障，还需 ${r.cd} 秒~`]); return true }
-    if (r.already) { e.reply([segment.at(e.user_id), '\n⚔️ 你已加入屏障持续攻击，每20秒自动攻击一次。']); return true }
+    if (r.cd) { e.reply([segment.at(e.user_id), `\n🛡️ 攻击冷却：${r.cd}秒。`]); return true }
+    if (r.already) { e.reply([segment.at(e.user_id), '\n⚔️ 正在自动破界，每20秒攻击一次。']); return true }
     if (r.broke) {
-      e.reply([segment.at(e.user_id), '\n💥 屏障破碎！已进入探索阶段，只有发送过 #进入秘境 的队伍会进入。'])
+      e.reply([segment.at(e.user_id), '\n💥 屏障已破，探索开始。发送 #进入秘境 入场。'])
       await bcastBarrierBroke(getRealm(gid), r.hero)
     }
-    else e.reply([segment.at(e.user_id), `\n⚔️ 你已加入屏障持续攻击！首击造成 ${r.dmg} 伤害，屏障剩余 ${Math.round(r.hp / r.maxHp * 100)}%。\n之后每20秒自动攻击一次，可 #停止攻击屏障 退出。`])
+    else e.reply([segment.at(e.user_id), `\n⚔️ 已开始自动破界，首击伤害${r.dmg}，屏障剩余${Math.round(r.hp / r.maxHp * 100)}%。\n每20秒攻击一次；#停止攻击屏障 退出。`])
     return true
   }
 
@@ -327,27 +331,28 @@ export class realm extends plugin {
   async quit (e) {
     if (!e.group_id) return false
     const gid = String(e.group_id); const cfg = await getRealmCfg()
-    if (!cfg.group.includes(gid)) return false
     const st = realmOfUser(gid, e.user_id)
     if (!st || !['barrier', 'explore'].includes(st.phase)) return false
+    /* 专属秘境(遗蜕古钥)不受 realm_cfg.group 白名单限制, 否则非白名单群用钥进入后 #撤离 会静默失败 */
+    if (!st.private && !cfg.group.includes(gid)) return false
     const r = await withRealmLock(gid, async () => await withFakeLock(gid, async () => await leaveTeam(st.private ? getPrivateRealm(gid, st.privateId) : getRealm(gid), gid, e.user_id)))
     if (!r?.ok) return false
     await unlock(gid, e.user_id, 'realm').catch(() => {})
     const settlement = await formatRealmPush(gid, r.msgs.join('、'))
-    e.reply([segment.at(e.user_id), `\n🏃 你已${r.barrier ? '退出破界候选' : '撤离秘境'}${settlement ? `，结算获得：${settlement}` : '。'}`]); return true
+    e.reply([segment.at(e.user_id), `\n🏃 已${r.barrier ? '退出入场队伍' : '撤离秘境'}${settlement ? `，结算获得：${settlement}` : '。'}`]); return true
   }
 
   async useKey (e) {
     if (!e.group_id) return false
     const gid = String(e.group_id); const cfg = await getRealmCfg()
     /* 钥匙可用条件 = 自动刷新开关开启(enable=T); 不是白名单 */
-    if (!(cfg.enable === 'T' || cfg.enable === true)) { e.reply('遗蜕秘境当前未开启，钥匙暂不可用~'); return true }
+    if (!(cfg.enable === 'T' || cfg.enable === true)) { e.reply('秘境已关闭，暂不能使用古钥。'); return true }
     const uid = e.user_id
     const result = await withRealmLock(gid, async () => await withFakeLock(gid, async () => {
       /* 队长或单人使用；检查、扣钥、建档必须处于同一组锁内。 */
       const party = partyInfoOf(gid, uid)
-      if (party && String(uid) !== String(party.leader)) return { ok: false, msg: `只有队长才能使用${itemIcon(SECRET_KEY)}【遗蜕古钥】开启专属秘境~` }
-      if (!consumeItem(uid, SECRET_KEY, 1, null, gid)) return { ok: false, msg: `你没有${itemIcon(SECRET_KEY)}【遗蜕古钥】，可在世界Boss/洗劫藏宝阁/每日秘境/万魂窟中获得（彩级稀有）~` }
+      if (party && String(uid) !== String(party.leader)) return { ok: false, msg: `请由队长使用${itemIcon(SECRET_KEY)}遗蜕古钥。` }
+      if (!consumeItem(uid, SECRET_KEY, 1, null, gid)) return { ok: false, msg: `缺少${itemIcon(SECRET_KEY)}遗蜕古钥。来源：世界Boss、藏宝阁洗劫、每日秘境、万魂窟。` }
       const result = await openPrivateRealm(gid, cfg, uid, party ? `party:${party.id}` : `solo:${uid}`, party ? party.members : [uid])
       if (!result.ok) addItem(uid, SECRET_KEY, 1, null, gid)
       return result
@@ -355,8 +360,8 @@ export class realm extends plugin {
     if (!result.ok) { e.reply(result.msg); return true }
     const info = result.info
     const names = await memberNamesOf(gid)
-    sendToGroup(gid, replaceRealmPlayerIds(`🗝️ 有人使用${itemIcon(SECRET_KEY)}【遗蜕古钥】开启了一座专属秘境！\n🆔 秘境编号：${String(info.privateId).slice(-4)}\n📍 ${regionNameOf(info.region)} · ${info.diffName}（建议${info.realm}）\n📜 ${result.st.desc}（仅本队可入，探索 ${info.exploreMin} 分钟）`, names))
-    e.reply([segment.at(uid), `\n🗝️ 专属秘境【${info.title}】已开启！队长已进入，其他队员请各自发送 #进入秘境。\n探索 ${info.exploreMin} 分钟；秘境中只有本队，不会遇到其他玩家队伍或凭空出现伪玩家。`])
+    sendToGroup(gid, replaceRealmPlayerIds(`🗝️ ${itemIcon(SECRET_KEY)}遗蜕古钥开启专属秘境：${info.title}\n🆔 秘境编号：${String(info.privateId).slice(-4)}\n📍 ${regionNameOf(info.region)} · ${info.diffName}（建议${info.realm}）\n📜 ${result.st.desc}（探索${info.exploreMin}分钟）`, names))
+    e.reply([segment.at(uid), `\n🗝️ 专属秘境【${info.title}】已开启，队长已入场。队员各自发送 #进入秘境 加入。\n仅本队可入，探索${info.exploreMin}分钟。`])
     return true
   }
 
@@ -364,18 +369,18 @@ export class realm extends plugin {
     const m = String(e.msg || '').match(/(开|关|开启|关闭)\s*$/)
     const on = m && (m[1] === '开' || m[1] === '开启')
     try {
-      const all = YAML.parse(fs.readFileSync(cfgPath(), 'utf8')) || {}; if (!all.realm_cfg) all.realm_cfg = {}; all.realm_cfg.enable = on ? 'T' : 'F'; fs.writeFileSync(cfgPath(), YAML.stringify(all)); realmCfgRefresh(); e.reply(`✅ 遗蜕秘境已${on ? '开启' : '关闭'}（关闭不影响进行中的秘境）~`)
-    } catch (err) { logger.error('[遗蜕秘境]开关写入失败:' + (err && err.stack)); e.reply('❌ 配置写入失败~') }
+      const all = YAML.parse(fs.readFileSync(cfgPath(), 'utf8')) || {}; if (!all.realm_cfg) all.realm_cfg = {}; all.realm_cfg.enable = on ? 'T' : 'F'; fs.writeFileSync(cfgPath(), YAML.stringify(all)); realmCfgRefresh(); e.reply(`✅ 遗蜕秘境已${on ? '开启' : '关闭'}（进行中的秘境继续）`)
+    } catch (err) { logger.error('[遗蜕秘境]开关写入失败:' + (err && err.stack)); e.reply('❌ 配置保存失败。') }
     return true
   }
 
   async forceSpawn (e) {
     if (!e.group_id) return false
     const gid = String(e.group_id); const cfg = await getRealmCfg()
-    if (!(cfg.enable === 'T' || cfg.enable === true)) { e.reply('遗蜕秘境开关当前为关闭状态，不能手动刷新~'); return true }
-    if (!cfg.group.map(String).includes(gid)) { e.reply('此群不在秘境白名单中~'); return true }
+    if (!(cfg.enable === 'T' || cfg.enable === true)) { e.reply('请先开启秘境开关。'); return true }
+    if (!cfg.group.map(String).includes(gid)) { e.reply('本群未加入秘境白名单。'); return true }
     const info = await withRealmLock(gid, async () => { const st = getRealm(gid); if (st.phase !== 'idle') return null; const r = await spawnRealm(st, gid, cfg); saveRealm(st, gid); return r })
-    if (!info) { e.reply('当前已有秘境进行中，不能覆盖~'); return true }
+    if (!info) { e.reply('当前已有公开秘境，请结束后再刷新。'); return true }
     await bcastSpawn(gid, info); return true
   }
 
@@ -389,8 +394,10 @@ export class realm extends plugin {
       const st = realmOfUser(gid, uid)
       const t = st && teamOf(st, uid)
       const party = t && partyInfoOf(gid, uid)
-      if (!st || !t || !(t.node || t.ambushNode) || !party || String(party.leader) !== String(uid) || String(t.leader) === String(uid)) return false
-      await unlock(gid, String(t.leader), 'realm').catch(() => {})
+      if (!st || !t || !(t.node || t.ambushNode)) return false
+      const resuming = st.nightResumePending && String(t.leader) === uid
+      if (!resuming && (!party || String(party.leader) !== uid || String(t.leader) === uid)) return false
+      if (!resuming) await unlock(gid, String(t.leader), 'realm').catch(() => {})
       await forceLock(gid, uid, 'realm')
     }
     /* 状态锁复查: 洗劫/伏击/讨伐/万魂/天牢/战争等锁定状态下禁止用数字探索秘境 (skipRealm: 秘境自身数字决策豁免秘境锁) */
@@ -408,7 +415,7 @@ export class realm extends plugin {
         t.ambushNode = null
         if (st.private) savePrivateRealm(st, gid)
         else saveRealm(st, gid)
-        return { r: { valid: true, msgs: [t.ambush === 'fight' ? '你已决定参与围剿混战，守住出口伏击抢夺！' : '你已决定悄悄溜走，将寻机突围！'] }, leader: t.leader }
+        return { r: { valid: true, msgs: [t.ambush === 'fight' ? '已选择留守围剿。' : '已选择突围，等待离场结果。'] }, leader: t.leader }
       }
       if (!t.node) return null
       /* 同步当前队长(#转让队长后把决策权交给新队长, 后续节点/结算都指向他) */
@@ -454,13 +461,14 @@ function partyMembers (gid, uid) {
 }
 
 async function bcastSpawn (gid, info) {
-  const text = `🌌 ${info.title} 现世！\n📍 ${regionNameOf(info.region)} · ${info.diffName}（建议${info.realm}）\n🛡️ 屏障强度 ${info.barrierHp.toLocaleString()}（${info.barrierName}）\n📜 ${info.desc}\n\n对应大区内回复 #攻击屏障；#进入秘境 参加探索。屏障破碎后探索 ${info.exploreMin} 分钟！`
+  const text = `🌌 ${info.title} 现世\n📍 ${regionNameOf(info.region)} · ${info.diffName}（建议${info.realm}）\n🛡️ 屏障强度 ${info.barrierHp.toLocaleString()}（${info.barrierName}）\n📜 ${info.desc}\n\n前往${regionNameOf(info.region)}：#攻击屏障 参与破界，#进入秘境 入场。
+破界后探索${info.exploreMin}分钟。`
   sendToGroup(gid, await formatRealmPush(gid, text))
 }
 
 /** 屏障破碎群提示 */
 async function bcastBarrierBroke (st, hero) {
-  const text = `💥 屏障破碎！【${st.title}】全面开放探索！\n📍 ${regionNameOf(st.region)} · 探索剩余 ${st.exploreMin} 分钟\n${hero ? `🏆 首功：${hero} 完成最后一击！\n` : ''}发送 #进入秘境 参加探索！`
+  const text = `💥 【${st.title}】屏障已破，探索开始。\n📍 ${regionNameOf(st.region)} · 探索剩余 ${st.exploreMin} 分钟\n${hero ? `🏆 首功：${hero} 完成破界。\n` : ''}#进入秘境 参加探索。`
   sendToGroup(String(st.gid), await formatRealmPush(String(st.gid), text))
 }
 
@@ -470,6 +478,22 @@ async function sendRealmGroupText (gid, text) {
   const safeText = await formatRealmPush(gid, text)
   const img = await textToImg(safeText)
   sendToGroup(gid, img || safeText)
+}
+
+/** 夜间 Redis 交互会过期；恢复时重发尚待决策的菜单。 */
+async function resumeNightChoices (st, gid) {
+  if (!st.nightResumePending) return
+  for (const t of Object.values(st.teams || {})) {
+    if (t.kind !== 'player' || t.dead || !t.members.length) continue
+    syncPlayerTeam(st, gid, t)
+    const node = t.ambushNode || t.node
+    if (!node) continue
+    await forceLock(gid, t.leader, 'realm')
+    await notifyAt(gid, t.leader, `🌅 探索已恢复，倒计时已顺延。请继续选择：\n${menuText(node)}`)
+  }
+  st.nightResumePending = false
+  if (st.private) savePrivateRealm(st, gid)
+  else saveRealm(st, gid)
 }
 
 /** 探索推进(公开与专属共用) */
@@ -486,7 +510,7 @@ async function processExplore (st, gid, cfg, now, extra) {
   if (!st.private) {
     if (!st.ambushAt && now >= st.endAt - AMBUSH_MINUTES * 60000) {
       const pending = beginAmbush(st, gid, now)
-      sendToGroup(gid, `⚔️ ${st.title} 即将关闭，出口围剿开始！\n各队可参与围剿伏击抢夺，也可悄悄溜走提前带战果离场（溜走可能被抓）！`)
+      sendToGroup(gid, `⚔️ ${st.title} 出口围剿开始。\n队长选择留守围剿或突围离场；突围失败将损失30%本场战利品。`)
       for (const p of pending) { await forceLock(gid, p.team.leader, 'realm'); notifyAt(gid, p.team.leader, menuText(p.node)) }
       if (st.private) savePrivateRealm(st, gid)
       else saveRealm(st, gid)
@@ -509,7 +533,7 @@ async function processExplore (st, gid, cfg, now, extra) {
     syncPlayerTeam(st, gid, t)
     const idx = autoPickForPlayer(t.node)
     const r = t.node.type === 'disposal' ? await resolveDisposal(st, gid, t, idx, cfg) : await resolveNode(st, gid, t, t.node, idx, cfg)
-    if (r.msgs.length) notifyAt(gid, t.leader, `⏳ 你上一轮抉择超时未回复，系统已代为选择：\n${r.msgs.join('\n')}`)
+    if (r.msgs.length) notifyAt(gid, t.leader, `⏳ 选择超时，已自动处理：\n${r.msgs.join('\n')}`)
   }
   advanceFakeArrivals(st, gid, now)
   const fakeResult = await driveFakeTeams(st, gid, cfg)
@@ -531,6 +555,8 @@ async function realmTick () {
     try {
       await withRealmLock(gid, async () => await withFakeLock(gid, async () => {
         const st = getRealm(gid)
+        if (st.phase !== 'idle' && isNight(new Date(now))) { saveRealm(st, gid); return }
+        await resumeNightChoices(st, gid)
         reconcileFakeBusy(gid, st)
         if (st.phase === 'idle') {
           if (!enabled || !configuredGroups.includes(gid) || (isNight() && cfg.night_stop !== 'F') || now < st.nextSpawn) return
@@ -562,6 +588,8 @@ async function realmTick () {
       await withRealmLock(ref.gid, async () => await withFakeLock(ref.gid, async () => {
         const st = getPrivateRealm(ref.gid, ref.id)
         if (!st || st.phase !== 'explore') return
+        if (isNight(new Date(now))) { savePrivateRealm(st, ref.gid); return }
+        await resumeNightChoices(st, ref.gid)
         reconcileFakeBusy(ref.gid, st)
         await processExplore(st, ref.gid, cfg, now)
       }))

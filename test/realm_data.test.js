@@ -38,6 +38,7 @@ test('秘境奖励池包含材料、丹药、装备、功法和灵石', () => {
   assert.ok(!pool.includes('镇魂晶'))
   assert.ok(!pool.includes('还魂丹'))
   assert.ok(!pool.includes('登仙令'))
+  assert.ok(!pool.includes('仙帝丹'), '仙帝丹只能配方合成, 不进秘境普通池')
   assert.ok(!pool.includes('神游蛊'))
   assert.ok(!pool.includes('灵宝盒'))
   assert.ok(pool.length > 5)

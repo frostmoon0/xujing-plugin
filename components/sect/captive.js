@@ -1,6 +1,12 @@
+import { hasBloodFeud, temperCaptiveWeights } from './survival.js'
+import { canAdmitSectNpc, admitSectNpc, sectOccupancy } from './capacity.js'
+import { addWarKarma } from './war_journal.js'
+import { defenderOf, warReceipt } from './war_state.js'
+import { extractWarLoot, depositWarLoot } from './war_loot.js'
+import { withImmediateSaveContext } from '../deferred_save.js'
 /* 由 sect_system.js 拆分自动生成: captive.js */
-import { saveFake, sectName, sectAlive, sectCap, removeFromSectMap, killPerson, logEvent, getNick, POS } from '../fake_data.js'
-import { addItem, getBag, saveBag, isBound, MATERIAL_TPL, ITEM_TPL, EQUIP_TPL, itemIcon } from '../equip_data.js'
+import { getFake, saveFake, sectName, sectAlive, sectCap, removeFromSectMap, killPerson, logEvent, getNick } from '../fake_data.js'
+import { addItem, addItemToBag, getBag, saveBag, isBound, MATERIAL_TPL, ITEM_TPL, EQUIP_TPL, itemIcon } from '../equip_data.js'
 import xujing_data from '../xujing_data.js'
 import { playerMoney, applyInjury, rand, clamp, atkLog, getVault, ensureCapSub, CFG, posCnOf, playerPower } from './utils.js'
 import { addMineEvent } from './economy.js'
@@ -67,7 +73,7 @@ export async function autoDisposePlayerCaptives (f, gid, atk, winSect, now, shar
     ? [...shareList]
     : (hasSub ? [...(atk.result === 'win' ? atk.captives.byAtk.players : atk.captives.byDef.players)] : [...((atk.captives && atk.captives.players) || [])])
   if (!list.length) return
-  const defSect = atk.result === 'lose' ? atk.atkSect : (atk.targetType === 'sect' ? atk.target : f.areas[atk.target])
+  const defSect = atk.result === 'lose' ? atk.atkSect : (defenderOf(f, atk))
   const sname = winSect && f.sects[winSect] ? sectName(f, winSect) : (atk.rogueName || '散修')
   const jails = (winSect && f.sects[winSect]) ? ((f.sectJails = f.sectJails || {}), (f.sectJails[winSect] = f.sectJails[winSect] || [])) : null
   let disposed = 0
@@ -75,30 +81,38 @@ export async function autoDisposePlayerCaptives (f, gid, atk, winSect, now, shar
     const pp = f.players && f.players[uid]
     /* 无宗门玩家(散修)不在 f.players, 同样处置(搜刮/天牢只依赖玩家真实档案), 名字取群昵称 */
     const pname = (pp && pp.name) || await getNick(gid, uid)
-    const roll = Math.random()
+    atk.autoPlayerDisposals ||= {}
+    const decision = atk.autoPlayerDisposals[`${winSect}:${uid}`] ||= { roll: Math.random(), injury: rand([1, 2]), done: false }
+    if (decision.done) { if (decision.jailed) jailedUids.add(String(uid)); continue }
+    captiveCheckpoint(f, gid)
+    const roll = decision.roll
     if (roll < 0.3) {
       atkLog(atk, `【释放】${pname} 被释放`, now)
       logEvent(f, 'captive', `【释放】玩家 ${pname} 战败被俘后被释放`, now, { who: [pname], sect: defSect })
     } else if (roll < 0.65) {
-      const t = await lootPlayerCaptive(f, gid, uid, winSect, 0.3)
+      const t = await lootPlayerCaptive(f, gid, uid, winSect, 0.3, { receipt: `${warReceipt(atk)}:auto:${winSect}:${uid}:loot` })
       const n = Object.values(t.items).reduce((a, b) => a + b, 0)
-      applyInjury(f, uid, rand([1, 2]), now, gid)
+      applyInjury(f, uid, decision.injury, now, gid, `${warReceipt(atk)}:auto:injury:${uid}`)
       atkLog(atk, `【搜刮释放】${pname} 被搜刮${n}件物品${t.stones ? `、${t.stones}灵石` : ''}后释放`, now)
       logEvent(f, 'captive', `【搜刮释放】玩家 ${pname} 被搜刮${n}件物品${t.stones ? `、${t.stones}灵石` : ''}后释放`, now, { who: [pname], sect: defSect })
     } else if (roll < 0.75 && jails) {
       /* 无限期关押前扒除全部非绑定财物入胜方宗门宝库 */
-      await lootPlayerCaptive(f, gid, uid, winSect, 1, { toVault: true })
-      jails.push({ uid: String(uid), name: pname, at: now, atkId: atk.id })
+      await lootPlayerCaptive(f, gid, uid, winSect, 1, { toVault: true, receipt: `${warReceipt(atk)}:auto:${winSect}:${uid}:confine` })
+      if (!jails.some(x => String(x.uid) === String(uid))) jails.push({ uid: String(uid), name: pname, at: now, atkId: atk.id })
+      decision.jailed = true
       jailedUids.add(String(uid))
       await markPlayerCaptive(gid, uid, `${sname}·天牢`, 3600)
-      applyInjury(f, uid, rand([1, 2]), now, gid)
+      applyInjury(f, uid, decision.injury, now, gid, `${warReceipt(atk)}:auto:injury:${uid}`)
       atkLog(atk, `【收押】${pname} 被关入【${sname}】天牢`, now)
       logEvent(f, 'captive', `【收押】玩家 ${pname} 被关入【${sname}】天牢（无限期，可越狱）`, now, { who: [pname], sect: defSect })
     } else {
-      applyInjury(f, uid, 3, now, gid)
+      applyInjury(f, uid, 3, now, gid, `${warReceipt(atk)}:auto:injury:${uid}`)
       atkLog(atk, `【惩戒】${pname} 被重伤惩戒`, now)
       logEvent(f, 'captive', `【惩戒】玩家 ${pname} 战败被俘后被重伤惩戒`, now, { who: [pname], sect: defSect })
     }
+    decision.done = true
+    removeCaptivesFromPools(atk, [], [uid])
+    captiveCheckpoint(f, gid)
     disposed++
   }
   /* 记录自动处置摘要(供播报文案使用; 已处置的从总池移除后仍能提示; 按实际处置数) */
@@ -122,13 +136,13 @@ export async function disposeFakeCaptives (f, gid, atk, winSect, now = Date.now(
   if (!list.length) return
   const disp = victorDisposition(f, winSect)
   const sname = winSect && f.sects[winSect] ? sectName(f, winSect) : (atk.rogueName || '散修')
-  const defSect = atk.targetType === 'sect' ? atk.target : f.areas[atk.target]
+  const defSect = defenderOf(f, atk)
   const coreNames = disp.core.map(x => x.name)
-  const canRecruit = !!winSect && !!f.sects[winSect] && !f.sects[winSect].wipeAt && sectAlive(f, winSect).length < sectCap(f, winSect)
   const canJail = !!winSect && !!f.sects[winSect] // 有宗门胜方才能关天牢/送矿山
   for (const n of [...list]) {
     const p = f.roster[n]
     if (!p || !p.alive) { removeCaptivesFromPools(atk, [n], []); continue }
+    const canRecruit = !!winSect && canAdmitSectNpc(f, winSect, n)
     const r = p.relations || {}
     /* 羁绊: 胜方核心成员里有其 道侣/师父/徒弟/知己/挚友/手足/亲族 */
     const bonded = coreNames.some(cn => cn === r.master || cn === r.spouse ||
@@ -142,7 +156,7 @@ export async function disposeFakeCaptives (f, gid, atk, winSect, now = Date.now(
     const danger = p.trait === '嗜杀' ? 0.25 : (p.trait === '好斗' ? 0.12 : 0)
     const mild = p.trait === '善良' ? 0.18 : (p.trait === '平和' ? 0.1 : 0)
     /* 各处置倾向(动态加权): 有羁绊大放走, 有仇大处决, 残暴多杀/多关押, 仁慈多放, 贪婪多搜刮/多送矿 */
-    const w = {
+    let w = {
       free: clamp(0.15 + disp.mercy + (bonded ? 0.6 : 0) + mild - disp.cruelty * 0.5 - (hated ? 0.15 : 0), 0.01, 0.95),
       robFree: clamp(0.15 + disp.greed * 0.6 + disp.mercy * 0.3 - disp.cruelty * 0.3 - (hated ? 0.1 : 0), 0.01, 0.9),
       recruit: canRecruit ? clamp(0.06 + disp.mercy * 0.25 + (bonded ? 0.55 : 0) + mild - (hated ? 0.3 : 0), 0.01, 0.8) : 0,
@@ -153,6 +167,7 @@ export async function disposeFakeCaptives (f, gid, atk, winSect, now = Date.now(
       /* 送矿山: 贪婪/残暴/危险俘虏倾向押去挖矿(安全奴役); 仁慈/羁绊少送 */
       mine: canJail ? clamp(0.05 + disp.greed * 0.5 + disp.cruelty * 0.2 + danger * 0.5 - disp.mercy * 0.4 - (bonded ? 0.4 : 0), 0.01, 0.7) : 0
     }
+    w = temperCaptiveWeights(w, { bloodFeud: disp.core.some(c => hasBloodFeud(c, p) || hasBloodFeud(p, c)), cruelty: disp.cruelty })
     const total = w.free + w.robFree + w.recruit + w.robKill + w.kill + w.jail + w.mine
     let rr = Math.random() * total
     let act = 'free'
@@ -174,8 +189,8 @@ export async function disposeFakeCaptives (f, gid, atk, winSect, now = Date.now(
       /* 收编: 叛离原宗拜入胜方, 忠诚重头再来 */
       const oldSect = p.sect
       if (oldSect) removeFromSectMap(f, oldSect, n)
-      p.sect = winSect; p.pos = 'dizi'; p.status = 'sect'
-      p.level = clamp(p.level, POS.dizi.band[0], POS.dizi.band[1])
+      if (!admitSectNpc(f, p, winSect)) { logEvent(f, 'captive', `【释放】${sname} 门人已满，释放 ${n}`, now, { who: [n] }); removeCaptivesFromPools(atk, [n], []); continue }
+      // 收编任职不改变NPC实际修为。
       p.joinAt = now
       if (f.sectMap[winSect]) { if (!f.sectMap[winSect].dizi) f.sectMap[winSect].dizi = []; if (!f.sectMap[winSect].dizi.includes(n)) f.sectMap[winSect].dizi.push(n) }
       p.loyalty = Math.floor((Number(p.loyalty) || 60) * 0.35)
@@ -242,8 +257,44 @@ export async function unmarkPlayerCaptive (gid, uid) {
 
 /** 查询玩家被俘(api.js 拦截用): 返回胜方宗门名或 null */
 export async function captiveOf (gid, uid) {
-  try { return await redis.get(captiveKey(gid, uid)) } catch (err) { return null }
+  // 持久化俘虏池/天牢为事实来源；Redis 丢失或过期不能获得自由。
+  const f = getFake(gid); const id = String(uid)
+  for (const [sid, arr] of Object.entries(f.sectJails || {})) if (arr.some(x => String(x.uid) === id)) return `${sectName(f, sid)}·天牢`
+  for (const war of f.sectAttacks || []) {
+    const c = war.captives || {}
+    if ([c, c.byAtk, c.byDef, ...Object.values(c.byShare || {})].some(pool => (pool?.players || []).some(x => String(x) === id))) return '战场俘虏'
+  }
+  // 没有事实记录的残留缓存不能把已获释者重新锁住。
+  try { if (await redis.get(captiveKey(gid, uid))) await unmarkPlayerCaptive(gid, uid) } catch (err) { }
+  return null
 }
+
+/** 关押宗门灭门后，其关押的各宗俘虏全部获释；其他盟友的份额不受影响。 */
+export async function liberateDestroyedCaptor (f, gid, sid, now = Date.now()) {
+  for (const other of f.sectAttacks || []) {
+    const c = other.captives
+    if (!c) continue
+    const held = { fakes: new Set(c.byShare?.[sid]?.fakes || []), players: new Set((c.byShare?.[sid]?.players || []).map(String)) }
+    const ownSide = other.atkSect === sid ? c.byAtk : defenderOf(f, other) === sid ? c.byDef : null
+    const legacy = !c.byAtk && !c.byDef && ((other.result === 'win' && other.atkSect === sid) || (other.result === 'lose' && defenderOf(f, other) === sid))
+    const pool = ownSide || (legacy ? c : null)
+    if (pool) {
+      const reservedF = new Set(); const reservedP = new Set()
+      if (other.atkSect === sid) for (const [owner, share] of Object.entries(c.byShare || {})) {
+        if (owner === sid) continue
+        for (const name of share.fakes || []) reservedF.add(name)
+        for (const uid of share.players || []) reservedP.add(String(uid))
+      }
+      for (const name of pool.fakes || []) if (!reservedF.has(name)) held.fakes.add(name)
+      for (const uid of pool.players || []) if (!reservedP.has(String(uid))) held.players.add(String(uid))
+    }
+    if (!held.fakes.size && !held.players.size) continue
+    removeCaptivesFromPools(other, [...held.fakes], [...held.players])
+    for (const uid of held.players) await unmarkPlayerCaptive(gid, uid)
+    atkLog(other, `【获释】关押宗门覆灭，${held.fakes.size} 名门人和 ${held.players.size} 名玩家重获自由`, now)
+  }
+}
+
 
 /** 玩家被擒瞬间: 立即标记被俘(redis 禁动作) + @通知本人; 处置仍等战争结算
  *  by: 'def'=被守方擒(攻方人, 攻方胜时属自己人待解救) / 'atk'=被攻方擒(守方人, 攻方胜时属战俘待处置) */
@@ -256,7 +307,7 @@ export async function capturePlayerNow (f, gid, atk, uid, now, sname, by = 'atk'
   await markPlayerCaptive(gid, uid, sname || '敌军')
   try {
     const g = Bot.pickGroup(gid)
-    if (g && g.sendMsg) g.sendMsg([segment.at(Number(uid)), `\n⛓️ 你已被【${sname || '敌军'}】俘虏，无法行动！等待战争结束处置（#战争详情 可查看战况）~`])
+    if (g && g.sendMsg) g.sendMsg([segment.at(Number(uid)), `\n⛓️ 你已被【${sname || '敌军'}】俘虏，无法行动！等待战争结束处置（#战争详情 可查看战况）`])
   } catch (err) { }
 }
 
@@ -273,7 +324,7 @@ export async function rescueCaptivesOf (f, gid, winSects, now = Date.now(), defS
   for (const other of (f.sectAttacks || [])) {
     /* 判定该场"抓人方" = 该场胜方阵营的对手; 胜利方永远不可能俘虏胜利方的人 */
     let captor = null
-    const otherTarget = other.targetType === 'sect' ? other.target : (f.areas && f.areas[other.target])
+    const otherTarget = defenderOf(f, other)
     if (String(other.id) === String(atkId)) {
       captor = defSect
     } else if (other.atkSect && winnerIds.has(String(other.atkSect))) {
@@ -358,13 +409,13 @@ export function sectJailList (f, sectId) {
 export async function releaseSectJail (f, gid, sectId, name) {
   const arr = sectJailList(f, sectId)
   const i = arr.findIndex(x => x.name === name || String(x.uid) === String(name))
-  if (i < 0) return { ok: false, msg: '宗门天牢里没有这个人~' }
+  if (i < 0) return { ok: false, msg: '宗门天牢里没有这个人' }
   const x = arr[i]
   arr.splice(i, 1)
   if (!arr.length) delete f.sectJails[sectId]
   if (x.uid) { try { await unmarkPlayerCaptive(gid, x.uid) } catch (err) { } }
   saveFake(f, gid)
-  return { ok: true, msg: '✅ 已将其释放出天牢~' }
+  return { ok: true, msg: '✅ 已将其释放出天牢' }
 }
 
 /** 越狱成功率: 关押越久越容易, 满24小时(86400000ms)百分百成功 */
@@ -443,7 +494,7 @@ export async function playerEscape (f, gid, uid, now = Date.now()) {
     const sname = sectName(f, sid)
     if (now < (x.lastEscapeAt || 0)) {
       const cdMin = Math.ceil((x.lastEscapeAt - now) / 60000)
-      return { ok: false, msg: `⛓️ 越狱失败后需等待 ${cdMin} 分钟才能再次尝试（关押越久成功率越高，满24小时必成）~` }
+      return { ok: false, msg: `⛓️ 越狱失败后需等待 ${cdMin} 分钟才能再次尝试（关押越久成功率越高，满24小时必成）` }
     }
     const rate = escapeRateOf(x.at, now)
     if (Math.random() < rate) {
@@ -452,15 +503,15 @@ export async function playerEscape (f, gid, uid, now = Date.now()) {
       try { await unmarkPlayerCaptive(gid, uid) } catch (err) { }
       logEvent(f, 'captive', `【越狱】${sname} 天牢中的 ${x.name} 成功越狱，重获自由（共关押约 ${Math.max(1, Math.round((now - x.at) / 60000))} 分钟）`, now, { who: [x.name], sect: sid })
       saveFake(f, gid)
-      return { ok: true, msg: `🔓 越狱成功！你成功逃出【${sname}】天牢，重获自由~` }
+      return { ok: true, msg: `🔓 越狱成功！你成功逃出【${sname}】天牢，重获自由` }
     }
     x.lastEscapeAt = now + 30 * 60000
     logEvent(f, 'captive', `【越狱失败】${sname} 天牢中的 ${x.name} 尝试越狱被守卫发现，押回牢房`, now, { who: [x.name], sect: sid })
     saveFake(f, gid)
     const pct = Math.round(rate * 100)
-    return { ok: false, msg: `⛓️ 越狱失败！被守卫发现押回牢房（当前成功率约 ${pct}%，关押越久成功率越高，满24小时必成；30分钟后可再试）~` }
+    return { ok: false, msg: `⛓️ 越狱失败！被守卫发现押回牢房（当前成功率约 ${pct}%，关押越久成功率越高，满24小时必成；30分钟后可再试）` }
   }
-  return { ok: false, msg: '你不在任何宗门天牢里~' }
+  return { ok: false, msg: '你不在任何宗门天牢里' }
 }
 
 /* ============ 玩家营救被关同伴(#拯救) ============ */
@@ -481,136 +532,96 @@ export async function rescuingOf (gid, uid) {
 export async function startRescue (f, gid, uid, tUid) {
   const suid = String(uid)
   const st = String(tUid || '').trim()
-  if (!st) return { ok: false, msg: '用法：#拯救 @被关玩家（花30分钟把他从天牢救出来）~' }
-  if (suid === st) return { ok: false, msg: '你不在天牢里，救谁呢~' }
+  if (!st) return { ok: false, msg: '用法：#拯救 @被关玩家（花30分钟把他从天牢救出来）' }
+  if (suid === st) return { ok: false, msg: '你不在天牢里，救谁呢' }
   /* 施救者不能已在营救中 / 自己被俘关押 */
   const busy = await rescuingOf(gid, uid)
-  if (busy) return { ok: false, msg: '⛏️ 你正在营救同伴，30分钟内脱不开身~' }
-  try { const cap = await captiveOf(gid, uid); if (cap) return { ok: false, msg: '⛓️ 你身陷囹圄，先自救（#越狱）或等救援吧~' } } catch (err) { }
+  if (busy) return { ok: false, msg: '⛏️ 你正在营救同伴，30分钟内脱不开身' }
+  try { const cap = await captiveOf(gid, uid); if (cap) return { ok: false, msg: '⛓️ 你身陷囹圄，先自救（#越狱）或等救援吧' } } catch (err) { }
   /* 目标必须正被关在本群某个宗门天牢里 */
   let jailSect = null
   for (const sid of Object.keys(f.sectJails || {})) {
     if ((f.sectJails[sid] || []).some(x => String(x.uid) === st)) { jailSect = sid; break }
   }
-  if (!jailSect) return { ok: false, msg: '被关的玩家不在天牢里（可能已释放/越狱/换人）~' }
+  if (!jailSect) return { ok: false, msg: '被关的玩家不在天牢里（可能已释放/越狱/换人）' }
   const sname = sectName(f, jailSect)
   try {
     await redis.set(rescueKey(gid, uid), JSON.stringify({ s: sname, t: st, sid: jailSect, until: Date.now() + RESCUE_MS }))
   } catch (err) {
-    return { ok: false, msg: '营救启动失败，请稍后再试~' }
+    return { ok: false, msg: '营救启动失败，请稍后再试' }
   }
-  return { ok: true, msg: `⛏️ 你已开始营救【${sname}】天牢中的同伴，约需30分钟（期间你只能查看信息，被救者出狱后自动解除）~` }
+  return { ok: true, msg: `⛏️ 你已开始营救【${sname}】天牢中的同伴，约需30分钟（期间你只能查看信息，被救者出狱后自动解除）` }
 }
 
 /* ============ 搜刮战俘(真实数据, 绑定道具不搜) ============ */
 /** 搜刮伪玩家战俘: 灵石+背包全部(排除绑定) → 胜方宗门宝库(灵石→stones, 丹药→pills, 材料→mats, 装备→equips) */
 export function lootFakeCaptive (f, gid, p, winSect) {
   const take = { stones: 0, mats: {}, pills: {}, equips: {} }
-  const v = winSect ? getVault(f, winSect) : null
-  const qtyOf = raw => {
-    const n = raw && typeof raw === 'object' ? raw.count : raw
-    const qty = Number(n)
-    return Number.isFinite(qty) && qty > 0 ? Math.floor(qty) : 1
+  const vault = winSect && f.sects[winSect] ? getVault(f, winSect) : null
+  if (!vault) return take
+  const entries = extractWarLoot(p.bag || {}, 1)
+  depositWarLoot(vault, entries)
+  for (const entry of entries) {
+    const field = MATERIAL_TPL[entry.name] ? 'mats' : ITEM_TPL[entry.name] ? 'pills' : 'equips'
+    take[field][entry.name] = (take[field][entry.name] || 0) + entry.count
   }
-  const addLoot = (name, count) => {
-    if (MATERIAL_TPL[name]) {
-      take.mats[name] = (take.mats[name] || 0) + count
-      if (v) v.mats[name] = (v.mats[name] || 0) + count
-    } else if (ITEM_TPL[name]) {
-      take.pills[name] = (take.pills[name] || 0) + count
-      if (v) v.pills[name] = (v.pills[name] || 0) + count
-    } else if (EQUIP_TPL[name]) {
-      take.equips[name] = (take.equips[name] || 0) + count
-      if (v) { if (!v.equips) v.equips = {}; v.equips[name] = (v.equips[name] || 0) + count }
-    }
-  }
-  const gold = Number(p.money) || 0
-  if (gold > 0) { p.money = 0; take.stones = gold; if (v) v.stones = (v.stones || 0) + gold }
-  if (p.bag && p.bag.items) {
-    for (const [name, raw] of Object.entries(p.bag.items)) {
-      if (isBound(name)) continue
-      const count = qtyOf(raw)
-      delete p.bag.items[name]
-      addLoot(name, count)
-    }
-  }
-  if (p.bag && p.bag.equipped) {
-    for (const slot of Object.keys(p.bag.equipped)) {
-      const n = p.bag.equipped[slot]
-      if (!n || isBound(n)) continue
-      delete p.bag.equipped[slot]
-      /* 穿着的装备也搜刮入宝库(装备战利品, 供胜方伪玩家/玩家取用) */
-      addLoot(n, 1)
-    }
-  }
+  take.stones = Math.max(0, Number(p.money) || 0); p.money = 0; vault.stones += take.stones
   return take
 }
 
-/** 搜刮玩家战俘: 随机收走装备+背包物品+灵石(ratio 0~1, 排除绑定) → 真实扣除;
- *  归属: 默认胜方有玩家宗主 → 物品进其背包、灵石进宗门宝库; 胜方AI宗门 → 丹药/材料/灵石进宝库;
- *  toVault=true 时所有非绑定物品直接进胜方宗门宝库(关天牢/送矿山使用) */
+function captiveCheckpoint (f, gid) {
+  if (withImmediateSaveContext(() => saveFake(f, gid)) === false) throw new Error('俘虏事务保存失败')
+}
+
+/** 扣款和背包转移各自带收据；同一战役重试时重放原清单，保留装备属性。 */
 export async function lootPlayerCaptive (f, gid, uid, winSect, ratio, options = {}) {
-  const toVault = !!options.toVault
-  const take = { items: {}, stones: 0 }
-  let bag = null
-  try { bag = getBag(uid, gid) } catch (err) { }
-  if (bag) {
-    const items = bag.items || {}
-    for (const name of Object.keys(items)) {
-      if (isBound(name)) continue
-      if (Math.random() < ratio) {
-        const it = items[name]
-        const cnt = (it && it.count) || 1
-        take.items[name] = (take.items[name] || 0) + cnt
-        delete items[name]
-      }
-    }
-    const eq = bag.equipped || {}
-    for (const slot of Object.keys(eq)) {
-      const n = eq[slot]
-      if (!n || isBound(n)) continue
-      if (Math.random() < ratio) {
-        take.items[n] = (take.items[n] || 0) + 1
-        eq[slot] = ''
-        if (bag.equippedAttr) bag.equippedAttr[slot] = null
-      }
-    }
-    try { saveBag(uid, bag, gid) } catch (err) { }
+  uid = String(uid)
+  const owner = !options.toVault && f.sects[winSect]?.owner ? String(f.sects[winSect].owner) : null
+  const vault = winSect && f.sects[winSect] ? getVault(f, winSect) : null
+  if (!owner && !vault) return { items: {}, stones: 0 }
+  const receipt = options.receipt || `legacy:${Date.now()}:${uid}:${Math.random()}`
+  const bag = getBag(uid, gid)
+  bag.warLootReceipts ||= {}
+  let plan = bag.warLootReceipts[receipt]
+  if (!plan) {
+    const entries = extractWarLoot(bag, ratio)
+    plan = bag.warLootReceipts[receipt] = { entries, owner, winSect, at: Date.now() }
+    saveBag(uid, bag, gid)
   }
-  /* 灵石(玩家钱袋): 随机搜刮 ratio */
-  try {
-    const m = await playerMoney(gid, uid)
-    if (m.money > 0) {
-      const takeStone = Math.floor(m.money * ratio)
-      if (takeStone > 0) {
-        m.home[uid].money = m.money - takeStone
-        await xujing_data.getQQYUserHome(uid, m.home, m.filename, true)
-        take.stones = takeStone
-        const v = winSect ? getVault(f, winSect) : null
-        if (v) v.stones = (v.stones || 0) + takeStone
-      }
-    }
-  } catch (err) { }
-  /* 物品归属 */
-  const ownerUid = winSect && f.sects[winSect] ? f.sects[winSect].owner : null
-  const vault = winSect ? getVault(f, winSect) : null
-  for (const [name, cnt] of Object.entries(take.items)) {
-    if (toVault && vault) {
-      if (MATERIAL_TPL[name]) vault.mats[name] = (vault.mats[name] || 0) + cnt
-      else if (ITEM_TPL[name]) vault.pills[name] = (vault.pills[name] || 0) + cnt
-      else if (EQUIP_TPL[name]) vault.equips[name] = (vault.equips[name] || 0) + cnt
-    } else if (ownerUid) { try { addItem(ownerUid, name, cnt, null, gid) } catch (err) { } }
-    else if (vault) {
-      if (MATERIAL_TPL[name]) vault.mats[name] = (vault.mats[name] || 0) + cnt
-      else if (ITEM_TPL[name]) vault.pills[name] = (vault.pills[name] || 0) + cnt
-      else if (EQUIP_TPL[name]) vault.equips[name] = (vault.equips[name] || 0) + cnt
+  const m = await playerMoney(gid, uid)
+  const user = m.home[uid]
+  user.warLootReceipts ||= {}
+  if (!Object.hasOwn(user.warLootReceipts, receipt)) {
+    const amount = Math.floor(Math.max(0, m.money) * ratio)
+    user.money = m.money - amount; user.warLootReceipts[receipt] = amount
+    await xujing_data.getQQYUserHome(uid, m.home, m.filename, true)
+  }
+  const stones = user.warLootReceipts[receipt]
+  if (plan.owner && plan.owner !== uid) {
+    const targetBag = getBag(plan.owner, gid)
+    targetBag.warLootReceived ||= {}
+    if (!targetBag.warLootReceived[receipt]) {
+      for (const it of plan.entries) addItemToBag(targetBag, it.name, it.count, it.attr, false)
+      targetBag.warLootReceived[receipt] = true
+      saveBag(plan.owner, targetBag, gid)
     }
   }
-  return take
+  const targetVault = f.sects[plan.winSect] ? getVault(f, plan.winSect) : null
+  if (!targetVault) throw new Error('战利品接收宗门不存在，暂缓转移')
+  targetVault.warLootReceived ||= {}
+  if (!targetVault.warLootReceived[receipt]) {
+    if (!plan.owner || plan.owner === uid) depositWarLoot(targetVault, plan.entries)
+    targetVault.stones += stones
+    targetVault.warLootReceived[receipt] = true
+    captiveCheckpoint(f, gid)
+  }
+  const items = {}
+  for (const it of plan.entries) items[it.name] = (items[it.name] || 0) + it.count
+  return { items, stones }
 }
 
 /** 将指定俘虏的全部非绑定财物扒入宗门宝库，返回播报用摘要 */
-async function lootCaptivesToVault (f, gid, sectId, fakes = [], players = []) {
+async function lootCaptivesToVault (f, gid, sectId, fakes = [], players = [], atk = {}) {
   const out = []
   for (const n of fakes) {
     const p = f.roster[n]
@@ -624,10 +635,9 @@ async function lootCaptivesToVault (f, gid, sectId, fakes = [], players = []) {
   }
   for (const uid of players) {
     const pp = f.players[uid]
-    if (!pp) continue
-    const t = await lootPlayerCaptive(f, gid, uid, sectId, 1, { toVault: true })
+    const t = await lootPlayerCaptive(f, gid, uid, sectId, 1, { toVault: true, receipt: `${warReceipt(atk)}:manual:${sectId}:${uid}:confine` })
     const itemText = lootItemsText(t.items)
-    if (itemText || t.stones > 0) out.push(`${pp.name}（${itemText || '无物品'}${t.stones ? `、💰灵石×${t.stones}` : ''}）`)
+    if (itemText || t.stones > 0) out.push(`${pp?.name || uid}（${itemText || '无物品'}${t.stones ? `、💰灵石×${t.stones}` : ''}）`)
   }
   return out
 }
@@ -681,17 +691,18 @@ export function chooseAiCaptiveAction (f, sectId) {
 
 
 function captivePoolForSect (f, atk, sectId) {
-  if (!atk || !atk.captives) return null
+  if (!atk || atk.phase !== 'done' || !['win', 'lose'].includes(atk.result) || !atk.captives) return null
   const c = atk.captives
   const share = c.byShare && c.byShare[sectId]
   const shareHas = !!(share && ((share.fakes || []).length || (share.players || []).length))
   let controls = false
   if (atk.result === 'win') controls = atk.atkSect === sectId || winnerOfCoalition(atk) === sectId || shareHas
   else if (atk.result === 'lose') {
-    const defSect = atk.targetType === 'sect' ? atk.target : f.areas[atk.target]
+    const defSect = defenderOf(f, atk)
     controls = defSect === sectId
   }
   if (!controls) return null
+  if (atk.result === 'win' && Object.keys(c.byShare || {}).length && !shareHas) return null
   const hasSub = !!(c.byAtk || c.byDef)
   const side = hasSub ? (atk.result === 'win' ? (c.byAtk || {}) : (c.byDef || {})) : c
   /* 联盟份额确实有俘虏时才优先使用；空份额必须回退实际抓人方池 */
@@ -712,24 +723,25 @@ export function pendingCaptivesForSect (f, sectId, preferLiveFake = false) {
   return { atk: hit.atk, fakes: [...(hit.info.pool.fakes || [])], players: [...(hit.info.pool.players || [])] }
 }
 
-export async function handleCaptives (f, gid, atkSect, act, targetName = null, forceAi = false, actorUid = null) {
+export async function handleCaptives (f, gid, atkSect, act, targetName = null, forceAi = false, actorUid = null, warId = null) {
   if (!forceAi && !canPlayerControlCaptives(f, atkSect)) {
     const aiAct = chooseAiCaptiveAction(f, atkSect)
-    const aiResult = await handleCaptives(f, gid, atkSect, aiAct, targetName, true, null)
+    const aiResult = await handleCaptives(f, gid, atkSect, aiAct, targetName, true, null, warId)
     return { ok: true, msg: `⚠️ 当前宗门暂无玩家宗主，俘虏由伪玩家内定处理：${aiAct}${aiResult && aiResult.msg ? `\n${aiResult.msg}` : ''}` }
   }
   const attacks = f.sectAttacks || []
   /* 送矿优先选择至少有一名仍存活伪玩家的战争，避免失效旧记录挡住后续有效俘虏 */
   const eligible = attacks.filter(a => {
+    if (warId != null && String(a.id) !== String(warId)) return false
     const info = captivePoolForSect(f, a, atkSect)
-    if (!info) return false
+    if (a.phase !== 'done' || !info) return false
     return !!((info.pool.fakes || []).length || (info.pool.players || []).length)
   })
   const atk = targetName
     ? eligible.find(a => {
         const info = captivePoolForSect(f, a, atkSect)
         return (info.pool.fakes || []).some(n => n === targetName || (f.roster[n] && f.roster[n].name === targetName)) ||
-          (info.pool.players || []).some(uid => f.players[uid] && f.players[uid].name === targetName)
+          (info.pool.players || []).some(uid => String(uid) === String(targetName) || (f.players[uid]?.name || a.actors?.[`player:${uid}`]?.name) === targetName)
       }) || eligible[0]
     : ((act === '送矿山' || act === '送往矿山' || act === '收编')
       ? eligible.find(a => {
@@ -740,11 +752,11 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
           })
         }) || eligible[0]
       : eligible[0])
-  if (!atk) return { ok: false, msg: '没有待处置的俘虏~' }
+  if (!atk) return { ok: false, msg: '没有待处置的俘虏' }
   const now = Date.now()
   const c = atk.captives
   const info = captivePoolForSect(f, atk, atkSect)
-  if (!info) return { ok: false, msg: '这场战争没有本宗可处置的俘虏~' }
+  if (!info) return { ok: false, msg: '这场战争没有本宗可处置的俘虏' }
   const jailedUids = new Set() // 关天牢的玩家: 保留被俘标记(锁定)
   ensureCapSub(atk)
   const pool = info.pool
@@ -764,13 +776,13 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
   /* 指定某人单独处置: 只留该俘虏(伪玩家按名字, 玩家按名字) */
   if (targetName) {
     const fcf = cf.filter(n => n === targetName || (f.roster[n] && f.roster[n].name === targetName))
-    const fcp = cp.filter(u => { const pp = f.players[u]; return pp && pp.name === targetName })
-    if (!fcf.length && !fcp.length) return { ok: false, msg: `俘虏里没有【${targetName}】~` }
+    const fcp = cp.filter(u => String(u) === String(targetName) || (f.players[u]?.name || atk.actors?.[`player:${u}`]?.name) === targetName)
+    if (!fcf.length && !fcp.length) return { ok: false, msg: `俘虏里没有【${targetName}】` }
     cf = fcf; cp = fcp
   }
   const sname = sectName(f, atkSect)
   /* 被抓者原属宗门(守方/攻方), 记录写入其个人/宗门事迹 */
-  const defSect = atk.result === 'lose' ? atk.atkSect : (atk.targetType === 'sect' ? atk.target : f.areas[atk.target])
+  const defSect = atk.result === 'lose' ? atk.atkSect : (defenderOf(f, atk))
   const lootTxt = []
   const mineRejects = []
   const mineSent = []
@@ -778,7 +790,7 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
   if (act === '关天牢' || act === '送矿山' || act === '送往矿山') {
     /* 关押/送矿前没收全部非绑定财物；玩家战俘不能送矿，避免提前没收 */
     const confinedLoot = await lootCaptivesToVault(
-      f, gid, atkSect, cf, act === '关天牢' ? cp : []
+      f, gid, atkSect, cf, act === '关天牢' ? cp : [], atk
     )
     if (confinedLoot.length) lootTxt.push(`没收财物：${confinedLoot.join('、')}`)
   }
@@ -793,10 +805,9 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
     }
     for (const uid of cp) {
       const pp = f.players[uid]
-      if (!pp) continue
-      const t = await lootPlayerCaptive(f, gid, uid, atkSect, 0.3)
+      const t = await lootPlayerCaptive(f, gid, uid, atkSect, 0.3, { receipt: `${warReceipt(atk)}:manual:${atkSect}:${uid}:loot` })
       const n = Object.values(t.items).reduce((a, b) => a + b, 0)
-      if (n > 0 || t.stones > 0) lootTxt.push(`${pp.name}（${lootItemsText(t.items) || '无物品'}${t.stones ? `、💰灵石×${t.stones}` : ''}）`)
+      if (n > 0 || t.stones > 0) lootTxt.push(`${pp?.name || uid}（${lootItemsText(t.items) || '无物品'}${t.stones ? `、💰灵石×${t.stones}` : ''}）`)
     }
     atkLog(atk, `【搜刮】${sname} 搜刮战俘财物：${lootTxt.join('、') || '一无所获'}`, now)
   }
@@ -805,10 +816,10 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
   const recruitRefused = []
   const refusedBefore = new Set((c.recruitRefused || []).map(String))
   if (act === '收编') {
-    if (!cf.length && cp.length) return { ok: false, msg: `❌ 收编失败：当前只有 ${cp.length} 名玩家战俘，玩家不能收编；请使用全杀、全放、搜刮再放或关天牢~` }
-    if (!cf.length) return { ok: false, msg: '❌ 收编失败：当前批次的伪玩家战俘已死亡或失联，失效记录已清理~' }
-    if (cf.length && sectAlive(f, atkSect).length >= sectCap(f, atkSect)) {
-      return { ok: false, msg: `宗门已满员（${sectAlive(f, atkSect).length}/${sectCap(f, atkSect)}），无法再收编战俘~` }
+    if (!cf.length && cp.length) return { ok: false, msg: `❌ 收编失败：当前只有 ${cp.length} 名玩家战俘，玩家不能收编；请使用全杀、全放、搜刮再放或关天牢` }
+    if (!cf.length) return { ok: false, msg: '❌ 收编失败：当前批次的伪玩家战俘已死亡或失联，失效记录已清理' }
+    if (cf.length && sectOccupancy(f, atkSect) >= sectCap(f, atkSect)) {
+      return { ok: false, msg: `宗门已满员（${sectOccupancy(f, atkSect)}/${sectCap(f, atkSect)}），无法再收编战俘` }
     }
     if (cp.length) recruitRefused.push(`玩家战俘不可收编（${cp.map(u => (f.players[u] && f.players[u].name) || u).join('、')}，请用 全杀/搜刮再杀/全放/搜刮再放/关天牢 处置）`)
     for (const n of [...cf]) {
@@ -819,13 +830,13 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
         continue
       }
       if (p.servantOf) { recruitRefused.push(`${n}（已有主人，不可收编入宗）`); continue }
-      if (sectAlive(f, atkSect).length >= sectCap(f, atkSect)) { recruitRefused.push(`${n}（宗门已满员，未能收编）`); break }
+      if (sectOccupancy(f, atkSect) >= sectCap(f, atkSect)) { recruitRefused.push(`${n}（宗门已满员，未能收编）`); break }
       if (Math.random() < recruitRateOf(f, p)) {
         /* 收编成功: 叛离原宗拜入本宗, 忠诚重头再来 */
         const oldSect = p.sect
         if (oldSect) removeFromSectMap(f, oldSect, n)
-        p.sect = atkSect; p.pos = 'dizi'; p.status = 'sect'
-        p.level = clamp(p.level, POS.dizi.band[0], POS.dizi.band[1])
+        if (!admitSectNpc(f, p, atkSect)) { recruitRefused.push(`${n}（宗门已满员）`); continue }
+        // 收编任职不改变NPC实际修为。
         p.joinAt = now
         if (f.sectMap[atkSect]) { if (!f.sectMap[atkSect].dizi) f.sectMap[atkSect].dizi = []; if (!f.sectMap[atkSect].dizi.includes(n)) f.sectMap[atkSect].dizi.push(n) }
         p.loyalty = Math.floor((Number(p.loyalty) || 60) * 0.35)
@@ -841,7 +852,7 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
     if (recruitDone.length) logEvent(f, 'attack', `【收编】${sname} 收编 ${recruitDone.length} 名战俘入宗`, now, { major: true })
     if (recruitDone.length === 0) {
       saveFake(f, gid)
-      return { ok: false, msg: `❌ 本次没有收编成功：${recruitRefused.join('；') || '俘虏拒绝归顺'}。拒绝者仍保留在俘虏名单，但本场不能再次收编，请改用其他处置方式~` }
+      return { ok: false, msg: `❌ 本次没有收编成功：${recruitRefused.join('；') || '俘虏拒绝归顺'}。拒绝者仍保留在俘虏名单，但本场不能再次收编，请改用其他处置方式` }
     }
     /* 收编成功的纳入本次处置(末尾从池移除); 拒降的保留池中待其他处置 */
     cf = recruitDone.slice()
@@ -895,32 +906,29 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
       const why = cp.length
         ? `当前只有 ${cp.length} 名玩家战俘，玩家不能送矿山`
         : (stale.length ? `这批 ${stale.length} 名伪玩家战俘已死亡或不存在，失效记录已清理` : '当前没有可送入矿山的伪玩家战俘')
-      return { ok: false, msg: `❌ 送矿失败：${why}。请重新 #处置俘虏 查看下一批~` }
+      return { ok: false, msg: `❌ 送矿失败：${why}。请重新 #处置俘虏 查看下一批` }
     }
     cf = []; cp = []
   }
   if (act === '全杀' || act === '搜刮再杀') {
-    let fakeKills = 0
+    // 先兑现每人的外部收据，再在同一世界档提交处决；失败可重试原俘虏。
+    if (!forceAi && actorUid) {
+      for (const n of cf) {
+        const p = f.roster[n]
+        if (!p?.alive) continue
+        await addWarKarma(gid, actorUid, 1, `${warReceipt(atk)}:manual:karma:${n}`)
+        Wanhun.captureSoul(actorUid, gid, p.level, 1, `${warReceipt(atk)}:manual:soul:${n}`)
+      }
+    }
     for (const n of cf) {
       const p = f.roster[n]
-      if (p && p.alive) { killPerson(f, p, `【处决】${sname} 处决战俘 ${n}`, now); fakeKills++ }
+      if (p && p.alive) killPerson(f, p, `【处决】${sname} 处决战俘 ${n}`, now)
       logEvent(f, 'captive', `【处决】${sname} 处决战俘 ${n}`, now, { who: [n], sect: defSect })
     }
-    /* 只有玩家主动下令处决才记业力；AI自动处置不计 */
-    if (!forceAi && actorUid && fakeKills > 0) {
-      try { await xujing_data.addPlayerKarma(gid, actorUid, fakeKills) } catch (err) { }
-    }
-    if (!forceAi && actorUid && fakeKills > 0) {
-      try {
-        const souls = cf.map(n => f.roster[n]).filter(p => p && !p.alive).map(p => Wanhun.captureSoul(actorUid, gid, p.level))
-        const got = souls.reduce((sum, r) => sum + (r.gained || 0), 0)
-        if (got > 0) lootTxt.push(`万魂幡收魂${got}魂`)
-      } catch (err) { }
-    }
     for (const uid of cp) {
-      const pp = f.players[uid]
-      if (pp) {
-        applyInjury(f, uid, 3, now, gid)
+      const pp = f.players[uid] || { name: atk.actors?.[`player:${uid}`]?.name || String(uid) }
+      {
+        applyInjury(f, uid, 3, now, gid, `${warReceipt(atk)}:manual:injury:${uid}:${act}`)
         logEvent(f, 'captive', `【处决】${sname} 处决玩家战俘 ${pp.name}（重伤惩戒）`, now, { who: [pp.name], sect: defSect })
       }
     }
@@ -939,18 +947,17 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
     if (!f.sectJails) f.sectJails = {}
     if (!f.sectJails[atkSect]) f.sectJails[atkSect] = []
     for (const uid of cp) {
-      const pp = f.players[uid]
-      if (!pp) continue
-      f.sectJails[atkSect].push({ uid: String(uid), name: pp.name, at: now, atkId: atk.id })
+      const pp = f.players[uid] || { name: atk.actors?.[`player:${uid}`]?.name || String(uid) }
+      if (!f.sectJails[atkSect].some(x => String(x.uid) === String(uid))) f.sectJails[atkSect].push({ uid: String(uid), name: pp.name, at: now, atkId: atk.id })
       jailedUids.add(String(uid))
       await markPlayerCaptive(gid, uid, `${sname}·天牢`, 3600)
-      applyInjury(f, uid, rand([1, 2]), now, gid)
+      applyInjury(f, uid, 2, now, gid, `${warReceipt(atk)}:manual:injury:${uid}:${act}`)
       logEvent(f, 'captive', `【收押】玩家 ${pp.name} 被关入【${sname}】天牢（无限期，可越狱）`, now, { who: [pp.name], sect: defSect })
     }
     for (const n of cf) {
       const p = f.roster[n]
       if (p && p.alive) {
-        f.sectJails[atkSect].push({ name: n, at: now, atkId: atk.id })
+        if (!f.sectJails[atkSect].some(x => x.name === n)) f.sectJails[atkSect].push({ name: n, at: now, atkId: atk.id })
         logEvent(f, 'captive', `【收押】${sname} 将战俘 ${n} 关入天牢（无限期，可越狱）`, now, { who: [n], sect: defSect })
       }
     }
@@ -988,5 +995,5 @@ export async function handleCaptives (f, gid, atkSect, act, targetName = null, f
     if (mineRejects.length) tail.push(mineRejects.join('；'))
     tail.push('矿工每小时产出灵石/矿物入宗门宝库，#宗门矿山 可立即查看名单')
   }
-  return { ok: true, msg: `✅ 处置完成${lootTxt.length ? '：' + lootTxt.join('；') : ''}${tail.length ? '\n' + tail.join('\n') : ''}~` }
+  return { ok: true, msg: `✅ 处置完成${lootTxt.length ? '：' + lootTxt.join('；') : ''}${tail.length ? '\n' + tail.join('\n') : ''}` }
 }

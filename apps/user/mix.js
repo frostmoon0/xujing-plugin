@@ -226,6 +226,20 @@ export class MIX extends plugin {
                     count: 1,
                     desc: '需🌈傀儡术下篇；每阶均需🌈万阵核心×5。升级材料见傀儡面板，祭出每30分钟自动消耗1万灵石。'
                 }
+            },
+            {
+                kind: 'artifact',
+                mats: [
+                    mat('镇海砂', 30), mat('龙宫珊瑚', 10), mat('海眼寒铁', 1), mat('沧溟珠泪', 1),
+                    mat('灵石', '30万', { quality: 1, icon: '💰' })
+                ],
+                result: {
+                    name: '镇海珠',
+                    quality: 7,
+                    icon: '🔮',
+                    count: 1,
+                    desc: '拥有即生效：封锁当前大区，非使用者不可进出；封印有血条，区内玩家可攻击破封。'
+                }
             }
         ]
         const arrayFormulas = [{
@@ -283,13 +297,13 @@ export class MIX extends plugin {
             },
             tip: '#合成妖丹（可带数量，如 #合成妖丹 3）'
         }]
-        /* 统一卡片: 20 张普通配方 + 帝品 2×2, 正好铺满 4×6 网格 */
+        /* 统一卡片: 21 张普通配方 + 帝品 2×2, 正好铺满 5×5 网格 */
         const recipeCards = []
         for (const f of normalPotionFormulas) {
             recipeCards.push({ kind: 'potion', kindName: '丹药', mats: f.mats, result: f.result, cmd: `#合成${f.result.name} 数量`, desc: f.result.desc })
         }
         for (const f of artifactFormulas) {
-            const cmd = f.result.name === '万魂幡' ? '#打造万魂幡' : (f.result.name === '傀儡' ? '#打造傀儡' : '#合成定仙游')
+            const cmd = f.result.name === '万魂幡' ? '#打造万魂幡' : (f.result.name === '傀儡' ? '#打造傀儡' : (f.result.name === '镇海珠' ? '#打造镇海珠' : '#合成定仙游'))
             recipeCards.push({ kind: 'artifact', kindName: '法宝', mats: f.mats, result: f.result, cmd, desc: f.result.desc })
         }
         for (const f of arrayFormulas) {

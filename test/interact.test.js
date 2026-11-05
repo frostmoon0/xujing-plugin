@@ -201,3 +201,34 @@ test('currentInteract: 空栈返回 null, 栈顶类型映射中文名', async ()
   await forceLock('10007', '20007', 'dynasty-siege')
   assert.deepEqual(await currentInteract('10007', '20007'), { type: 'dynasty-siege', cn: '王朝攻城' })
 })
+
+test('并发压栈保留所有交互，并按发起顺序决定栈顶', async () => {
+  const fake = makeFakeRedis()
+  global.redis = fake
+  const results = await Promise.all(['street', 'pet', 'break'].map(type => forceLock('parallel', '1', type)))
+  assert.deepEqual(results.map(r => r.prev), [null, 'street', 'pet'])
+  assert.deepEqual(JSON.parse([...fake.store.values()][0]).map(x => x.type), ['street', 'pet', 'break'])
+})
+
+test('并发摘除与压栈不丢新交互，也不复活已摘除条目', async () => {
+  global.redis = makeFakeRedis()
+  await forceLock('parallel', '2', 'street')
+  await forceLock('parallel', '2', 'pet')
+  await Promise.all([unlock('parallel', '2', 'pet'), forceLock('parallel', '2', 'break'), unlock('parallel', '2', 'street')])
+  assert.deepEqual(await currentInteract('parallel', '2'), { type: 'break', cn: '渡劫' })
+  await unlock('parallel', '2', 'break')
+  assert.equal(await currentInteract('parallel', '2'), null)
+})
+
+test('Redis 写入失败后释放队列，不阻塞其它用户和后续交互', async () => {
+  const fake = makeFakeRedis()
+  let rejectFirst = true
+  global.redis = { ...fake, set: async (key, value) => {
+    if (key.endsWith(':bad') && rejectFirst) { rejectFirst = false; throw new Error('write failed') }
+    return fake.set(key, value)
+  } }
+  const results = await Promise.allSettled([forceLock('parallel', 'bad', 'street'), forceLock('parallel', 'good', 'pet'), forceLock('parallel', 'bad', 'break')])
+  assert.deepEqual(results.map(r => r.status), ['rejected', 'fulfilled', 'fulfilled'])
+  assert.equal(await isCurrent('parallel', 'good', 'pet'), true)
+  assert.equal(await isCurrent('parallel', 'bad', 'break'), true)
+})

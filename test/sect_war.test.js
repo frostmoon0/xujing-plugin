@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { areaTxtOf, sectTxtOf, warTargetTxt, targetRawTxt } from '../components/sect/utils.js'
-import { joinSectFight, respondDefend, sectReinforce, resolveJoinSide, startSectAttack, isSectWarParticipant, quitRogueParticipation } from '../components/sect/war.js'
+import { joinSectFight, respondDefend, sectReinforce, resolveJoinSide, startSectAttack, isSectWarParticipant, quitRogueParticipation, sectForceAdjust } from '../components/sect/war.js'
 
 /** 构造最小宗门世界夹具(仅展示/选择逻辑所需字段, 不落盘) */
 function makeFake () {
@@ -210,7 +210,7 @@ test('sectReinforce 指定人数超出可派 → 明确告知不足', () => {
   f.sectAttacks = [war(1, { target: '天墉城', atkSect: 's1' })]
   const r = sectReinforce(f, 'g', '100', '天墉城', 5)
   assert.equal(r.ok, false)
-  assert.match(r.msg, /指定的 5 人无法全部调派（在外门人 2 人，宝库可支付 0 人传送费）/)
+  assert.match(r.msg, /指定的 5 人无法全部调派（可调门人 2 人，宝库可支付 0 人传送费）/)
   assert.equal(f.sectAttacks[0].atkFakes.length, 0)
 })
 
@@ -269,6 +269,34 @@ test('joinSectFight auto: 无战事 → 提示; 退战无参战 → 提示', () 
 
 /* ---------- #攻打 宗门名/小区名 都能解析 ---------- */
 
+test('0人攻打不允许发起，扣费会退回', async () => {
+  const f = makeFake()
+  f.sects.s1.owner = '100'
+  f.sects.s2.owner = '300'
+  f.players['300'] = { name: '丙', sect: 's2', pos: 'zongzhu' }
+  f.roster = {
+    丙一: { name: '丙一', alive: true, realmBusy: false, sect: 's2', status: 'sect', loc: 'center', trait: '普通', loyalty: 60, act: '普通' }
+  }
+  const before = f.sects.s1.vault.stones
+  const r = await startSectAttack(f, 'g', 's1', '太虚门', 'player')
+  assert.equal(r.ok, false)
+  assert.equal(f.sectAttacks.length, 0)
+  assert.equal(f.sects.s1.vault.stones, before)
+})
+
+test('减兵可撤下伪玩家门人，减到0直接终止', async () => {
+  const f = makeFake()
+  f.sects.s1.owner = '100'
+  f.roster = { 甲: mkPerson('甲', 'center'), 乙: mkPerson('乙', 'center') }
+  f.sectAttacks = [war(1, { atkSect: 's1', target: '天墉城', targetType: 'area', atkFakes: ['甲', '乙'] })]
+  const r1 = await sectForceAdjust(f, 'g', '100', null, -1)
+  assert.equal(r1.ok, true)
+  assert.equal(f.sectAttacks[0].atkFakes.length, 1)
+  const r2 = await sectForceAdjust(f, 'g', '100', null, -1)
+  assert.equal(r2.ok, true)
+  assert.equal(f.sectAttacks[0].phase, 'done')
+})
+
 test('startSectAttack: 输入宗门名可发起攻打(targetType=sect)', async () => {
   const f = makeFake()
   f.sects.s1.owner = '100'
@@ -276,6 +304,7 @@ test('startSectAttack: 输入宗门名可发起攻打(targetType=sect)', async (
   f.players['300'] = { name: '丙', sect: 's2', pos: 'zongzhu' }
   /* 目标宗门有在世门人(防空壳校验: sectAlive>0 才可攻打) */
   f.roster = {
+    '甲': mkPerson('甲'),
     '丙一': { name: '丙一', alive: true, realmBusy: false, sect: 's2', status: 'sect', loc: 'center', trait: '普通', loyalty: 60, act: '普通' },
     '丙二': { name: '丙二', alive: true, realmBusy: false, sect: 's2', status: 'sect', loc: 'center', trait: '普通', loyalty: 60, act: '普通' }
   }
@@ -289,6 +318,7 @@ test('startSectAttack: 输入宗门名可发起攻打(targetType=sect)', async (
 test('startSectAttack: 输入小区名可发起攻打(targetType=area)', async () => {
   const f = makeFake()
   f.sects.s1.owner = '100'
+  f.roster = { 甲: mkPerson('甲') }
   const r = await startSectAttack(f, 'g', 's1', '天墉城', 'player')
   assert.equal(r.ok, true)
   assert.equal(r.atk.targetType, 'area')

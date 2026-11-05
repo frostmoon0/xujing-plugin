@@ -2,6 +2,7 @@ import { plugin } from '../../model/api/api.js'
 import Wanhun, { parseWanhunNamedCmd, wanhunNamedCmdReg } from '../../components/wanhun_data.js'
 import { getWorld, getLoc } from '../../components/world_data.js'
 import { getBag, rainbowAtk, itemIcon } from '../../components/equip_data.js'
+import { getFake, getNick } from '../../components/fake_data.js'
 import { forceLock, isCurrent, unlock } from '../../components/interact.js'
 import { textToImg } from '../../components/common-lib/reply-img.js'
 
@@ -39,6 +40,7 @@ export class wanhun extends plugin {
         { reg: '^[#＃]?探索万魂窟$', fnc: 'enterCave' },
         { reg: '^[#＃]?退出万魂窟$', fnc: 'leaveCave' },
         { reg: '^[#＃]?万魂窟状态$', fnc: 'caveStatus' },
+        { reg: '^[#＃]?(万魂窟总览|万魂窟全景|万魂窟情况|万魂窟谁在)$', fnc: 'caveOverview' },
         { reg: '^[#＃]?万魂窟战$', fnc: 'fightCave' },
         { reg: '^[#＃]?万魂窟撤退$', fnc: 'retreatCave' },
         { reg: '^[#＃]?(服用还魂丹|吃还魂丹)$', fnc: 'takePill' },
@@ -148,6 +150,58 @@ export class wanhun extends plugin {
 
   async caveStatus (e) {
     return reply(e, await Wanhun.caveStatus(e.user_id, e.group_id))
+  }
+
+  /** #万魂窟总览: 查看本群所有玩家/伪玩家在万魂窟的状态与本次收获 */
+  async caveOverview (e) {
+    if (!e.group_id) return reply(e, '请在群内使用~')
+    const gid = String(e.group_id)
+    const fmtLoot = (loot) => {
+      const arr = Object.entries(loot || {}).filter(([, n]) => n > 0)
+      return arr.length ? arr.map(([n, c]) => `${itemIcon(n)}${n}×${c}`).join('、') : '暂无收获'
+    }
+    const lines = ['━━━ 🌑 万魂窟总览 ━━━']
+    const players = Wanhun.listCaves(gid)
+    lines.push(`【玩家】${players.length} 人`)
+    for (const x of players) {
+      const name = await getNick(gid, x.uid).catch(() => '') || x.uid
+      const cave = x.cave
+      const mins = Math.max(0, Math.floor((Date.now() - (cave.enteredAt || Date.now())) / 60000))
+      const protect = Math.max(0, Math.ceil(((cave.protectionUntil || 0) - Date.now()) / 60000))
+      let st = `探索${mins}分钟｜魂石保护${protect}分钟`
+      if (x.lostInCave) st = `失魂困窟中｜探索${mins}分钟`
+      else if (cave.pending) st += cave.pending.type === 'ghost' ? '｜幽魂待处理' : `｜遭遇【${cave.pending.name || '阴魂'}】待处理`
+      if (x.realmDrop?.count) st += `｜临时掉境界${x.realmDrop.count}个`
+      lines.push(`· ${name}：${st}`)
+      lines.push(`  收获：${fmtLoot(x.loot)}`)
+    }
+    let fakes = []
+    try {
+      const f = getFake(gid)
+      fakes = Array.isArray(f.fakeCaves) ? f.fakeCaves : []
+    } catch (err) { }
+    lines.push(`【伪玩家】${fakes.length} 队`)
+    for (const party of fakes) {
+      const names = (party.names || []).join('、') || '无'
+      const mins = Math.max(0, Math.floor((Date.now() - (party.startedAt || Date.now())) / 60000))
+      const next = Math.max(0, Math.ceil(((party.nextAt || 0) - Date.now()) / 60000))
+      const stoneTxt = (party.names || []).map(n => {
+        try {
+          const p = getFake(gid).roster[n]
+          const c = p?.bag?.items?.['魂石']?.count || 0
+          return `${n}${c}颗`
+        } catch (err) { return `${n}?颗` }
+      }).join('/')
+      lines.push(`· ${names}：探索${mins}分钟｜下次遭遇约${next}分钟｜魂石 ${stoneTxt}`)
+      lines.push(`  收获：${fmtLoot(party.loot)}`)
+    }
+    if (!players.length && !fakes.length) lines.push('当前万魂窟无人。')
+    const text = lines.join('\n')
+    try {
+      const img = await textToImg(text)
+      if (img) { e.reply(img); return true }
+    } catch (err) { }
+    return reply(e, text)
   }
 
   async beginChoice (e, type) {

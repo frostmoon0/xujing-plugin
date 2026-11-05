@@ -191,80 +191,13 @@ function caveEnemyPower (minutes) {
   return scale(50000 + (elapsed - 80) * 1000)
 }
 
-/* 白/绿/蓝材料从进入时就有；30分钟后开放紫/金/红材料的常规掉落；彩色材料50分钟后提高概率。 */
-const CAVE_BASE_MATERIALS = ['阴魂砂', '游魂骨', '鬼火草', '幽冥木', '摄魂铁', '阴魂石']
-/* 普通材料兜底按权重抽取: 白色5 > 绿色4/3 > 蓝色2/1, 低级材料更易掉落 */
-const CAVE_BASE_WEIGHTS = [5, 4, 3, 2, 2, 1]
-/* 万魂窟彩色掉落仅残卷与万魂帝晶; 造梦神玉/云裳仙蕊不由万魂窟产出(分别在秘境/配方台获取) */
-const CAVE_COLOR_MATERIALS = ['万魂幡残卷', '万魂帝晶']
-const CAVE_ADVANCED_MATERIALS = ['玄阴玉', '镇魂晶', '血煞髓']
+/* 万魂窟掉落表统一由 cave_loot.js 提供(玩家/伪玩家同源), 此处只保留敌人名 */
+import { caveDropCount, caveRollOne, rollCaveLoot, caveAdvancedChance, wanhunScrollChance, caveColorChance } from './cave_loot.js'
+export { caveDropCount, caveRollOne, rollCaveLoot, caveAdvancedChance, wanhunScrollChance, caveColorChance }
 const CAVE_ENEMY_NAMES = {
   low: ['游魂', '云间魂灵', '月影魂使', '青灯魂客', '轻风阴灵', '流霞魂影'],
   mid: ['玄音魂将', '星河魂卫', '雾隐魂使', '青冥魂将', '玉衡魂灵', '霜华魂官'],
   high: ['幽境镇守', '星渊魂将', '太虚魂侯', '云海魂尊', '玄冥魂帅', '万魂守御']
-}
-
-/* 万魂窟战斗掉落: 每战掉落 N 次(30分钟前1~4次, 30~50分钟4~8次, 50分钟后4~12次);
-   每次掉落独立判定一次档次——彩色 > 进阶 > 普通, 命中即掉1个, 数量不再成倍。 */
-export function caveDropCount (minutes, rand = Math.random) {
-  const elapsed = Math.max(0, Number(minutes) || 0)
-  if (elapsed < 30) return 1 + Math.floor(rand() * 4)   // 1~4
-  if (elapsed < 50) return 4 + Math.floor(rand() * 5)   // 4~8
-  return 4 + Math.floor(rand() * 9)                     // 4~12
-}
-
-/* 单次掉落: 依次按彩色/进阶各材料概率判定, 命中即掉该材料; 全未命中则按权重掉普通材料(白色>绿色>蓝色)。 */
-export function caveRollOne (minutes, rand = Math.random) {
-  for (const name of CAVE_COLOR_MATERIALS) {
-    if (rand() < caveColorChance(name, minutes)) return name
-  }
-  for (const name of CAVE_ADVANCED_MATERIALS) {
-    if (rand() < caveAdvancedChance(name, minutes)) return name
-  }
-  const total = CAVE_BASE_WEIGHTS.reduce((sum, w) => sum + w, 0)
-  let roll = rand() * total
-  for (let i = 0; i < CAVE_BASE_MATERIALS.length; i++) {
-    roll -= CAVE_BASE_WEIGHTS[i]
-    if (roll < 0) return CAVE_BASE_MATERIALS[i]
-  }
-  return CAVE_BASE_MATERIALS[CAVE_BASE_MATERIALS.length - 1]
-}
-
-export function rollCaveLoot (minutes, rand = Math.random) {
-  const rewards = {}
-  const drops = caveDropCount(minutes, rand)
-  for (let i = 0; i < drops; i++) {
-    const name = caveRollOne(minutes, rand)
-    rewards[name] = (rewards[name] || 0) + 1
-  }
-  return rewards
-}
-
-/* 紫/金/红材料:30分钟前也有极低概率，30分钟后正式提升；起步与封顶概率均已下调为原来的1/3。 */
-export function caveAdvancedChance (name, minutes) {
-  if (!CAVE_ADVANCED_MATERIALS.includes(name)) return 0
-  const elapsed = Math.max(0, Number(minutes) || 0)
-  if (elapsed < 30) return 0.005
-  const base = { 玄阴玉: 0.02, 镇魂晶: 0.015, 血煞髓: 0.01 }[name]
-  const cap = { 玄阴玉: 0.1, 镇魂晶: 0.08, 血煞髓: 0.05 }[name]
-  return Math.min(cap, base + Math.floor((elapsed - 30) / 10) * 0.015)
-}
-
-/* 万魂幡残卷单独在30分钟进入正式曲线；30分钟前基础概率1%，命中即掉1个。爆率已降到原来的1/6（先降1/3再砍半）。 */
-export function wanhunScrollChance (minutes) {
-  const elapsed = Math.max(0, Number(minutes) || 0)
-  if (elapsed < 30) return 0.02 / 6
-  return Math.min(0.25 / 6, (0.05 + Math.floor((elapsed - 30) / 10) * 0.01) / 6)
-}
-
-/* 彩色材料概率:50分钟前也可能低概率出现，50分钟后正式提高；万魂帝晶爆率砍半。 */
-export function caveColorChance (name, minutes) {
-  if (!CAVE_COLOR_MATERIALS.includes(name)) return 0
-  const elapsed = Math.max(0, Number(minutes) || 0)
-  if (name === '万魂幡残卷') return wanhunScrollChance(elapsed)
-  if (elapsed < 50) return 0.005
-  if (name === '万魂帝晶') return Math.min(0.2, 0.03 + Math.floor((elapsed - 50) / 10) * 0.01)
-  return Math.min(0.1, 0.005 + Math.floor((elapsed - 50) / 10) * 0.005)
 }
 
 /* ===== 万魂窟内行动拦截(供基类 api.js 代理拦截与测试共用) ===== */
@@ -479,10 +412,15 @@ export const Wanhun = {
     const p = this.aidPercent(artifact.rank)
     return { atk: 1 + p, def: 1 + p, hp: 1 + p }
   },
-  tryShield (uid, gid = 'global') {
+  tryShield (uid, gid = 'global', receipt = null) {
     const bag = getBag(uid, gid)
+    if (receipt && bag.warShieldReceipts?.[receipt]) return bag.warShieldReceipts[receipt]
     const artifact = artifactOf(bag)
-    if (!artifact || !artifact.equipped || !artifact.shieldReady) return { used: false, level: null }
+    if (!artifact || !artifact.equipped || !artifact.shieldReady) {
+      const result = { used: false, level: null }
+      if (receipt) { (bag.warShieldReceipts ||= {})[receipt] = result; saveBag(uid, bag, gid) }
+      return result
+    }
     artifact.shieldReady = false
     let replenished = false
     if (artifact.deployed && (artifact.souls || 0) >= 10) {
@@ -490,8 +428,10 @@ export const Wanhun = {
       artifact.shieldReady = true
       replenished = true
     }
+    const result = { used: true, level: 0, replenished }
+    if (receipt) (bag.warShieldReceipts ||= {})[receipt] = result
     saveBag(uid, bag, gid)
-    return { used: true, level: 0, replenished }
+    return result
   },
   soulValue (level) {
     level = Number(level) || 0
@@ -502,8 +442,9 @@ export const Wanhun = {
     if (level <= 40) return 25
     return 50
   },
-  captureSoul (uid, gid = 'global', level, multiplier = 1) {
+  captureSoul (uid, gid = 'global', level, multiplier = 1, receipt = null) {
     const bag = getBag(uid, gid)
+    if (receipt && bag.warSoulReceipts?.[receipt]) return bag.warSoulReceipts[receipt]
     const artifact = artifactOf(bag)
     if (!artifact || !artifact.equipped) return { gained: 0, value: 0, reason: '未装备' }
     const mult = Number(multiplier)
@@ -514,8 +455,10 @@ export const Wanhun = {
     const gained = Math.max(0, Math.min(value, cap - before))
     artifact.souls = before + gained
     artifact.totalSouls = (Number(artifact.totalSouls) || 0) + gained
+    const result = { gained, value, overflow: value - gained, total: artifact.totalSouls }
+    if (receipt) (bag.warSoulReceipts ||= {})[receipt] = result
     saveBag(uid, bag, gid)
-    return { gained, value, overflow: value - gained, total: artifact.totalSouls }
+    return result
   },
   /* 升级到下一阶所需材料文本(含图标), 供路线展示, 与升级实际消耗同一来源 */
   upgradeCostText (rank) { return fmtUpgradeCost(rank) },
@@ -567,7 +510,8 @@ export const Wanhun = {
       nextEncounterAt: enteredAt + randomInt(30000, 120000),
       nextRealmDropAt: protectedByStone ? 0 : enteredAt + 60 * 1000,
       unprotected: !protectedByStone,
-      pending: null
+      pending: null,
+      loot: {}
     }
     u.lostInCave = false
     saveGroup(gid, data)
@@ -680,6 +624,23 @@ export const Wanhun = {
     user.realmDrop.nextRecoverAt = user.realmDrop.count ? now() + 60 * 60 * 1000 : 0
     return true
   },
+  /** 全群万魂窟总览数据(玩家侧; 伪玩家由 apps 层合并) */
+  listCaves (gid = 'global') {
+    const data = readGroup(gid)
+    const out = []
+    for (const [uid, u] of Object.entries(data.users || {})) {
+      if (!u || !u.cave || !u.cave.inCave) continue
+      out.push({
+        uid: String(uid),
+        cave: u.cave,
+        lostInCave: !!u.lostInCave,
+        lostUntil: Number(u.lostUntil) || 0,
+        realmDrop: u.realmDrop || { count: 0, nextRecoverAt: 0 },
+        loot: (u.cave && u.cave.loot) || {}
+      })
+    }
+    return out
+  },
   async caveStatus (uid, gid = 'global') {
     const ret = await this.tickCave(uid, gid)
     const u = ret.state
@@ -712,6 +673,8 @@ export const Wanhun = {
       if (action === 'absorb') addItem(uid, SOUL_TRAIN_ITEM, 1, null, gid)
       cave.pending = null
       cave.nextEncounterAt = now() + randomInt(30000, 120000)
+      cave.loot = cave.loot || {}
+      cave.loot[SOUL_TRAIN_ITEM] = (cave.loot[SOUL_TRAIN_ITEM] || 0) + 1
       saveGroup(gid, data)
       return { ok: true, msg: action === 'absorb'
         ? `🌫️ 吸收成功！获得${itemIcon(SOUL_TRAIN_ITEM)}${SOUL_TRAIN_ITEM}×1。`
@@ -747,6 +710,8 @@ export const Wanhun = {
     const minutes = Math.floor((now() - cave.enteredAt) / 60000)
     const rewards = rollCaveLoot(minutes)
     for (const [name, count] of Object.entries(rewards)) addItem(uid, name, count, null, gid)
+    cave.loot = cave.loot || {}
+    for (const [name, count] of Object.entries(rewards)) cave.loot[name] = (cave.loot[name] || 0) + count
     /* 遗蜕古钥: 万魂窟战胜阴魂按彩级概率产, 每日每群最多2把 */
     try { await tryGiveSecretKey(gid, uid) } catch (err) { }
     cave.pending = null
@@ -986,7 +951,7 @@ export const Wanhun = {
       `· 没有${itemIcon('魂石')}魂石也能强行进入，但1分钟后开始每分钟临时掉1个境界；每个临时掉落的境界约1小时恢复1个，补充魂石后停止继续掉境界。`,
       '· 进入后每30秒~2分钟随机遇到阴魂或无主幽魂。阴魂出现时回复1战斗、回复2撤退，或使用 #万魂窟战 / #万魂窟撤退；遭遇未处理前不能退出。',
       '· 阴魂越晚出现越强；战斗胜利获得随机掉落，撤退成功安全离开但没有战利品。拥有定仙游时，阴魂撤退成功率为100%。',
-      '· #万魂窟状态：查看探索时长、当前阴魂、魂石保护、临时掉境界和恢复时间。#退出万魂窟：处理完遭遇后离开。',
+      '· #万魂窟状态：查看探索时长、当前阴魂、魂石保护、临时掉境界和恢复时间；#万魂窟总览：查看本群所有玩家/伪玩家在窟内的状态与本次收获。#退出万魂窟：处理完遭遇后离开。',
       '',
       '【失魂、还魂与救援】',
       `· 阴魂战斗失败或撤退失败会失魂；失魂困在窟内时只能使用 #服用${itemIcon('还魂丹')}还魂丹，不能直接退出或做其他行动。`,
@@ -1004,19 +969,19 @@ export const Wanhun = {
       '· 万魂幡、傀儡、定仙游属于独立法宝，可通过 #虚境赠送 @玩家 法宝名 转赠；装备或祭出中的法宝需先卸下/收回。'
     ].join('\n')
   },
-  async captureFromLevels (uids, gid, level) {
+  async captureFromLevels (uids, gid, level, receipt = null) {
     const list = [...new Set((uids || []).map(String))]
-    const eligible = list.filter(uid => this.getArtifact(uid, gid)?.equipped)
+    const eligible = receipt ? list : list.filter(uid => this.getArtifact(uid, gid)?.equipped)
     if (!eligible.length) return []
     const value = this.soulValue(level)
     const base = Math.floor(value / eligible.length)
     const extra = value % eligible.length
-    const order = eligible.slice().sort(() => Math.random() - 0.5)
+    const order = receipt ? eligible.slice().sort() : eligible.slice().sort(() => Math.random() - 0.5)
     const result = []
     for (let i = 0; i < order.length; i++) {
       const uid = order[i]
       const share = base + (i < extra ? 1 : 0)
-      const got = this.captureSoul(uid, gid, level, share / value)
+      const got = this.captureSoul(uid, gid, level, share / value, receipt ? `${receipt}:${uid}` : null)
       result.push({ uid, gained: got.gained, overflow: got.overflow })
     }
     return result

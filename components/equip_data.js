@@ -253,6 +253,11 @@ export const ARTIFACT_TPL = {
     desc: '装备后生命+10%；拥有即生效：万魂窟遇到阴魂时撤退成功率100%、可免费跨区传送',
     hp: 0.1,
     bound: true
+  },
+  '镇海珠': {
+    icon: '🔮',
+    desc: '拥有即生效：可封锁当前大区，非使用者不可进出；封印有血条，区内玩家可攻击破封',
+    bound: true
   }
 }
 
@@ -295,6 +300,12 @@ export const MATERIAL_TPL = {
   // —— 傀儡/功法分解材料(彩色品质7) ——
   '傀儡被动晶核': { type: 'special', quality: 7, bound: true },
   '功法残卷': { type: 'special', quality: 7, bound: true },
+  // —— 镇海珠专属材料(只从东海「镇海海眼」产出) ——
+  '镇海砂': { type: 'ore', quality: 5 },
+  '龙宫珊瑚': { type: 'herb', quality: 6 },
+  '海眼寒铁': { type: 'ore', quality: 7 },
+  '潮汐月华': { type: 'herb', quality: 7 },
+  '沧溟珠泪': { type: 'special', quality: 7 },
   // —— 妖丹(品质对应阶数 1~7): 世界Boss掉落, 傀儡打造/每阶升级所需材料 ——
   '一阶妖丹': { type: 'special', quality: 1 },
   '二阶妖丹': { type: 'special', quality: 2 },
@@ -535,9 +546,11 @@ export function equipSellPrice(name, attr) {
 
 /** 道具获得方式(未知则返回'未知'): 丹药-丹阁/配方台, 装备-器阁/新手礼包, 黄红暂未知 */
 export function getItemSource(name) {
-  if (ARTIFACT_TPL[name]) return `${itemIcon('神游蛊')}神游蛊×1 + ${itemIcon('玄阴玉')}玄阴玉×5 + ${itemIcon('镇魂晶')}镇魂晶×5 + ${itemIcon('血煞髓')}血煞髓×5 合成`
+  if (name === '镇海珠') return '东海「镇海海眼」材料打造；拥有即生效，绑定不可赠送'
+  if (name === '定仙游') return `${itemIcon('神游蛊')}神游蛊×1 + ${itemIcon('玄阴玉')}玄阴玉×5 + ${itemIcon('镇魂晶')}镇魂晶×5 + ${itemIcon('血煞髓')}血煞髓×5 合成`
   if (name === '无主幽魂') return '万魂窟探索中随机遇到幽魂 · 回复1吸收获得'
   if (MATERIAL_TPL[name]) {
+    if (['镇海砂', '龙宫珊瑚', '海眼寒铁', '潮汐月华', '沧溟珠泪'].includes(name)) return '仅东海秘境掉落'
     if (name === '残丹') return '仅遗蜕秘境(公开/专属)探索掉落 · 5个可#合成妖丹随机凝成1颗随机品质妖丹'
     if (['天衍阵纹', '乾坤阵晶', '太虚阵砂', '九幽阵髓'].includes(name)) return '遗蜕秘境/每日秘境/藏宝阁洗劫掉落（红色阵法材料）'
     if (isYaodan(name)) return '世界Boss掉落（每只Boss掉1枚，归伤害最高者；1/2/3/4档Boss分别出1~3/2~4/3~6/6~7阶） · 或5个残丹#合成妖丹随机凝练'

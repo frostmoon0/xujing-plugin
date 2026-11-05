@@ -18,7 +18,7 @@
     </div>
 
     {{if empty}}
-    <div class="realm-empty">当前没有现世的秘境，静候天机~</div>
+    <div class="realm-empty">当前没有现世的秘境。</div>
     {{/if}}
 
     {{each realms}}
@@ -42,7 +42,7 @@
         <div class="realm-bar"><div class="realm-bar-fill" style="width: {{$value.barrierPct}}%"></div></div>
         <div class="realm-bar-hp">{{$value.barrierHp}} / {{$value.barrierMax}}</div>
         {{if $value.autoPlayers}}<div class="realm-auto">⚔️ 玩家持续破界：{{$value.autoPlayers}}</div>{{/if}}
-        <div class="realm-tip">对应大区内回复 #攻击屏障 即可破界；#进入秘境 参加探索</div>
+        <div class="realm-tip">在对应大区发送 #攻击屏障 参与破界；#进入秘境 入场</div>
       </div>
       {{/if}}
 
@@ -75,7 +75,7 @@
     </div>
     {{/each}}
 
-    <div class="realm-foot">秘境行动由系统推进 · 队长收到遭遇后回复数字 · #撤离 结算离场 · Powered by xujing-yue-plugin</div>
+    <div class="realm-foot">队长回复数字选择行动 · #撤离 结算离场</div>
   </div>
 </body>
 </html>

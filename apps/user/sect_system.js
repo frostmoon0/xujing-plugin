@@ -1,3 +1,4 @@
+import { sectMemberCapacity, sectOccupancy } from '../../components/sect/capacity.js'
 /* ============================================================
  * 玩家宗门系统 · 指令层 (第二步~第七步)
  * 设施/宝库/上供/兑换/创建/任命/传位/问退位/夺权
@@ -8,10 +9,10 @@ import { getFake, saveFake, sectName, sectIdByName, sectAlive, getNick, rewashFa
 import { getBag, consumeItem, MATERIAL_TPL, addItem, itemIcon } from '../../components/equip_data.js'
 import { getWorld, saveWorld, regionNameOf, getLoc, regionKeyOf, REGIONS, levelNameOf } from '../../components/world_data.js'
 import {
-  CFG, sectRegion, areaDefLevel, getVault, regionOfArea, warTargetTxt, sectTxtOf, areaTxtOf, targetRawTxt, offer, offerAllGongfa, exchange, injuryInfo,
+  CFG, inWarUpkeep, WAR_UPKEEP_MS, sectRegion, areaDefLevel, getVault, regionOfArea, warTargetTxt, sectTxtOf, areaTxtOf, targetRawTxt, offer, offerAllGongfa, exchange, injuryInfo,
   createPlayerSect, renameSectName, relocateSect, upgradeFacility, upgradeAreaDef, abandonArea, declareWar, makePeace, startSectAttack, startRogueAttack,
   abortSectAttack,
-  respondDefend, joinSectFight, quitRogueParticipation, sectReinforce, sectServantRally, handleCaptives, appointTo, abdicateTo, askAbdicate, seizePower, autoPromote, leavePlayerSect, joinPlayerSect,
+  respondDefend, joinSectFight, quitRogueParticipation, sectReinforce, sectForceAdjust, sectServantRally, handleCaptives, appointTo, abdicateTo, askAbdicate, seizePower, autoPromote, leavePlayerSect, joinPlayerSect,
   sectJailList, releaseSectJail, playerEscape, escapeRateOf, startRescue,
   rogueTeamOf, createRogueTeam, inviteRogue, agreeRogue, applyRogue, respondApply, kickRogue, transferRogue, quitRogue, disbandRogue,
   resetAreaTruce, buyPillFromVault, answerSectJoin, claimSalary, takeFromVault, parseVaultTake,
@@ -84,6 +85,7 @@ export class sect_system extends plugin {
         { reg: '^[#＃]?(宗门防守|加入防守)\\s*(\\S*)$', fnc: 'joinDefendCmd' },
         { reg: '^[#＃]?(退战|退出参战|退出攻打|退出战斗|退出防守|退出守御)(?:\\s+(\\S*))?$', fnc: 'quitFightCmd' },
         { reg: '^[#＃]?(驰援功法|宗门驰援|驰援)\\s*(\\S*?)(?:\\s+([0-9０-９]+))?\\s*$', fnc: 'sectReinforceCmd' },
+        { reg: '^[#＃]?(派兵|添兵|减兵|撤兵)\\s*(\\S*?)(?:\\s+([0-9０-９]+))?\\s*$', fnc: 'sectForceCmd' },
         { reg: '^[#＃]?(集结仆从|仆从集结)\\s*(\\S*?)(?:\\s+([0-9０-９]+))?\\s*$', fnc: 'sectServantRallyCmd' },
         { reg: '^[#＃]?处置俘虏\\s*(\\S*)\\s*(收编|全杀|搜刮再杀|全放|搜刮再放|关天牢|送矿山|送往矿山)?$', fnc: 'handleCaptivesCmd' },
         /* 处置界面后可直接回复裸数字 1~7 处置; 无待处置俘虏/无权限/有其他数字交互进行中则放行, 不与其他序号指令(逛街/丹阁/跨区/赠送)冲突 */
@@ -124,14 +126,14 @@ export class sect_system extends plugin {
 
   /** 白名单闸门 */
   gate (e) {
-    if (!e.group_id) { e.reply('需在群内使用~'); return true }
-    if (!isEnabled(e.group_id)) { e.reply('🛡️ 本群未开启宗门系统，请联系主人开启~'); return true }
+    if (!e.group_id) { e.reply('需在群内使用'); return true }
+    if (!isEnabled(e.group_id)) { e.reply('🛡️ 本群未开启宗门系统，请联系主人开启'); return true }
     return false
   }
 
   /** 战争拦截闸门: WAR_BLOCKED=true 时禁止玩家发起/参与宗门战争(日后去掉即可恢复) */
   warBlock (e) {
-    if (WAR_BLOCKED) { e.reply('🛡️ 宗门战争系统暂时关闭（维护中），无法发起/参与攻打，请稍后再试~'); return true }
+    if (WAR_BLOCKED) { e.reply('🛡️ 宗门战争系统暂时关闭（维护中），无法发起/参与攻打，请稍后再试'); return true }
     return false
   }
 
@@ -150,7 +152,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]创建异常:' + (err && err.stack))
-      e.reply('创建宗门出错了，请稍后再试~')
+      e.reply('创建宗门出错了，请稍后再试')
       return true
     }
   }
@@ -162,14 +164,14 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const m = String(e.msg || '').match(/加入宗门\s*(\S*)/)
       const name = (m && m[1]) || ''
-      if (!name) { e.reply('用法：#加入宗门 [宗门名]（退出原宗后7天内不可回原宗，其他宗门可立即加入）~'); return true }
+      if (!name) { e.reply('用法：#加入宗门 [宗门名]（退出原宗后7天内不可回原宗，其他宗门可立即加入）'); return true }
       const f = getFake(gid)
       const r = joinPlayerSect(f, gid, e.user_id, e.nickname || String(e.user_id), name)
       e.reply(r.msg)
       return true
     } catch (err) {
       logger.error('[宗门系统]加入异常:' + (err && err.stack))
-      e.reply('加入宗门出错了，请稍后再试~')
+      e.reply('加入宗门出错了，请稍后再试')
       return true
     }
   }
@@ -185,7 +187,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]退宗异常:' + (err && err.stack))
-      e.reply('退出宗门出错了，请稍后再试~')
+      e.reply('退出宗门出错了，请稍后再试')
       return true
     }
   }
@@ -197,8 +199,8 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
-      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以改名~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
+      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以改名'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const m = String(e.msg || '').match(/(?:宗门改名|改名宗门|宗门更名)\s*(\S*)/)
@@ -208,7 +210,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]改名异常:' + (err && err.stack))
-      e.reply('宗门改名出错了，请稍后再试~')
+      e.reply('宗门改名出错了，请稍后再试')
       return true
     }
   }
@@ -220,21 +222,21 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p || !p.sect) { e.reply('你不是宗门成员~'); return true }
-      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以迁宗~'); return true }
+      if (!p || !p.sect) { e.reply('你不是宗门成员'); return true }
+      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以迁宗'); return true }
       const w = getWorld(gid)
       const m = String(e.msg || '').match(/迁宗\s*(中州|东海|西域|北境|南疆)/)
       const regName = (m && m[1]) || ''
       const rk = regName ? regionKeyOf(regName) : null
-      if (!rk) { e.reply('用法：#迁宗 (中州|东海|西域|北境|南疆)，如：#迁宗 东海~'); return true }
+      if (!rk) { e.reply('用法：#迁宗 (中州|东海|西域|北境|南疆)，如：#迁宗 东海'); return true }
       const myLoc = getLoc(w, e.user_id)
-      if (myLoc !== rk) { e.reply(`你当前在【${regionNameOf(myLoc)}】，请先前往【${regionNameOf(rk)}】再迁宗（须到新址奠基）~`); return true }
+      if (myLoc !== rk) { e.reply(`你当前在【${regionNameOf(myLoc)}】，请先前往【${regionNameOf(rk)}】再迁宗（须到新址奠基）`); return true }
       const r = relocateSect(f, gid, p.sect, rk)
       e.reply(r.msg)
       return true
     } catch (err) {
       logger.error('[宗门系统]迁宗异常:' + (err && err.stack))
-      e.reply('迁宗出错了，请稍后再试~')
+      e.reply('迁宗出错了，请稍后再试')
       return true
     }
   }
@@ -247,30 +249,30 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const cd = await redis.ttl(`xujing:sect-offer-cd:${gid}:${uid}`)
-      if (cd !== -2 && cd > 0) { e.reply(`上供冷却中：${Math.ceil(cd / 60)} 分钟后再试~`); return true }
+      if (cd !== -2 && cd > 0) { e.reply(`上供冷却中：${Math.ceil(cd / 60)} 分钟后再试`); return true }
       const m = String(e.msg || '').match(/上供\s*([^\d\s]+)\s*(\d*)/)
       const name = (m && m[1]) ? m[1].trim() : ''
       const count = Math.max(1, Math.floor(Number((m && m[2]) || 1)))
       const real = Object.keys(MATERIAL_TPL).find(n => n === name || n.includes(name) || name.includes(n))
-      if (!real) { e.reply(`没有找到材料「${name}」，可用材料如 星霜草/月魄石/流光玉/望舒花 等~`); return true }
+      if (!real) { e.reply(`没有找到材料「${name}」，可用材料如 星霜草/月魄石/流光玉/望舒花 等`); return true }
       const bag = getBag(uid, gid)
       const have = (bag.items && bag.items[real]) ? bag.items[real].count : 0
-      if (have < count) { e.reply(`背包里 ${real} 只有 ${have} 个，不够上供 ${count} 个~`); return true }
+      if (have < count) { e.reply(`背包里 ${real} 只有 ${have} 个，不够上供 ${count} 个`); return true }
       consumeItem(uid, real, count, null, gid)
       const vault = getVault(f, p.sect)
       if (!vault.mats) vault.mats = {}
       vault.mats[real] = (vault.mats[real] || 0) + count
       saveFake(f, gid)
       await redis.set(`xujing:sect-offer-cd:${gid}:${uid}`, 1, { EX: 10 * 60 })
-      e.reply(`✅ 已上供 ${itemIcon(real)}${real} ×${count} 给宗门宝库（材料上供无贡献点；#上供 [灵石] 才有贡献）~`)
+      e.reply(`✅ 已上供 ${itemIcon(real)}${real} ×${count} 给宗门宝库（材料上供无贡献点；#上供 [灵石] 才有贡献）`)
       return true
     } catch (err) {
       logger.error('[宗门系统]材料上供异常:' + (err && err.stack))
-      e.reply('材料上供出错了，请稍后再试~')
+      e.reply('材料上供出错了，请稍后再试')
       return true
     }
   }
@@ -283,7 +285,7 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const r = offerAllGongfa(gid, uid)
@@ -291,7 +293,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]一键上供功法异常:' + (err && err.stack))
-      e.reply('一键上供功法出错了，请稍后再试~')
+      e.reply('一键上供功法出错了，请稍后再试')
       return true
     }
   }
@@ -304,11 +306,11 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const cd = await redis.ttl(`xujing:sect-offer-cd:${gid}:${uid}`)
-      if (cd !== -2 && cd > 0) { e.reply(`上供冷却中：${Math.ceil(cd / 60)} 分钟后再试~`); return true }
+      if (cd !== -2 && cd > 0) { e.reply(`上供冷却中：${Math.ceil(cd / 60)} 分钟后再试`); return true }
       const m = String(e.msg || '').match(/上供\s*(\d*)/)
       const amount = Number((m && m[1]) || 0)
       if (!amount) { e.reply(`用法：#上供 [灵石]（最低 ${CFG.OFFER_MIN}，每100灵石=1贡献）`); return true }
@@ -318,7 +320,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]上供异常:' + (err && err.stack))
-      e.reply('上供出错了，请稍后再试~')
+      e.reply('上供出错了，请稍后再试')
       return true
     }
   }
@@ -330,13 +332,13 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
-      if (p.pos === 'zongzhu' || p.pos === 'fuzong' || p.pos === 'taishang') { e.reply(`👑 你是${posCn(p.pos)}，无需贡献点——可 #取用宝库 直接拿宗门金库的灵石/材料/丹药~`); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
+      if (p.pos === 'zongzhu' || p.pos === 'fuzong' || p.pos === 'taishang') { e.reply(`👑 你是${posCn(p.pos)}，无需贡献点——可 #取用宝库 直接拿宗门金库的灵石/材料/丹药`); return true }
       e.reply(`🎖️ 你在【${sectName(f, p.sect)}】的贡献：${p.contribution || 0}\n（#上供 得贡献，贡献可 #宗门兑换 宝库物品）`)
       return true
     } catch (err) {
       logger.error('[宗门系统]贡献异常:' + (err && err.stack))
-      e.reply('查询贡献出错了，请稍后再试~')
+      e.reply('查询贡献出错了，请稍后再试')
       return true
     }
   }
@@ -352,7 +354,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]俸禄异常:' + (err && err.stack))
-      e.reply('查询俸禄出错了，请稍后再试~')
+      e.reply('查询俸禄出错了，请稍后再试')
       return true
     }
   }
@@ -374,7 +376,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]取用宝库异常:' + (err && err.stack))
-      e.reply('取用宝库出错了，请稍后再试~')
+      e.reply('取用宝库出错了，请稍后再试')
       return true
     }
   }
@@ -387,7 +389,7 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const m = String(e.msg || '').match(/宗门兑换\s*(\S*)\s*(\d*)/)
@@ -399,7 +401,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]兑换异常:' + (err && err.stack))
-      e.reply('兑换出错了，请稍后再试~')
+      e.reply('兑换出错了，请稍后再试')
       return true
     }
   }
@@ -412,10 +414,10 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p || !p.sect) { e.reply('你还没有加入宗门，可 #创建宗门 或 #加入宗门~'); return true }
+      if (!p || !p.sect) { e.reply('你还没有加入宗门，可 #创建宗门 或 #加入宗门'); return true }
       const sid = p.sect
       const s = f.sects[sid]
-      if (!s) { e.reply('你所属宗门已不存在（可能被灭门/重建），请重新加入~'); return true }
+      if (!s) { e.reply('你所属宗门已不存在（可能被灭门/重建），请重新加入'); return true }
       const sm = f.sectMap[sid] || {}
       const owner = s.owner ? (f.players[s.owner] || null) : null
       const v = getVault(f, sid)
@@ -431,7 +433,7 @@ export class sect_system extends plugin {
         `贡献：${(p.pos === 'zongzhu' || p.pos === 'fuzong' || p.pos === 'taishang') ? '无需贡献（可直接 #取用宝库）' : `${p.contribution || 0}`}${injTxt}`,
         '',
         `宗主：${owner ? `🌙${owner.name}（玩家）` : (sm.zongzhu || '（空缺·副宗代掌）')}`,
-        `宗门门人：${fakes.length} 人`,
+        `宗门成员：${sectOccupancy(f, sid)}/${sectMemberCapacity(f, sid)} 人`,
         `宝库灵石：${v.stones || 0}`,
         `设施：演武场${fac.yanwu || 0}级/护山阵${fac.hushan || 0}级/灵脉${fac.lingmai || 0}级/药园${fac.yaoyuan || 0}级`,
         `地盘：${areas}`,
@@ -443,7 +445,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]我的宗门异常:' + (err && err.stack))
-      e.reply('查询我的宗门出错了，请稍后再试~')
+      e.reply('查询我的宗门出错了，请稍后再试')
       return true
     }
   }
@@ -454,7 +456,7 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const v = getVault(f, p.sect)
@@ -462,9 +464,15 @@ export class sect_system extends plugin {
       const pillsTxt = Object.keys(v.pills || {}).length ? Object.entries(v.pills).map(([m, c]) => `${itemIcon(m)}${m}×${c}`).join('、') : '（无）'
       const equipsTxt = Object.keys(v.equips || {}).length ? Object.entries(v.equips).map(([m, c]) => `${itemIcon(m)}${m}×${c}`).join('、') : '（无）'
       const gongfasTxt = Object.keys(v.gongfas || {}).length ? Object.entries(v.gongfas).map(([m, c]) => `${itemIcon(m)}《${m}》×${c}`).join('、') : '（无）'
+      /* 战后维护提示: 3 小时内材料维护×2、灵石维护×5(仅玩家宗主宗门) */
+      const lastWarAt = Number((f.sects[p.sect] || {}).lastWarAt) || 0
+      const warHint = inWarUpkeep(f, p.sect)
+        ? `⏳ 战后整备中：材料维护×2、灵石维护×5（剩 ${Math.max(1, Math.ceil((WAR_UPKEEP_MS - (Date.now() - lastWarAt)) / 60000))} 分钟）`
+        : ''
       const lines = [
         `🏯 ${sectName(f, p.sect)} 宝库`,
         `灵石：${v.stones || 0}`,
+        ...(warHint ? [warHint] : []),
         `材料：${matsTxt}`,
         `丹药：${pillsTxt}`,
         `装备：${equipsTxt}`,
@@ -478,7 +486,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]宝库异常:' + (err && err.stack))
-      e.reply('查询宝库出错了，请稍后再试~')
+      e.reply('查询宝库出错了，请稍后再试')
       return true
     }
   }
@@ -490,7 +498,7 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const s = f.sects[p.sect]
@@ -506,7 +514,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]设施异常:' + (err && err.stack))
-      e.reply('查询设施出错了，请稍后再试~')
+      e.reply('查询设施出错了，请稍后再试')
       return true
     }
   }
@@ -519,8 +527,8 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
-      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以升级设施~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
+      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以升级设施'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const m = String(e.msg || '').match(/升级设施\s*(\S*)/)
@@ -534,7 +542,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]升级异常:' + (err && err.stack))
-      e.reply('升级设施出错了，请稍后再试~')
+      e.reply('升级设施出错了，请稍后再试')
       return true
     }
   }
@@ -547,12 +555,12 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
-      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以升级护城阵~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
+      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以升级护城阵'); return true }
       const m = String(e.msg || '').match(/升级护城阵\s*(\S*)/)
       const area = (m && m[1]) || ''
       if (!regionOfArea(area)) { e.reply('用法：#升级护城阵 [小区名]（#天下小区 看小区）'); return true }
-      if (f.areas[area] !== p.sect) { e.reply('只能升级本宗占领小区的护城阵~'); return true }
+      if (f.areas[area] !== p.sect) { e.reply('只能升级本宗占领小区的护城阵'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const r = upgradeAreaDef(f, area)
@@ -561,7 +569,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]护城阵异常:' + (err && err.stack))
-      e.reply('升级护城阵出错了，请稍后再试~')
+      e.reply('升级护城阵出错了，请稍后再试')
       return true
     }
   }
@@ -574,8 +582,8 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
-      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以放弃小区~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
+      if (p.pos !== 'zongzhu' && p.pos !== 'fuzong' && p.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以放弃小区'); return true }
       const m = String(e.msg || '').match(/(宗门放弃小区|放弃小区)\s*(\S*)/)
       const area = (m && m[2]) ? m[2].trim() : ''
       if (!regionOfArea(area)) { e.reply('用法：#宗门放弃小区 [小区名]（#天下小区 看小区）'); return true }
@@ -584,7 +592,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]放弃小区异常:' + (err && err.stack))
-      e.reply('放弃小区出错了，请稍后再试~')
+      e.reply('放弃小区出错了，请稍后再试')
       return true
     }
   }
@@ -596,18 +604,18 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const areas = Object.keys(f.areas).filter(a => f.areas[a] === p.sect)
-      if (!areas.length) { e.reply('本宗还没有地盘，可 #攻打 夺取~'); return true }
+      if (!areas.length) { e.reply('本宗还没有地盘，可 #攻打 夺取'); return true }
       const lines = areas.map(a => `· ${a}：护城阵 ${areaDefLevel(f, a)} 级（守方战力+${CFG.AREA_DEF_BONUS * areaDefLevel(f, a)}%）`)
       lines.push('', '#升级护城阵 [小区] 可升级（宗主/副宗/太上，护山阵60%消耗）')
       await replyLines(e, `🏯 ${sectName(f, p.sect)} 护城阵`, lines)
       return true
     } catch (err) {
       logger.error('[宗门系统]护城阵异常:' + (err && err.stack))
-      e.reply('查询护城阵出错了，请稍后再试~')
+      e.reply('查询护城阵出错了，请稍后再试')
       return true
     }
   }
@@ -644,7 +652,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]小区异常:' + (err && err.stack))
-      e.reply('查询小区出错了，请稍后再试~')
+      e.reply('查询小区出错了，请稍后再试')
       return true
     }
   }
@@ -662,7 +670,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]入宗异常:' + (err && err.stack))
-      e.reply('处理入宗申请出错了，请稍后再试~')
+      e.reply('处理入宗申请出错了，请稍后再试')
       return true
     }
   }
@@ -680,7 +688,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]入宗异常:' + (err && err.stack))
-      e.reply('处理入宗申请出错了，请稍后再试~')
+      e.reply('处理入宗申请出错了，请稍后再试')
       return true
     }
   }
@@ -692,15 +700,15 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p || !['zongzhu', 'fuzong', 'taishang'].includes(p.pos)) { e.reply('只有宗主/副宗主/太上长老可以查看入宗申请~'); return true }
+      if (!p || !['zongzhu', 'fuzong', 'taishang'].includes(p.pos)) { e.reply('只有宗主/副宗主/太上长老可以查看入宗申请'); return true }
       const sid = p.sect
       const reqs = (f.sectJoinReqs && f.sectJoinReqs[sid]) || []
-      if (!reqs.length) { e.reply('当前没有待审批的散修入宗申请~'); return true }
+      if (!reqs.length) { e.reply('当前没有待审批的散修入宗申请'); return true }
       e.reply(`🏯【${sectName(f, sid)}】待审批散修入宗申请（${reqs.length}人）：\n${reqs.map((x, i) => `${i + 1}. ${x.name}`).join('\n')}\n\n#同意入宗 全部接纳 ｜ #同意入宗 名字 单独接纳 ｜ #拒绝入宗 婉拒`)
       return true
     } catch (err) {
       logger.error('[宗门系统]入宗异常:' + (err && err.stack))
-      e.reply('查询入宗申请出错了，请稍后再试~')
+      e.reply('查询入宗申请出错了，请稍后再试')
       return true
     }
   }
@@ -712,7 +720,7 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const players = Object.values(f.players || {}).filter(x => x && x.sect === p.sect)
@@ -731,7 +739,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]成员异常:' + (err && err.stack))
-      e.reply('查询成员出错了，请稍后再试~')
+      e.reply('查询成员出错了，请稍后再试')
       return true
     }
   }
@@ -743,7 +751,7 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const sm = f.sectMap[p.sect] || {}
@@ -767,7 +775,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]职位异常:' + (err && err.stack))
-      e.reply('查询职位出错了，请稍后再试~')
+      e.reply('查询职位出错了，请稍后再试')
       return true
     }
   }
@@ -779,7 +787,7 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const s = f.sects[p.sect]
@@ -795,7 +803,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]关系异常:' + (err && err.stack))
-      e.reply('查询关系出错了，请稍后再试~')
+      e.reply('查询关系出错了，请稍后再试')
       return true
     }
   }
@@ -814,7 +822,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]结盟异常:' + (err && err.stack))
-      e.reply('结盟出错了，请稍后再试~')
+      e.reply('结盟出错了，请稍后再试')
       return true
     }
   }
@@ -833,7 +841,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]退盟异常:' + (err && err.stack))
-      e.reply('退盟出错了，请稍后再试~')
+      e.reply('退盟出错了，请稍后再试')
       return true
     }
   }
@@ -853,7 +861,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]助战异常:' + (err && err.stack))
-      e.reply('助战出错了，请稍后再试~')
+      e.reply('助战出错了，请稍后再试')
       return true
     }
   }
@@ -866,7 +874,7 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const me = getPlayer(f, uid)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, me.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const m = String(e.msg || '').match(/任命\s*(\S*)\s*@?(\d*)/)
@@ -876,13 +884,13 @@ export class sect_system extends plugin {
       const posMap = { 执事: 'zhishi', 副宗主: 'fuzong', 副宗: 'fuzong', 太上长老: 'taishang', 太上: 'taishang' }
       const toPos = posMap[posName]
       if (!toPos) { e.reply('用法：#任命 [执事/副宗主/太上长老] @目标'); return true }
-      if (!target) { e.reply('请 @目标 或输入 QQ号~'); return true }
+      if (!target) { e.reply('请 @目标 或输入 QQ号'); return true }
       const r = await appointTo(f, gid, uid, target, toPos)
       e.reply(r.msg)
       return true
     } catch (err) {
       logger.error('[宗门系统]任命异常:' + (err && err.stack))
-      e.reply('任命出错了，请稍后再试~')
+      e.reply('任命出错了，请稍后再试')
       return true
     }
   }
@@ -895,7 +903,7 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const m = String(e.msg || '').match(/晋升\s*(\S*)/)
@@ -908,7 +916,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]晋升异常:' + (err && err.stack))
-      e.reply('晋升出错了，请稍后再试~')
+      e.reply('晋升出错了，请稍后再试')
       return true
     }
   }
@@ -921,7 +929,7 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const me = getPlayer(f, uid)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, me.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       let target = e.at ? String(e.at) : ''
@@ -935,7 +943,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]传位异常:' + (err && err.stack))
-      e.reply('传位出错了，请稍后再试~')
+      e.reply('传位出错了，请稍后再试')
       return true
     }
   }
@@ -948,11 +956,11 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const cd = await redis.ttl(`xujing:sect-seize-cd:${gid}:${uid}`)
-      if (cd !== -2 && cd > 0) { e.reply(`此操作冷却中：${Math.ceil(cd / 3600)} 小时后再试~`); return true }
+      if (cd !== -2 && cd > 0) { e.reply(`此操作冷却中：${Math.ceil(cd / 3600)} 小时后再试`); return true }
       const r = await askAbdicate(f, gid, uid)
       if (r.ok || /拒绝了|席位|玩家|空缺/.test(r.msg)) {
         // 拒绝也进冷却(24h)
@@ -962,7 +970,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]问退位异常:' + (err && err.stack))
-      e.reply('问退位出错了，请稍后再试~')
+      e.reply('问退位出错了，请稍后再试')
       return true
     }
   }
@@ -974,18 +982,18 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const cd = await redis.ttl(`xujing:sect-seize-cd:${gid}:${uid}`)
-      if (cd !== -2 && cd > 0) { e.reply(`此操作冷却中：${Math.ceil(cd / 3600)} 小时后再试~`); return true }
+      if (cd !== -2 && cd > 0) { e.reply(`此操作冷却中：${Math.ceil(cd / 3600)} 小时后再试`); return true }
       const r = await seizePower(f, gid, uid)
       await redis.set(`xujing:sect-seize-cd:${gid}:${uid}`, 1, { EX: 24 * 3600 })
       e.reply(r.msg)
       return true
     } catch (err) {
       logger.error('[宗门系统]夺权异常:' + (err && err.stack))
-      e.reply('夺权出错了，请稍后再试~')
+      e.reply('夺权出错了，请稍后再试')
       return true
     }
   }
@@ -998,22 +1006,22 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const me = getPlayer(f, e.user_id)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
-      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以宣战~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
+      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以宣战'); return true }
       const m = String(e.msg || '').match(/(宗门宣战|宣战)\s*(\S*)/)
       const name = (m && m[2]) || ''
       if (!name) { e.reply('用法：#宣战 [宗门名]'); return true }
       const sid = sectIdByName(f, name)
-      if (!sid) { e.reply('没有找到该宗门~'); return true }
+      if (!sid) { e.reply('没有找到该宗门'); return true }
       const sReg = sectRegion(f, sid)
       const w = getWorld(gid)
-      if (getLoc(w, e.user_id) !== sReg) { e.reply(`你位于【${regionNameOf(getLoc(w, e.user_id))}】，目标宗门在【${regionNameOf(sReg)}】，请先过去~`); return true }
+      if (getLoc(w, e.user_id) !== sReg) { e.reply(`你位于【${regionNameOf(getLoc(w, e.user_id))}】，目标宗门在【${regionNameOf(sReg)}】，请先过去`); return true }
       const r = declareWar(f, gid, me.sect, name)
       e.reply(r.msg)
       return true
     } catch (err) {
       logger.error('[宗门系统]宣战异常:' + (err && err.stack))
-      e.reply('宣战出错了，请稍后再试~')
+      e.reply('宣战出错了，请稍后再试')
       return true
     }
   }
@@ -1025,10 +1033,10 @@ export class sect_system extends plugin {
       const gid = String(e.group_id)
       const f = getFake(gid)
       const me = getPlayer(f, e.user_id)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
-      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以议和~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
+      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以议和'); return true }
       const cd = await redis.ttl(`xujing:sect-peace-cd:${gid}:${e.user_id}`)
-      if (cd !== -2 && cd > 0) { e.reply(`议和冷却中：${Math.ceil(cd / 3600)} 小时后再试~`); return true }
+      if (cd !== -2 && cd > 0) { e.reply(`议和冷却中：${Math.ceil(cd / 3600)} 小时后再试`); return true }
       const m = String(e.msg || '').match(/(议和|罢兵)\s*(\S*)/)
       const name = (m && m[2]) || ''
       if (!name) { e.reply('用法：#议和 [宗门名]'); return true }
@@ -1038,7 +1046,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]议和异常:' + (err && err.stack))
-      e.reply('议和出错了，请稍后再试~')
+      e.reply('议和出错了，请稍后再试')
       return true
     }
   }
@@ -1055,7 +1063,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => createRogueTeam(f, gid, e.user_id, name, nick))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]创建队伍异常:' + (err && err.stack)); e.reply('创建队伍出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]创建队伍异常:' + (err && err.stack)); e.reply('创建队伍出错了'); return true }
   }
   async inviteTeamCmd (e) {
     try {
@@ -1068,7 +1076,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => inviteRogue(f, gid, e.user_id, target, nick))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]邀请异常:' + (err && err.stack)); e.reply('邀请出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]邀请异常:' + (err && err.stack)); e.reply('邀请出错了'); return true }
   }
   async agreeTeamCmd (e) {
     try {
@@ -1077,7 +1085,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => agreeRogue(f, gid, e.user_id, true))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]同意进队异常:' + (err && err.stack)); e.reply('操作出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]同意进队异常:' + (err && err.stack)); e.reply('操作出错了'); return true }
   }
   async refuseTeamCmd (e) {
     try {
@@ -1086,7 +1094,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => agreeRogue(f, gid, e.user_id, false))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]拒绝进队异常:' + (err && err.stack)); e.reply('操作出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]拒绝进队异常:' + (err && err.stack)); e.reply('操作出错了'); return true }
   }
   async applyTeamCmd (e) {
     try {
@@ -1099,7 +1107,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => applyRogue(f, gid, e.user_id, leader, nick))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]申请进队异常:' + (err && err.stack)); e.reply('申请出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]申请进队异常:' + (err && err.stack)); e.reply('申请出错了'); return true }
   }
   async agreeApplyCmd (e) {
     try {
@@ -1108,7 +1116,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => respondApply(f, gid, e.user_id, true))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]同意申请异常:' + (err && err.stack)); e.reply('操作出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]同意申请异常:' + (err && err.stack)); e.reply('操作出错了'); return true }
   }
   async refuseApplyCmd (e) {
     try {
@@ -1117,7 +1125,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => respondApply(f, gid, e.user_id, false))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]拒绝申请异常:' + (err && err.stack)); e.reply('操作出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]拒绝申请异常:' + (err && err.stack)); e.reply('操作出错了'); return true }
   }
   async kickTeamCmd (e) {
     try {
@@ -1129,7 +1137,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => kickRogue(f, gid, e.user_id, target))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]踢人异常:' + (err && err.stack)); e.reply('操作出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]踢人异常:' + (err && err.stack)); e.reply('操作出错了'); return true }
   }
   async transferTeamCmd (e) {
     try {
@@ -1142,7 +1150,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => transferRogue(f, gid, e.user_id, target, nick))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]转让队长异常:' + (err && err.stack)); e.reply('操作出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]转让队长异常:' + (err && err.stack)); e.reply('操作出错了'); return true }
   }
   async quitTeamCmd (e) {
     try {
@@ -1151,7 +1159,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => quitRogue(f, gid, e.user_id))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]退出队伍异常:' + (err && err.stack)); e.reply('操作出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]退出队伍异常:' + (err && err.stack)); e.reply('操作出错了'); return true }
   }
   async disbandTeamCmd (e) {
     try {
@@ -1160,7 +1168,7 @@ export class sect_system extends plugin {
       const r = await withTeamLock(gid, f => disbandRogue(f, gid, e.user_id))
       e.reply(r.msg)
       return true
-    } catch (err) { logger.error('[宗门系统]解散队伍异常:' + (err && err.stack)); e.reply('操作出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]解散队伍异常:' + (err && err.stack)); e.reply('操作出错了'); return true }
   }
   async teamInfoCmd (e) {
     try {
@@ -1181,7 +1189,7 @@ export class sect_system extends plugin {
       lines.push('成员：#退出队伍 ｜ 组队攻打宗门：#攻打 宗门名（队长发起）')
       await replyLines(e, '🎯 玩家小队', lines)
       return true
-    } catch (err) { logger.error('[宗门系统]队伍状态异常:' + (err && err.stack)); e.reply('查看队伍出错了~'); return true }
+    } catch (err) { logger.error('[宗门系统]队伍状态异常:' + (err && err.stack)); e.reply('查看队伍出错了'); return true }
   }
 
   async attackCmd (e) {
@@ -1198,12 +1206,12 @@ export class sect_system extends plugin {
       if (!target) { e.reply('用法：#攻打 小区名 或 宗门名（#天下小区 / #天下宗门 查看）'); return true }
       /* 玩家小队: 有无宗门均可组队攻打别人的宗门；这不是宗门战争 */
       if (team) {
-        if (team.leader !== String(uid)) { e.reply('只有玩家小队队长可以发起小队攻打~'); return true }
+        if (team.leader !== String(uid)) { e.reply('只有玩家小队队长可以发起小队攻打'); return true }
         const w = getWorld(gid)
         const sid = sectIdByName(f, target)
         if (!sid) { e.reply('目标不存在：请输入宗门名（#天下宗门 查看）'); return true }
         const sReg = sectRegion(f, sid)
-        if (getLoc(w, uid) !== sReg) { e.reply(`你位于【${regionNameOf(getLoc(w, uid))}】，目标${sectTxtOf(f, sid)}，请先过去~`); return true }
+        if (getLoc(w, uid) !== sReg) { e.reply(`你位于【${regionNameOf(getLoc(w, uid))}】，目标${sectTxtOf(f, sid)}，请先过去`); return true }
         const nick = (e.sender && (e.sender.card || e.sender.nickname)) || '玩家'
         const r = await withTeamLock(gid, current => startRogueAttack(current, gid, uid, target, nick))
         if (!r.ok) { e.reply(r.msg); return true }
@@ -1217,7 +1225,7 @@ export class sect_system extends plugin {
         const sid = sectIdByName(f, target)
         if (!sid) { e.reply('目标不存在：请输入 宗门名（#天下宗门 查看）'); return true }
         const sReg = sectRegion(f, sid)
-        if (myLoc !== sReg) { e.reply(`你位于【${regionNameOf(myLoc)}】，目标${sectTxtOf(f, sid)}，请先过去~`); return true }
+        if (myLoc !== sReg) { e.reply(`你位于【${regionNameOf(myLoc)}】，目标${sectTxtOf(f, sid)}，请先过去`); return true }
         const nick = (e.sender && (e.sender.card || e.sender.nickname)) || '散修'
         const r = await withTeamLock(gid, current => startRogueAttack(current, gid, uid, target, nick))
         if (!r.ok) { e.reply(r.msg); return true }
@@ -1235,18 +1243,18 @@ export class sect_system extends plugin {
         e.reply(r.msg)
         return true
       }
-      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以发起攻打~'); return true }
+      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以发起攻打'); return true }
       /* 位置校验: 发起人须与目标同大区 */
       const w = getWorld(gid)
       const myLoc = getLoc(w, uid)
       const tReg = regionOfArea(target)
       if (tReg) {
-        if (myLoc !== tReg) { e.reply(`你位于【${regionNameOf(myLoc)}】，目标${areaTxtOf(f, target)}，请先过去~`); return true }
+        if (myLoc !== tReg) { e.reply(`你位于【${regionNameOf(myLoc)}】，目标${areaTxtOf(f, target)}，请先过去`); return true }
       } else {
         const sid = sectIdByName(f, target)
-        if (!sid) { e.reply('目标不存在：请输入 小区名 或 宗门名~'); return true }
+        if (!sid) { e.reply('目标不存在：请输入 小区名 或 宗门名'); return true }
         const sReg = sectRegion(f, sid)
-        if (myLoc !== sReg) { e.reply(`你位于【${regionNameOf(myLoc)}】，目标${sectTxtOf(f, sid)}，请先过去~`); return true }
+        if (myLoc !== sReg) { e.reply(`你位于【${regionNameOf(myLoc)}】，目标${sectTxtOf(f, sid)}，请先过去`); return true }
       }
       const r = await startSectAttack(f, gid, me.sect, target, 'player')
       if (!r.ok) { e.reply(r.msg); return true }
@@ -1267,7 +1275,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]攻打异常:' + (err && err.stack))
-      e.reply('发起攻打出错了，请稍后再试~')
+      e.reply('发起攻打出错了，请稍后再试')
       return true
     }
   }
@@ -1293,9 +1301,9 @@ export class sect_system extends plugin {
       /* 宗门成员: 宗主/副宗/太上可终止本宗在途攻打 */
       const me = getPlayer(f, uid)
       if (me) {
-        if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以终止攻打~'); return true }
+        if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以终止攻打'); return true }
         const atk = (f.sectAttacks || []).find(a => a.phase !== 'done' && a.atkSect === me.sect)
-        if (!atk) { e.reply('本宗当前没有在进行中的攻打~'); return true }
+        if (!atk) { e.reply('本宗当前没有在进行中的攻打'); return true }
         const r = await abortSectAttack(f, gid, atk, now, `${posCn(me.pos)} ${me.name}`)
         e.reply(r.msg)
         return true
@@ -1303,16 +1311,16 @@ export class sect_system extends plugin {
       /* 散修: 队长可终止本小队在途攻打 */
       if (team && team.leader === uid) {
         const atk = (f.sectAttacks || []).find(a => a.phase !== 'done' && a.by === 'rogue' && String(a.rogue) === uid)
-        if (!atk) { e.reply('本小队当前没有在进行中的攻打~'); return true }
+        if (!atk) { e.reply('本小队当前没有在进行中的攻打'); return true }
         const r = await abortSectAttack(f, gid, atk, now, '队长')
         e.reply(r.msg)
         return true
       }
-      e.reply('你没有可终止的攻打（宗门成员需宗主/副宗/太上，散修需队长）~')
+      e.reply('你没有可终止的攻打（宗门成员需宗主/副宗/太上，散修需队长）')
       return true
     } catch (err) {
       logger.error('[宗门系统]终止攻打异常:' + (err && err.stack))
-      e.reply('终止攻打出错了，请稍后再试~')
+      e.reply('终止攻打出错了，请稍后再试')
       return true
     }
   }
@@ -1382,13 +1390,13 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const r = joinSectFight(f, gid, uid, side, false, raw)
       e.reply(r.msg)
       return true
     } catch (err) {
       logger.error('[宗门系统]参战异常:' + (err && err.stack))
-      e.reply('操作出错了，请稍后再试~')
+      e.reply('操作出错了，请稍后再试')
       return true
     }
   }
@@ -1412,7 +1420,7 @@ export class sect_system extends plugin {
       const p = getPlayer(f, uid)
       /* 散修(无宗门档案): 不能加入宗门攻防, 但可 #退战 退出自己所在的小队攻打(否则战争期锁无法解除) */
       if (!p) {
-        if (!quit) { e.reply('你不是宗门成员~'); return true }
+        if (!quit) { e.reply('你不是宗门成员'); return true }
         const rr = quitRogueParticipation(f, gid, uid, target || null)
         e.reply(rr.msg)
         return true
@@ -1423,7 +1431,28 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]参战异常:' + (err && err.stack))
-      e.reply('操作出错了，请稍后再试~')
+      e.reply('操作出错了，请稍后再试')
+      return true
+    }
+  }
+
+  /* ---- #派兵/#添兵/#减兵/#撤兵 [目标] [人数]: 统一调兵; 减兵不退传送费, 减到0直接终止 ---- */
+  async sectForceCmd (e) {
+    try {
+      if (this.gate(e)) return true
+      if (this.warBlock(e)) return true
+      const gid = String(e.group_id)
+      const m = String(e.msg || '').match(/(派兵|添兵|减兵|撤兵)\s*(\S*?)(?:\s+([0-9０-９]+))?\s*$/)
+      const verb = m ? m[1] : '派兵'
+      const target = (m && m[2]) ? m[2].trim() : ''
+      const count = Number((m && m[3]) || 1)
+      const delta = (verb === '减兵' || verb === '撤兵') ? -count : count
+      const r = await sectForceAdjust(getFake(gid), gid, e.user_id, target, delta)
+      e.reply(r.msg)
+      return true
+    } catch (err) {
+      logger.error('[宗门系统]调兵异常:' + (err && err.stack))
+      e.reply('调兵出错了，请稍后再试')
       return true
     }
   }
@@ -1444,7 +1473,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]驰援异常:' + (err && err.stack))
-      e.reply('驰援出错了，请稍后再试~')
+      e.reply('驰援出错了，请稍后再试')
       return true
     }
   }
@@ -1464,7 +1493,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]仆从集结异常:' + (err && err.stack))
-      e.reply('集结仆从出错了，请稍后再试~')
+      e.reply('集结仆从出错了，请稍后再试')
       return true
     }
   }
@@ -1477,8 +1506,8 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const me = getPlayer(f, uid)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
-      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以处置俘虏~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
+      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以处置俘虏'); return true }
       const m = String(e.msg || '').match(/处置俘虏\s*(\S*)\s*(收编|全杀|搜刮再杀|全放|搜刮再放|关天牢|送矿山|送往矿山)?/)
       let name = (m && m[1]) || ''
       let act = (m && m[2]) || ''
@@ -1493,7 +1522,7 @@ export class sect_system extends plugin {
       if (!act) {
         /* 无参: 显示俘虏处置界面(含收编/单独处置; 攻方赢/守方赢都有俘虏可处置) */
         const pending = pendingCaptivesForSect(f, me.sect, true)
-        if (!pending) { e.reply('当前没有待处置的俘虏~'); return true }
+        if (!pending) { e.reply('当前没有待处置的俘虏'); return true }
         /* 菜单门: 记录"本宗高层最近打开过处置界面", 裸数字回复只在此窗口内接管,
            避免宗门有待处置俘虏期间(最长24小时)任意裸数字 1~7 都被误判为处置指令(莫名其妙触发) */
         try { await redis.set(`xujing:captive-menu:${gid}:${uid}`, '1', { EX: 300 }) } catch (err) { }
@@ -1524,53 +1553,13 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]俘虏异常:' + (err && err.stack))
-      e.reply('处置俘虏出错了，请稍后再试~')
+      e.reply('处置俘虏出错了，请稍后再试')
       return true
     }
   }
 
   /* ---- 裸数字回复 处置俘虏: 宗主/副宗/太上在处置界面后直接回复 1~7 ---- */
-  async captivePickCmd (e) {
-    try {
-      /* 群未开启宗门系统 → 不接管裸数字(放行给逛街/丹阁等序号指令), 而非报错拦截 */
-      if (!e.group_id || !isEnabled(e.group_id)) return false
-      const gid = String(e.group_id)
-      const uid = e.user_id
-      const f = getFake(gid)
-      const me = getPlayer(f, uid)
-      if (!me) return false
-      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') return false
-      /* 菜单门: 仅当本宗高层最近打开过处置界面(5分钟内)才接管裸数字;
-         否则宗门有待处置俘虏期间(最长24小时)任意裸数字 1~7 都会被误判为处置指令(莫名其妙触发) */
-      const menuKey = `xujing:captive-menu:${gid}:${uid}`
-      const menuOpen = await redis.get(menuKey)
-      if (!menuOpen) return false
-      const pending = pendingCaptivesForSect(f, me.sect, true)
-      if (!pending) return false
-      /* 有其他交互进行中(逛街/丹阁/渡劫/换装/赠送/出售/跨区) → 该数字归那个交互, 不抢 */
-      const cur = await currentInteract(gid, uid)
-      if (cur) return false
-      const numStr = String(e.msg || '').replace(/[０-９]/g, d => String.fromCharCode(d.charCodeAt(0) - 0xFEE0))
-      const num = parseInt(numStr.replace(/[^\d]/g, ''), 10)
-      const act = {
-        1: '全杀', 2: '搜刮再杀', 3: '全放', 4: '搜刮再放',
-        5: '收编', 6: '关天牢', 7: '送矿山'
-      }[num]
-      if (!act) {
-        e.reply('❌ 没有该处置选项，请回复 1~7（1全杀 2搜刮再杀 3全放 4搜刮再放 5收编 6关天牢 7送矿山）~')
-        return true
-      }
-      const r = await handleCaptives(f, gid, me.sect, act, null, false, uid)
-      e.reply(r.msg)
-      /* 处置完成 → 关闭本菜单窗口, 防止同一5分钟内继续误接管(下一批需重新 #处置俘虏 查看) */
-      try { await redis.del(menuKey) } catch (err) { }
-      return true
-    } catch (err) {
-      logger.error('[宗门系统]俘虏异常:' + (err && err.stack))
-      e.reply('处置俘虏出错了，请稍后再试~')
-      return true
-    }
-  }
+  async captivePickCmd (e) { return false } // 数字交互统一由 sect_war.warPick 路由
 
   /* ---- #宗门矿山: 查看本宗矿山矿工与产出 ---- */
   async sectMineCmd (e) {
@@ -1580,9 +1569,9 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const me = getPlayer(f, uid)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
       const arr = (f.sectMines && f.sectMines[me.sect]) || []
-      if (!arr.length) { e.reply(`【${sectName(f, me.sect)}】矿山空无一人（战俘可 #处置俘虏 送矿山 押去挖矿）~`); return true }
+      if (!arr.length) { e.reply(`【${sectName(f, me.sect)}】矿山空无一人（战俘可 #处置俘虏 送矿山 押去挖矿）`); return true }
       const now = Date.now()
       const lines = arr.map((m, i) => {
         const p = f.roster[m.name]
@@ -1611,7 +1600,7 @@ export class sect_system extends plugin {
       const f = getFake(gid)
       const mines = f.sectMines || {}
       const entries = Object.entries(mines).filter(([sid, arr]) => arr && arr.length && f.sects && f.sects[sid])
-      if (!entries.length) { e.reply('⛏️ 天下暂无矿山（宗门战胜方可将战俘 #处置俘虏 送矿山 挖矿）~'); return true }
+      if (!entries.length) { e.reply('⛏️ 天下暂无矿山（宗门战胜方可将战俘 #处置俘虏 送矿山 挖矿）'); return true }
       const now = Date.now()
       const lines = entries.map(([sid, arr]) => {
         const sname = sectName(f, sid)
@@ -1640,9 +1629,9 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const me = getPlayer(f, uid)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
       const arr = sectJailList(f, me.sect)
-      if (!arr.length) { e.reply('本宗天牢空无一人~'); return true }
+      if (!arr.length) { e.reply('本宗天牢空无一人'); return true }
       const now = Date.now()
       const lines = arr.map((x, i) => {
         const durMin = Math.max(1, Math.round((now - (x.at || now)) / 60000))
@@ -1665,8 +1654,8 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const me = getPlayer(f, uid)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
-      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以释放俘虏~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
+      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以释放俘虏'); return true }
       const m = String(e.msg || '').match(/释放俘虏\s*(\S+)/)
       const name = (m && m[1]) || ''
       if (!name) { e.reply('用法：#释放俘虏 [名字]'); return true }
@@ -1730,8 +1719,8 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const me = getPlayer(f, uid)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
-      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以招人入宗~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
+      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以招人入宗'); return true }
       const m = String(e.msg || '').match(/(?:拉人入宗|招收弟子|招人入宗)\s*(\S*)/)
       const name = (m && m[1]) || ''
       const r = recruitFakeToSect(f, gid, me.sect, name)
@@ -1739,7 +1728,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]招人异常:' + (err && err.stack))
-      e.reply('招人入宗出错了，请稍后再试~')
+      e.reply('招人入宗出错了，请稍后再试')
       return true
     }
   }
@@ -1752,8 +1741,8 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const me = getPlayer(f, uid)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
-      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以挖角~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
+      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以挖角'); return true }
       const m = String(e.msg || '').match(/挖角\s*(\S*)/)
       const name = (m && m[1]) || ''
       const r = poachFakeFromSect(f, gid, me.sect, name)
@@ -1761,7 +1750,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]挖角异常:' + (err && err.stack))
-      e.reply('挖角出错了，请稍后再试~')
+      e.reply('挖角出错了，请稍后再试')
       return true
     }
   }
@@ -1774,8 +1763,8 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const me = getPlayer(f, uid)
-      if (!me) { e.reply('你不是宗门成员~'); return true }
-      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以维护宗门~'); return true }
+      if (!me) { e.reply('你不是宗门成员'); return true }
+      if (me.pos !== 'zongzhu' && me.pos !== 'fuzong' && me.pos !== 'taishang') { e.reply('只有宗主/副宗主/太上长老可以维护宗门'); return true }
       const sr = sameRegion(e, f, me.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const m = String(e.msg || '').match(/维护宗门\s*(\d*)/)
@@ -1787,11 +1776,11 @@ export class sect_system extends plugin {
         return true
       }
       const v = getVault(f, me.sect)
-      if ((v.stones || 0) < amount) { e.reply(`宝库灵石不足（现有 ${v.stones || 0}）~`); return true }
+      if ((v.stones || 0) < amount) { e.reply(`宝库灵石不足（现有 ${v.stones || 0}）`); return true }
       /* 繁荣度结算冷却: 每5分钟可结算维护一次 */
       const s = f.sects[me.sect]
       const mAt = s.maintainAt || 0
-      if (mAt > Date.now()) { e.reply(`⏳ 繁荣度结算冷却中，${Math.ceil((mAt - Date.now()) / 60000)} 分钟后可再次维护（每5分钟结算一次）~`); return true }
+      if (mAt > Date.now()) { e.reply(`⏳ 繁荣度结算冷却中，${Math.ceil((mAt - Date.now()) / 60000)} 分钟后可再次维护（每5分钟结算一次）`); return true }
       v.stones -= amount
       const w = getWorld(gid)
       const name = sectName(f, me.sect)
@@ -1803,7 +1792,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]维护异常:' + (err && err.stack))
-      e.reply('维护宗门出错了，请稍后再试~')
+      e.reply('维护宗门出错了，请稍后再试')
       return true
     }
   }
@@ -1832,19 +1821,19 @@ export class sect_system extends plugin {
         '',
         '【组队攻打宗门】',
         '· 有无宗门的玩家都可组队，队长使用 #攻打 宗门名，以玩家小队身份攻打别人的宗门；不等于宗门对宗门宣战',
-        '· 打赢：洗劫对方宝库30%灵石，按人头平分！',
-        '· 有准备期；目标被打后有2天休战期',
+        '· 打赢：宗门总部被攻破即永久灭门；洗劫宝库30%灵石，按实际参战队员分配（含参战后负伤或退场者）。',
+        '· 准备期30分钟；开战后退战/撤退要承担当前回合，凌晨1~6点暂停并顺延。',
         '· 全体队员须与目标宗门同大区（#去[大区] 前往）',
         '',
         '【注意】',
-        '· 有宗门的玩家也可以加入玩家小队；宗门战与小队攻打宗门是两套玩法',
+        '· 有宗门也可组队，但每个人同一时间只能占用一个战场；小队攻破总部同样触发灭门。',
         '· 玩家小队可组队攻打别人的宗门，不能把本队成员所属宗门作为目标'
       ]
       await replyLines(e, '🎯 玩家组队玩法', lines)
       return true
     } catch (err) {
       logger.error('[宗门系统]组队玩法异常:' + (err && err.stack))
-      e.reply('组队玩法说明生成失败，请稍后再试~')
+      e.reply('组队玩法说明生成失败，请稍后再试')
       return true
     }
   }
@@ -1911,27 +1900,35 @@ export class sect_system extends plugin {
         '· #升级设施 演武场/护山阵/灵脉/药园（宗主/副宗/太上）',
         '',
         '【地盘 / 护城阵 / 产出】',
-        '· #攻打 [小区或宗门]：夺取地盘（小区按攻打激烈程度休战6~24小时，宗门2天）',
+        '· #攻打 [小区或宗门]：小区占领后休战4~12小时；总部失守永久灭门，不保留原宗门等待换皮。',
         '· #升级护城阵 [小区]：守方战力+6%/级（护山阵60%消耗，建成永久）',
         '· #宗门放弃小区 [小区]：宗主/副宗/太上放弃本宗小区，变回无主之地（各方可立即争夺）',
         '· 小区每半小时按当地繁荣度产出灵石+材料进宝库',
+        '· 小区被打结算或撤兵后停产3小时；恢复期结束再计30分钟产出第一笔，之后每30分钟一次（玩家/伪玩家宗门相同）',
         '· #天下小区：看各区占领、护城阵等级与产出记录',
         '',
         '【战争】',
-        '· #宣战 [宗名]：正式敌对（宣战才能正常打，也可直接打自动宣战）',
-        '· #攻打 [小区或宗门]：30分钟准备期，消耗灵石(1000+人数×200)；玩家小队可免费 #攻打 宗门（队长发起，≥2人）',
-        '· 被攻打：宗主回 #守 / #不守（29分钟超时按规则自动判）',
-        '· 守方有人守→拉锯战每10分钟一轮士气消耗；无人守→速战速决',
-        '· 战力=参战人数×600 + 境界/装备战力×100%——个人战力全额计入，顶尖高手可凭战力碾压满编宗门',
-        '· 胜：小区易主/整宗失守 + 俘虏 + 败方宝库30%战利品',
-        '· #参战 [目标]：加入本宗的攻打或防守（自动分边；多处战事可指定，如 #参战 天墉城）',
-        '· #守 [目标] / #不守 [目标]：被攻宗主多处受敌时可逐处指定坚守/弃守；普通成员 #守 [目标] 即加入该处防守',
-        '· #退战 [目标]：退出参战（攻打或防守，多处可指定）',
-        '· #撤退：宗主/副宗/太上终止本宗在途攻打；散修队长终止本小队（撤军后本宗/本队进30分钟冷却，目标不设休战期）',
-        '· #驰援 [目标] [人数]：调回在外门人回防/增援前线（宗主/副宗/太上，宝库出传送费；多处战事时先列战况与人数再指定，如 #驰援 天墉城 3）',
-        '· #集结仆从 [目标] [人数]：集结收服的仆从参战（宗主/副宗/太上；多处战事可指定目标与人数，如 #集结仆从 天墉城 2）',
-        '· #盟友助战 [目标] [人数]：派兵协助盟友攻打，打赢归贡献最高者（如 #盟友助战 天墉城 3）',
-        '· #议和 [宗名]：停战（24小时冷却，弱势方需赔款）',
+        '· #攻打：先打开数字目标菜单；也可 #攻打 [小区或宗门] [人数]。宗门高层或小队队长下令，发起人须在目标大区。',
+        '· 宗门发起费2000+本宗人数×400灵石；跨区每人2000灵石，本地免费；拥有定仙游按现有跨区规则处理，封海照常限制。',
+        '· 玩家小队≥2人、全员在目标大区且能行动，免费出征；宗门总部攻破即永久灭门，小区失守只易主。',
+        '· 先检查目标、冷却、可调兵力、位置和预算，再扣费及宣战；失败不调动守军、不建立敌对关系。',
+        '· 准备期30分钟，拉锯每10分钟一轮、最多8轮；凌晨1~6点暂停，准备/回合计时顺延。',
+        '· #守 / #不守：高层选择战场后决定坚守或弃守；普通成员 #守 自行加入守军。',
+        '· #防守策略：数字选择稳守/保人；也可 #防守策略 稳守 或 保人。无人回应时稳守自动组织兵力，保人弃守；总部被破仍灭门。',
+        '· #参战 / #退战：数字选择战场，也可加固定战役编号或目标名；真人只能自己报名，同一人不可同时参加两场战争。',
+        '· #派兵 / #添兵 / #驰援 / #减兵：先选战场，再回复人数；也可 #派兵 [战役号或目标] [人数]。指定人数是调兵上限，实际受兵力/预算/封海限制。',
+        '· #撤兵 [战场] [人数] 等同减兵；不带参数的 #撤兵 等同撤退。减兵只撤本宗NPC，调兵费用不退。',
+        '· 准备期攻军撤空取消本次出征，守军撤空视为弃守；开战后退战/减兵/撤退均在本轮交战后生效，撤退方按败退结算。',
+        '· #撤退 [战场]：本方高层或小队队长下令；撤军仍保留战后3小时维护与被打小区停产规则。',
+        '· #集结仆从 [战场] [人数]：集结自己收服的仆从；跨区同样受预算与封海限制。',
+        '· #盟友助战 [战场] [人数]：派本宗NPC增援盟友，可继续添兵；盟友真人成员须 #参战 自行报名。',
+        '· #战法：数字选择战场和战法，也可 #战法 [战役号] [战法名]；只能准备期更改，两宗合围须有盟友实际入场。',
+        '· 战力沿用人数×600+个人实际战力、原设施及NPC防守加成；预估是当前单轮优势，不代表整场获胜率。',
+        '· 每回合累计参战贡献：战后论功行赏及联盟地盘/战利品分配按累计贡献，负伤、被俘或撤离者保留已取得的贡献。',
+        '· #攻打预估 [目标] [人数]：只读查看调兵预算和战力；#宗门兵力 查看各门人待命/参战/在途情况。',
+        '· #天下战争 查看总览；#战争详情 [固定战役号] 查看对应战报；#天下战争 [序号] 保留旧的列表查询。',
+        '· #宣战 [宗名] 正式敌对；#议和 [宗名] 提议停战，玩家宗门须 #同意议和 [宗名] 或 #拒绝议和 [宗名]，同意前战争继续。',
+        '· 接受议和后结束双方进行中的战事、互放本场俘虏；弱势方5%宝库赔款和议和24小时冷却沿用。',
         '',
         '【俘虏】（胜方宗主/副宗/太上）',
         '· #处置俘虏：查看待处置俘虏与全部选项（菜单打开后5分钟内可直接回复 1~7，或发 #处置俘虏1~7）',
@@ -1960,7 +1957,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]玩法大全异常:' + (err && err.stack))
-      e.reply('玩法大全生成失败，请稍后再试~')
+      e.reply('玩法大全生成失败，请稍后再试')
       return true
     }
   }
@@ -1984,11 +1981,11 @@ export class sect_system extends plugin {
         '护城阵：#升级护城阵 [小区]（宗主/副宗/太上）',
         '地盘：#宗门放弃小区 [小区]（宗主/副宗/太上，小区变回无主）',
         '职位：#任命 [执事/副宗主/太上长老] @xx / #晋升 [执事/副宗/太上]（伪玩家宗主宗门） / #传位 @xx / #问退位 / #夺权',
-        '战争：#宣战 [宗名] / #攻打 [小区或宗门] / #撤退（终止本宗攻打） / #议和 [宗名]',
-        '参战：#参战 [目标]（自动分边加入攻打/防守） / #退战 [目标]（退出参战）',
-        '防守：#守 [目标] / #不守 [目标]（被攻宗主逐处决策；普通成员 #守 [目标] 即加入防守）',
+        '战争：#攻打 / #战法 / #防守策略（支持数字菜单）；#攻打预估 [目标] / #宗门兵力 / #战争详情 [固定战役号]',
+        '参战：#参战 / #退战 / #撤退（数字选择战场）；开战后离场在本轮结算后生效。#议和 / #同意议和 / #拒绝议和 [宗名]。',
+        '防守：#守 / #不守（高层选战场决策；普通成员#守自行参战）；#防守策略 稳守/保人。总部被破即灭门。',
         '调兵：#驰援 [目标] [人数] / #集结仆从 [目标] [人数] / #盟友助战 [目标] [人数]（宗主/副宗/太上）',
-        '俘虏：#处置俘虏 全杀/全放/搜刮再放（胜方宗主）',
+        '俘虏：#处置俘虏 打开固定战役菜单，回复1~7选择处置，0取消；也支持名字与文字动作。',
         '维护：#维护宗门 [灵石]',
         '玩家小队：#创建队伍 / #邀请入队 @xx / #同意进队 / #申请进队 @队长 / #踢出队伍 / #转让队长 / #我的队伍',
         '说明：查看与操作需在宗门所在大区（#去[大区] 前往）；宗门无地盘需攻打夺取；玩家小队攻打宗门须由队长发起（免费）'
@@ -1997,7 +1994,7 @@ export class sect_system extends plugin {
       return true
     } catch (err) {
       logger.error('[宗门系统]帮助异常:' + (err && err.stack))
-      e.reply('帮助面板生成失败，请稍后再试~')
+      e.reply('帮助面板生成失败，请稍后再试')
       return true
     }
   }
@@ -2010,19 +2007,19 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const m = String(e.msg || '').match(/宗门购丹\s*(\S*)\s*(\d*)/)
       const name = (m && m[1]) || ''
       const count = Number((m && m[2]) || 1)
-      if (!name) { e.reply('用法：#宗门购丹 [修为丹/破障丹/聚宝丹] [数量]（丹阁价×80%，灵石直接进宗门宝库，不交税）~'); return true }
+      if (!name) { e.reply('用法：#宗门购丹 [修为丹/破障丹/聚宝丹] [数量]（丹阁价×80%，灵石直接进宗门宝库，不交税）'); return true }
       const r = await buyPillFromVault(gid, uid, name, count)
       e.reply(r.msg)
       return true
     } catch (err) {
       logger.error('[宗门系统]购丹异常:' + (err && err.stack))
-      e.reply('购丹出错了，请稍后再试~')
+      e.reply('购丹出错了，请稍后再试')
       return true
     }
   }
@@ -2034,19 +2031,19 @@ export class sect_system extends plugin {
       const uid = e.user_id
       const f = getFake(gid)
       const p = getPlayer(f, uid)
-      if (!p) { e.reply('你不是宗门成员~'); return true }
+      if (!p) { e.reply('你不是宗门成员'); return true }
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const m = String(e.msg || '').match(/(?:宗门购装备|宝库购装备|宗门买装备)\s*(\S*)\s*(\d*)/)
       const name = (m && m[1]) || ''
       const count = Number((m && m[2]) || 1)
-      if (!name) { e.reply('用法：#宗门购装备 [装备全名] [数量]（使用贡献兑换，装备按品质收费，普通弟子可用）~'); return true }
+      if (!name) { e.reply('用法：#宗门购装备 [装备全名] [数量]（使用贡献兑换，装备按品质收费，普通弟子可用）'); return true }
       const r = await exchange(gid, uid, name, count)
       e.reply(r.msg)
       return true
     } catch (err) {
       logger.error('[宗门系统]购装备异常:' + (err && err.stack))
-      e.reply('购装备出错了，请稍后再试~')
+      e.reply('购装备出错了，请稍后再试')
       return true
     }
   }
@@ -2054,7 +2051,7 @@ export class sect_system extends plugin {
   /* ---- 管理员(主人): #重洗天下 一键重置本群全部伪玩家/宗门数据并重新演化 ---- */
   async rewashWorld (e) {
     try {
-      if (!e.isMaster) { e.reply('只有主人可以重洗天下~'); return true }
+      if (!e.isMaster) { e.reply('只有主人可以重洗天下'); return true }
       if (this.gate(e)) return true
       const gid = String(e.group_id)
       const f = rewashFake(gid)
@@ -2064,11 +2061,11 @@ export class sect_system extends plugin {
         syncWorldSectMap(f, w)
         saveWorld(w)
       } catch (err) { }
-      e.reply('✅ 已重洗天下：本群全部伪玩家与宗门数据已重置，世界重新演化！\n⚠️ 玩家宗门/成员身份也已重置，请重新 #创建宗门 或 #加入宗门；\n伪玩家将从低境界开始，靠修炼/突破自然成长~')
+      e.reply('✅ 已重洗天下：本群全部伪玩家与宗门数据已重置，世界重新演化！\n⚠️ 玩家宗门/成员身份也已重置，请重新 #创建宗门 或 #加入宗门；\n伪玩家将从低境界开始，靠修炼/突破自然成长')
       return true
     } catch (err) {
       logger.error('[宗门系统]重洗天下异常:' + (err && err.stack))
-      e.reply('重洗天下出错了，请稍后再试~')
+      e.reply('重洗天下出错了，请稍后再试')
       return true
     }
   }
@@ -2076,16 +2073,16 @@ export class sect_system extends plugin {
   /* ---- 管理员(主人): #重置休战期 一键清除本群小区休战期 ---- */
   async resetTruceCmd (e) {
     try {
-      if (!e.isMaster) { e.reply('只有主人可以重置休战期~'); return true }
+      if (!e.isMaster) { e.reply('只有主人可以重置休战期'); return true }
       if (this.gate(e)) return true
       const gid = String(e.group_id)
       const f = getFake(gid)
       const r = resetAreaTruce(f, gid)
-      e.reply(r.n > 0 ? `✅ 已重置 ${r.n} 个小区的休战期，现在可以立即攻打！` : '当前没有小区处于休战期~')
+      e.reply(r.n > 0 ? `✅ 已重置 ${r.n} 个小区的休战期，现在可以立即攻打！` : '当前没有小区处于休战期')
       return true
     } catch (err) {
       logger.error('[宗门系统]重置休战异常:' + (err && err.stack))
-      e.reply('重置休战期出错了，请稍后再试~')
+      e.reply('重置休战期出错了，请稍后再试')
       return true
     }
   }

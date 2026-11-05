@@ -51,14 +51,14 @@ body {
   color: #57748f;
 }
 
-/* ---------- 4 列 × 6 行; 帝品 2×2 ---------- */
+/* ---------- 5 列 × 5 行; 帝品 2×2 ---------- */
 .rc-grid {
   flex: 1;
   min-height: 0;
   margin-top: 12px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  grid-template-rows: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-rows: repeat(5, minmax(0, 1fr));
   gap: 10px;
 }
 

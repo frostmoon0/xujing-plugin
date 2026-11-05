@@ -16,6 +16,7 @@ import { textToImg } from '../../components/common-lib/reply-img.js'
 import { rollRedReward, addDismantleMats, RED_DISMANTLE_COLOR_ORE, colorDismantleReward } from '../../components/equip_dismantle.js'
 import { Wanhun, getWanhunPanel } from '../../components/wanhun_data.js'
 import Yanghun from '../../components/yanghun_data.js'
+import { getZhenhai, rankName as zhenhaiRankName, ZHENHAI_NAME } from '../../components/zhenhai_data.js'
 const pendingChoice = {}
 const pendingSellMode = {}
 const SELL_CHOICE_TIMEOUT = 5 * 60 * 1000
@@ -228,6 +229,11 @@ export class equip extends plugin {
             const wanhunPanel = getWanhunPanel(target, e.group_id)
             textLines.push('━━━🔮 法宝 ━━━')
             textLines.push(wanhunPanel.text)
+            const zhenhai = getZhenhai(bag)
+            if (zhenhai) {
+                const cd = Math.max(0, Number(zhenhai.cooldownUntil) - Date.now())
+                textLines.push(`🔮${ZHENHAI_NAME}（${zhenhaiRankName(zhenhai.rank)}）${cd > 0 ? `｜冷却 ${Math.ceil(cd / 60000)} 分钟` : '｜已就绪'}`)
+            }
             /* 养魂阵: 上方已静默补算, 仅显示当前状态 */
             if (yanghunStatus) textLines.push('', yanghunStatus.text)
             /* 宗门情况 */

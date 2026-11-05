@@ -1,0 +1,112 @@
+{
+  "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63",
+  "files": [
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\collect_simulations.py",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\collect_simulations.py",
+      "bytes": 7128
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\development-simulation.mjs",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\development-simulation.mjs",
+      "bytes": 14775
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\live-optimization.json",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\live-optimization.json",
+      "bytes": 54
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\live-optimize.mjs",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\live-optimize.mjs",
+      "bytes": 2695
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\live-profile.cpuprofile",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\live-profile.cpuprofile",
+      "bytes": 175589
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\full-test-348.log",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\full-test-348.log",
+      "bytes": 26674
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\develop-104.stdout.log",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\develop-104.stdout.log",
+      "bytes": 2458
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\develop-104.stderr.log",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\develop-104.stderr.log",
+      "bytes": 0
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\develop-233.stdout.log",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\develop-233.stdout.log",
+      "bytes": 6318
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\develop-233.stderr.log",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\develop-233.stderr.log",
+      "bytes": 0
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\develop-fast-104.stdout.log",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\develop-fast-104.stdout.log",
+      "bytes": 17596
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\develop-fast-104.stderr.log",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\develop-fast-104.stderr.log",
+      "bytes": 803
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\seed-104-168h-world-v2.json",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\seed-104-168h-world-v2.json",
+      "bytes": 1239158
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\seed-233-72h-world-v2.json",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\seed-233-72h-world-v2.json",
+      "bytes": 664756
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\seed-907-72h-world-v2.json",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\seed-907-72h-world-v2.json",
+      "bytes": 651677
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\seed-104-720h-develop-fast.partial.json",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\seed-104-720h-develop-fast.partial.json",
+      "bytes": 3837645
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\seed-104-720h-develop.partial.json",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\seed-104-720h-develop.partial.json",
+      "bytes": 681199
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\seed-233-168h-develop.partial.json",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\seed-233-168h-develop.partial.json",
+      "bytes": 671330
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\before-acceleration\\develop-104.stderr.log",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\before-acceleration\\develop-104.stderr.log",
+      "bytes": 0
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\before-acceleration\\develop-104.stdout.log",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\before-acceleration\\develop-104.stdout.log",
+      "bytes": 2434
+    },
+    {
+      "path": "C:\\Users\\Administrator\\Desktop\\Yunzai-Bot\\plugins\\xujing-yue-plugin\\reports\\npc-world-20261104\\world-v2\\before-acceleration\\seed-104-720h-develop.partial.json",
+      "archive": "C:\\Users\\Administrator\\AppData\\Local\\Temp\\xujing-world-v3-intermediate-471ffd63\\before-acceleration\\seed-104-720h-develop.partial.json",
+      "bytes": 310510
+    }
+  ],
+  "bytes": 8312799,
+  "method": "reversible archive; permanent deletion rejected by automatic approval"
+}

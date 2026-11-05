@@ -1,10 +1,11 @@
+import { takeVaultEquipAttrs } from './war_loot.js'
 /* 由 sect_system.js 拆分自动生成: economy.js */
 import fs from 'fs'
-import { getFake, saveFake, sectName, sectIdByName, addPerson, drawName, sectAlive, sectCap, areaCount, killPerson, logEvent, SECT_START_BAND } from '../fake_data.js'
+import { getFake, saveFake, sectName, sectIdByName, addPerson, drawName, sectAlive, sectCap, areaCount, killPerson, logEvent, SECT_START_BAND, FAKE_MAX } from '../fake_data.js'
 import { getWorld, saveWorld, regionNameOf, DEFAULT_REGION, getLoc, renameSect } from '../world_data.js'
 import xujing_data from '../xujing_data.js'
 import { addItem, getBag, saveBag, EQUIP_TPL, GONGFA_TPL, vaultEquipContrib, itemIcon, fmtItem } from '../equip_data.js'
-import { CFG, MAT_COMMON, MAT_RED, MAT_COLOR, MAT_POOL, getVault, rand, pick, clamp, playerMoney, areaDefLevel, facilityCost, posCnOf, FAKE_FAC_MULT, regionOfArea, sectRegion, SECT_FILE, isPlayerLead } from './utils.js'
+import { CFG, MAT_COMMON, MAT_RED, MAT_COLOR, MAT_POOL, getVault, rand, pick, clamp, playerMoney, areaDefLevel, facilityCost, posCnOf, FAKE_FAC_MULT, regionOfArea, sectRegion, SECT_FILE, isPlayerLead, inWarUpkeep, WAR_UPKEEP_MAT_MULT, WAR_UPKEEP_STONE_MULT, areaInRaidRest, AREA_RAID_REST_MS } from './utils.js'
 
 /* ---------- 宗门矿山(战俘挖矿) ---------- */
 /** 矿山每小时灵石产出: 基础值按境界计算后再减半(境界1→50, 仙帝(68)→150000) */
@@ -246,7 +247,7 @@ export async function exchange (gid, uid, name, count) {
     if ((vault.equips[name] || 0) < count) return { ok: false, msg: `宝库装备${itemIcon(name)}【${name}】不足（现有${vault.equips[name] || 0}）~` }
     vault.equips[name] -= count
     if (vault.equips[name] <= 0) delete vault.equips[name]
-    addItem(uid, name, count, null, gid)
+    for (const group of takeVaultEquipAttrs(vault, name, count)) addItem(uid, name, group.count, group.attr, gid)
   } else {
     if ((vault.mats[name] || 0) < count) return { ok: false, msg: `宝库${itemIcon(name)}${name}不足（现有 ${vault.mats[name] || 0}）~` }
     vault.mats[name] -= count
@@ -514,7 +515,9 @@ export async function takeFromVault (f, gid, uid, name, count) {
     vault.equips[real] -= remain
     if (vault.equips[real] <= 0) delete vault.equips[real]
   }
-  addItem(uid, real, n, null, gid)
+  if (EQUIP_TPL[real]) {
+    for (const group of takeVaultEquipAttrs(vault, real, n)) addItem(uid, real, group.count, group.attr, gid)
+  } else addItem(uid, real, n, null, gid)
   saveFake(f, gid)
   logEvent(f, 'flavor', `【取用】🌙 ${posCn} ${p.name} 从宗门金库取用 ${itemIcon(real)}${real}×${n}`)
   return { ok: true, msg: `✅ 你已从宗门金库取用 ${itemIcon(real)}${real}×${n}~` }
@@ -659,9 +662,11 @@ export function relocateSect (f, gid, sid, newRegion) {
 /** 伪玩家宗门补齐: 伪玩家宗门数(无玩家宗主) < MAX_SECTS 时自动创建补齐
  *  玩家创建的宗门不占名额; 灭门宗门不顶替(由 fake_data rebuildSettle 5~30分钟换皮重生) */
 export function fillSects (f, now = Date.now()) {
+  if (Object.values(f.roster || {}).filter(p => p?.alive).length >= FAKE_MAX) return 0
   let made = 0
   const aiCnt = Object.values(f.sects || {}).filter(s => s && !s.owner).length
   while (aiCnt + made < CFG.MAX_SECTS) {
+    if (Object.values(f.roster || {}).filter(p => p?.alive).length >= FAKE_MAX) break
     const zz = drawName(f)
     if (!zz) break
     const name = drawNewSectName(f)
@@ -688,13 +693,67 @@ export function fillSects (f, now = Date.now()) {
 }
 
 
+/* ---------- 玩家宗门材料维护(按人数/战后翻倍) ---------- */
+/** 宗门名册总人数: 伪玩家门人(含秘境中/被俘/关押; 死亡时已从 roster 删除) + 玩家门人 */
+export function sectMemberCount (f, id) {
+  let n = 0
+  for (const p of Object.values(f.roster || {})) {
+    if (p && p.sect === id && p.status === 'sect') n++
+  }
+  for (const p of Object.values(f.players || {})) {
+    if (p && p.sect === id) n++
+  }
+  return n
+}
+
+/** 玩家宗门每占领小区每次结算(30分钟)的材料维护件数: 按名册人数占满员比例 —— 1 人 1 件、满员(sectCap=20+演武场×10) 9 件封顶; 战后 3 小时 ×2 */
+export function sectMatUpkeepPieces (f, id, now = Date.now()) {
+  const cap = Math.max(1, Number(sectCap(f, id)) || 1)
+  const n = Math.max(1, sectMemberCount(f, id))
+  const base = Math.max(1, Math.min(9, Math.ceil(n * 9 / cap)))
+  return inWarUpkeep(f, id, now) ? base * WAR_UPKEEP_MAT_MULT : base
+}
+
+/** 从宗门宝库按库存从多到少扣基础材料; 库存不够扣到 0(不降级不惩罚), 返回实际扣除件数 */
+export function deductVaultMatsByStock (f, id, pieces) {
+  const vault = getVault(f, id)
+  if (!vault || !(Number(pieces) > 0)) return 0
+  let left = Math.floor(Number(pieces))
+  let taken = 0
+  while (left > 0) {
+    const avail = MAT_COMMON.filter(m => (vault.mats[m] || 0) > 0)
+    if (!avail.length) break
+    avail.sort((a, b) => (vault.mats[b] || 0) - (vault.mats[a] || 0))
+    for (const m of avail) {
+      if (left <= 0) break
+      vault.mats[m] = (vault.mats[m] || 0) - 1
+      if (vault.mats[m] <= 0) delete vault.mats[m]
+      left--
+      taken++
+    }
+  }
+  return taken
+}
+
 /* ---------- 小区产出 / 自动炼丹 / 税收分成 ---------- */
-export function hourlyAreaOutput (f, now, w) {
+export function hourlyAreaOutput (f, now, w, { raidedOnly = false } = {}) {
+  let changed = false
   for (const [area, owner] of Object.entries(f.areas || {})) {
     if (!owner) continue
     const s = f.sects[owner]
     if (!s || (s.wipeAt && s.wipeAt <= now)) continue
-    const region = regionOfArea(area) || DEFAULT_REGION
+    /* 小区被打后 3 小时内没有任何收益(灵石/材料都不产) */
+    const raided = areaInRaidRest(f, area, now)
+    if (raided) continue
+    const raidAt = Number(f.areaRaidAt && f.areaRaidAt[area]) || 0
+    if (raidAt > 0) {
+      /* 恢复期结束后重新计满30分钟; 后续按本小区上次产出独立计时。
+       * 旧档没有独立时间时沿用最近产出记录, 避免更新后重复发放。 */
+      const previous = f.areaOutputAt && f.areaOutputAt[area]
+      const history = previous ? null : (f.areaOut || []).findLast(out => out.area === area)
+      const since = Math.max(raidAt + AREA_RAID_REST_MS, Number(previous) || Number(history && history.t) || 0)
+      if (now - since < 30 * 60000) continue
+    } else if (raidedOnly) continue
     const prosperity = Number(w.prosperity && w.prosperity[s.name]) || 1000
     const coef = clamp(prosperity / 1000, 0.5, 3)
     let stones = Math.round(rand(CFG.AREA_OUT_STONES) * coef * 3)
@@ -712,7 +771,13 @@ export function hourlyAreaOutput (f, now, w) {
     for (const [m, c] of Object.entries(mats)) getVault(f, owner).mats[m] = (getVault(f, owner).mats[m] || 0) + c
     f.areaOut.push({ t: now, area, stones, mats, owner: s.name, def: areaDefLevel(f, area) })
     if (f.areaOut.length > 400) f.areaOut = f.areaOut.slice(-400)
+    if (raidAt > 0) {
+      if (!f.areaOutputAt || typeof f.areaOutputAt !== 'object') f.areaOutputAt = {}
+      f.areaOutputAt[area] = now
+    }
+    changed = true
   }
+  return changed
 }
 
 /* 宗门炼丹丹方(与玩家配方台一致): 只炼增益丹——修为丹/破障丹由药园产出, 宗门不炼 */
@@ -882,7 +947,9 @@ export function facilityMaintPerHr (f, id, fac, lv) {
   const v = Math.round(build / 2400 * lv)
   const isFake = !f.sects[id].owner
   /* 维护费(2026-08-18 用户要求): 玩家宗主宗门基础值×15; 伪玩家宗主宗门基础值×10(不再用30%折扣) */
-  return isFake ? Math.max(1, Math.round(v * 10)) : v * 15
+  const base = isFake ? Math.max(1, Math.round(v * 10)) : v * 15
+  /* 战后 3 小时: 玩家宗主宗门灵石维护×5(伪玩家宗门不收战后翻倍) */
+  return (isPlayerLead(f, id) && inWarUpkeep(f, id)) ? base * WAR_UPKEEP_STONE_MULT : base
 }
 
 /** 每小时: 扣设施维护费; 宝库不足则设施掉级(降最高级)直到够付或全0 */
@@ -890,7 +957,13 @@ export function maintFacilities (f, now = Date.now()) {
   const FAC = ['yanwu', 'hushan', 'lingmai', 'yaoyuan']
   for (const id of Object.keys(f.sects)) {
     const s = f.sects[id]
-    if (!s || !s.facilities) continue
+    if (!s) continue
+    /* 宗门材料维护: 玩家宗主宗门每小时按名册人数扣 1~9 件基础材料(战后3小时×2), 与占领几个小区无关; 伪玩家宗门不收 */
+    if (isPlayerLead(f, id)) {
+      const pieces = sectMatUpkeepPieces(f, id, now)
+      if (pieces > 0) deductVaultMatsByStock(f, id, pieces)
+    }
+    if (!s.facilities) continue
     const perHr = (fac) => facilityMaintPerHr(f, id, fac, s.facilities[fac] || 0)
     let total = FAC.reduce((a, fac) => a + perHr(fac), 0)
     if (total <= 0) continue
@@ -924,7 +997,7 @@ export function fakeBuildFacilities (f, now = Date.now()) {
     if (!s.facilities) s.facilities = { yanwu: 0, hushan: 0, lingmai: 0, yaoyuan: 1 }
     /* 优先补0级设施(演武场→护山阵→灵脉), 再升已有最低级(上限8级) */
     const toBuild = FAC.find(x => (s.facilities[x] || 0) === 0)
-    const fac = toBuild || FAC.filter(x => (s.facilities[x] || 0) < (x === 'yaoyuan' ? 5 : 8)).sort((a, b) => (s.facilities[a] || 0) - (s.facilities[b] || 0))[0]
+    const fac = toBuild || FAC.filter(x => (s.facilities[x] || 0) < (x === 'yaoyuan' || x === 'yanwu' ? 5 : 8)).sort((a, b) => (s.facilities[a] || 0) - (s.facilities[b] || 0))[0]
     if (!fac) continue
     const c = facilityCost(fac, (s.facilities[fac] || 0) + 1)
     const stones = Math.max(1, Math.round(c.stones * FAKE_FAC_MULT))

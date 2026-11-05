@@ -88,6 +88,7 @@ function emptyWorld () {
     rates: {},
     playerLoc: {},
     moving: {},
+    seal: null,
     lastSettle: 0,
     conquered: false // 天下大事攻打/宗门重建后=true: 不再强制重分配占领格局
   }
@@ -371,6 +372,46 @@ export function setMoving (w, uid, obj) {
 export function clearMoving (w, uid) {
   delete w.moving[String(uid)]
   saveWorld(w)
+}
+
+/* ---------- 镇海珠封海状态(每群一个) ---------- */
+/** 当前封海对象: { region, tier, owner, ownerName, startedAt, until, hp, maxHp, power, lastAttack } */
+export function getSeal (w) {
+  return (w && w.seal && typeof w.seal === 'object') ? w.seal : null
+}
+export function sealActive (w, now = Date.now()) {
+  const s = getSeal(w)
+  return !!(s && Number(s.until) > now)
+}
+export function setSeal (w, seal) {
+  w.seal = seal || null
+  saveWorld(w)
+}
+export function clearSeal (w) {
+  w.seal = null
+  saveWorld(w)
+}
+/** 某大区是否处于封海状态 */
+export function sealCoversRegion (w, key, now = Date.now()) {
+  const s = getSeal(w)
+  return !!(s && s.region === key && Number(s.until) > now)
+}
+/** 是否是封海主人 */
+export function isSealOwner (w, uid) {
+  const s = getSeal(w)
+  return !!(s && String(s.owner) === String(uid))
+}
+/**
+ * 跨区是否被镇海珠阻断(主人不受限; 1阶定仙游可穿由调用方决定)
+ * @returns {object|null} 命中的 seal
+ */
+export function sealBlocksTravel (w, uid, from, to, { allowDingxianyou = false } = {}) {
+  const s = getSeal(w)
+  if (!s || Number(s.until) <= Date.now()) return null
+  if (String(s.owner) === String(uid)) return null
+  if (s.region !== from && s.region !== to) return null
+  if (allowDingxianyou && Number(s.tier) === 1) return null
+  return s
 }
 
 /* ---------- 境界名(与修炼体系一致) ---------- */

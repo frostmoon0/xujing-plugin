@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-04",
+  "backup": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\xujing-world-v2-backup-a9c9e03d",
+  "files": [
+    "components/npc_action.js",
+    "components/sect/succession.js",
+    "components/sect/diplomacy_state.js",
+    "components/fake_data.js",
+    "components/sect/war.js",
+    "components/sect/war_roster.js",
+    "components/sect/diplomacy.js",
+    "components/sect/captive.js",
+    "components/sect/hr.js",
+    "components/sect/tick.js",
+    "apps/user/play_guide.js",
+    "test/npc_world_evolution.test.js",
+    "components/sect/ai_strategy.js",
+    "components/sect/utils.js",
+    "apps/user/sect_system.js",
+    "apps/user/world_news.js",
+    "components/sect/war_commands.js",
+    "components/sect/war_interaction.js"
+  ],
+  "validation": {
+    "full_suite": 348,
+    "passed": 348,
+    "failed": 0,
+    "new_regressions": 36
+  },
+  "limits": [
+    "in-memory isolated simulation, no real Redis/restart smoke test",
+    "mature live-world-copy validation not yet performed",
+    "no automatic sect merging, forced splitting, new garrisons or march system"
+  ],
+  "policy": {
+    "npc_attack_cooldown_minutes": 60,
+    "npc_repeat_victim_minutes": 120,
+    "truce_hours": 6,
+    "ai_alliance_observation_hours": 6,
+    "npc_growth_and_topup": "unchanged",
+    "ai_attack_cooldown_hours": 4,
+    "ai_post_victory_rest_hours": 4,
+    "ai_post_defeat_rest_hours": 8
+  },
+  "updated_date": "2026-11-05",
+  "wording": "宗门、战争、伪玩家相关提示去除赘述、催促、卖萌与多余尾缀；保留操作条件和后果",
+  "overnight_verification": "30-day seed104 and 7-day seed233 are running in hidden isolated processes; collector updates 模拟复核.md and verification-status.json"
+}

@@ -1,3 +1,4 @@
+import { warActorOwner } from './sect/war_state.js'
 /* ============================================================
  * 遗蜕秘境 - 数据与核心逻辑
  * 伪玩家: 使用本群 fake_data 中的真实人物; 入境期间暂停外部行为, 出境恢复
@@ -8,12 +9,14 @@
  * 结算: 按实际成员贡献分公共池; 并发动作使用秘境级锁
  * ============================================================ */
 import fs from 'fs'
+import { syncRealmNightClock } from './realm_clock.js'
 import { Plugin_Name, Save_Path } from './plugin.js'
 import xujing_data from './xujing_data.js'
 import command from './command.js'
-import { REGION_KEYS, REGIONS, getWorld, getLoc, setLoc, regionNameOf } from './world_data.js'
+import { REGION_KEYS, REGIONS, getWorld, getLoc, setLoc, regionNameOf, getSeal, sealCoversRegion } from './world_data.js'
 import { getBuffs, calcCombatPower, guardWinRate } from './fight.js'
-import { getBag, addItem, consumeItem, isBound, itemIcon, ITEM_TPL, MATERIAL_TPL, EQUIP_TPL, GONGFA_TPL, ARRAY_MATS } from './equip_data.js'
+import { ZHENHAI_MATERIALS, ZHENHAI_NAME, ZHENHAI_DROP_CHANCE, ZHENHAI_DROP_TABLE } from './zhenhai_data.js'
+import { getBag, addItem, consumeItem, isBound, itemIcon, ITEM_TPL, MATERIAL_TPL, EQUIP_TPL, GONGFA_TPL, ARRAY_MATS, saveBag } from './equip_data.js'
 import { getFake, saveFake, personPower, sectName, sectAlive, isInSectMine, killPerson } from './fake_data.js'
 // karma helper is exposed on xujing_data default export
 import Wanhun from './wanhun_data.js'
@@ -68,15 +71,66 @@ function readPrivateRealm (gid, id) {
     st.private = true
     st.privateId = id
     if (!st.teams || typeof st.teams !== 'object') st.teams = {}
+    migratePrivateTerrain(st)
+    syncRealmNightClock(st)
     return st
   } catch (err) { return null }
 }
+
+/** 旧档专属秘境可能是按旧随机表刷出的跨区地形, 读取时迁移到当前大区可用地形 */
+function migratePrivateTerrain (st) {
+  try {
+    const t = st && st.terrain ? TERRAINS[st.terrain] : null
+    if (!t || !st.region) return false
+    if (t.region === 'shared' || t.region === st.region) return false
+    const pool = terrainPoolForRegion(st.region, { excludeZhenhai: true })
+    const next = pool[Math.floor(Math.random() * pool.length)] || 'dongtian'
+    const nt = TERRAINS[next]
+    st.terrain = next
+    st.title = `${nt.emoji}${nt.name}`
+    st.desc = `${nt.desc}（专属秘境·仅本队可入）`
+    st.rewardPool = realmRewardPool(st, {})
+    try { savePrivateRealm(st, st.gid) } catch (err) { }
+    return true
+  } catch (err) { return false }
+}
+/** 旧公开秘境地形迁移: 与专属同理, 防止旧档在错误大区刷出专属地形 */
+function migratePublicTerrain (st) {
+  try {
+    const t = st && st.terrain ? TERRAINS[st.terrain] : null
+    if (!t || !st.region) return false
+    if (t.region === 'shared' || t.region === st.region) return false
+    const pool = terrainPoolForRegion(st.region, { excludeZhenhai: true })
+    const next = pool[Math.floor(Math.random() * pool.length)] || 'dongtian'
+    const nt = TERRAINS[next]
+    st.terrain = next
+    st.title = `${nt.emoji}${nt.name}`
+    st.desc = nt.desc
+    st.rewardPool = realmRewardPool(st, {})
+    try { saveRealm(st, st.gid) } catch (err) { }
+    return true
+  } catch (err) { return false }
+}
 export function getPrivateRealms (gid) {
-  return privateRealmIds(gid).map(id => readPrivateRealm(gid, id)).filter(Boolean)
+  const g = String(gid || '')
+  const list = privateRealmIds(g).map(id => readPrivateRealm(g, id)).filter(Boolean)
+  const alive = []
+  for (const st of list) {
+    const active = ['barrier', 'explore'].includes(st.phase)
+    const hasTeam = Object.values(st.teams || {}).some(t => (t.members || []).length)
+    if (!active || !hasTeam) {
+      /* 旧档/已撤离的专属秘境不再展示, 顺手清掉, 避免 #秘境状态 混入旧地形 */
+      try { fs.rmSync(privateRealmFile(g, st.privateId || 'legacy'), { force: true }) } catch (err) { }
+      continue
+    }
+    alive.push(st)
+  }
+  return alive
 }
 export function getPrivateRealm (gid, id = '') {
   if (id) return readPrivateRealm(gid, id)
-  return getPrivateRealms(gid)[0] || null
+  const list = getPrivateRealms(gid)
+  return list[list.length - 1] || null
 }
 export function savePrivateRealm (st, gid) {
   try {
@@ -148,25 +202,67 @@ export const SPECIAL_MAX = 10
 export const COLOR_MATS = ['云裳仙蕊', '造梦神玉']
 
 export const TERRAINS = {
-  dongtian: { name: '洞天福地', emoji: '🌿', barrier: 'ling', desc: '大能坐化的灵秀之地，灵药遍地', rewards: ['望舒花', '月华芝', '凤栖花', '流光玉', '织云石'], events: ['灵脉暴走', '守园大妖'] },
-  guzhanchang: { name: '古战场·兵魂杀场', emoji: '⚔️', barrier: 'shafa', desc: '上古大战遗迹，战魂游荡', rewards: ['摄魂丹', '血煞髓', '镇魂晶'], events: ['怨魂潮', '残念Boss'] },
-  yifu: { name: '大能遗府', emoji: '🏯', barrier: 'ling', desc: '仙人宅邸，丹房兵库藏真', rewards: ['破障丹', '聚宝丹', '玉甲丹', '凤羽玉', '流光玉'], events: ['守护灵苏醒', '丹炉炸炉'] },
-  zongmen: { name: '上古宗门遗址', emoji: '⛩️', barrier: 'ling', desc: '仙门废墟，藏经阁遗世', rewards: ['灵犀丹', '慧心丹', '凤栖花', '织云石'], events: ['护山残阵触发', '傀儡暴动'] },
-  gumu: { name: '古墓陵寝', emoji: '🪦', barrier: 'shafa', desc: '青铜古棺，陪葬无数', rewards: ['行运丹', '同心丹', '玄阴玉', '阴魂砂', '游魂骨'], events: ['尸傀潮', '主棺异动'] },
-  shilian: { name: '试炼塔', emoji: '🗼', barrier: 'ling', desc: '登天塔，逐层考验', rewards: ['聚宝丹', '灵犀丹', '慧心丹', '星霜草', '青鸾草'], events: ['塔灵异变', '试炼镜像'] },
-  leichi: { name: '渡劫雷池', emoji: '⚡', barrier: 'xueji', desc: '天雷滚滚，雷淬灵物', rewards: ['惊鸿丹', '摄魂丹', '镇魂晶', '血煞髓', '凤羽玉'], events: ['天雷异变', '飞升残影'] },
-  xinmo: { name: '心魔幻境', emoji: '🌫️', barrier: 'tianji', desc: '虚实难辨，道心考验', rewards: ['慧心丹', '同心丹', '凝露丹', '月华芝', '望舒花'], events: ['道心反噬', '心魔具现'] },
-  jinji: { name: '荒古禁地', emoji: '☠️', barrier: 'xueji', desc: '极凶之地，边缘捡漏深入搏命', rewards: ['惊鸿丹', '玉甲丹', '凤栖花', '凤羽玉'], events: ['禁地凶物', '界域震荡'] },
-  taichu: { name: '太初古矿', emoji: '⛏️', barrier: 'ling', desc: '神源矿脉，可能挖出禁忌', rewards: ['月魄石', '星璇石', '流光玉', '织云石', '凤羽玉'], events: ['矿脉塌陷', '挖出禁忌'] },
-  shifang: { name: '石坊赌源', emoji: '🎲', barrier: 'xueji', desc: '源石堆叠，看石下注', rewards: ['聚宝丹', '行运丹', '月魄石', '星璇石', '凤羽玉'], events: ['源石连锁', '切出凶物'] },
-  longgong: { name: '海底龙宫', emoji: '🐉', barrier: 'xueji', desc: '潮汐涨落，龙宫宝库', rewards: ['灵犀丹', '惊鸿丹', '玄阴玉', '镇魂晶', '凤羽玉'], events: ['海啸', '龙宫守卫暴动'] },
-  tiangong: { name: '天宫残殿', emoji: '✨', barrier: 'tianji', desc: '仙庭碎片，仙家禁制', rewards: ['慧心丹', '玉甲丹', '凤羽玉', '流光玉'], events: ['禁制连环', '仙兵共鸣'] },
-  moyuan: { name: '魔渊裂缝', emoji: '🌑', barrier: 'xueji', desc: '魔气滔天，魔宝诱惑', rewards: ['摄魂丹', '血煞髓', '阴魂石', '凤羽玉'], events: ['魔潮', '魔化加剧'] },
-  zhenmo: { name: '镇魔古狱', emoji: '⛓️', barrier: 'shafa', desc: '封印大凶之地', rewards: ['镇魂晶', '血煞髓', '摄魂铁', '阴魂石'], events: ['封印松动', '镇压反噬'] },
-  shijian: { name: '时间夹缝', emoji: '⏳', barrier: 'tianji', desc: '时光流速异常，岁月冲刷', rewards: ['凝露丹', '慧心丹', '星霜草', '望舒花', '云裳仙蕊'], events: ['时间风暴', '岁月冲刷'] },
-  xumi: { name: '须弥小世界', emoji: '🌀', barrier: 'tianji', desc: '不断崩塌的狭小空间', rewards: ['行运丹', '同心丹', '星璇石', '流光玉', '造梦神玉'], events: ['空间崩塌加速'] }
+  dongtian: { name: '洞天福地', emoji: '🌿', barrier: 'ling', region: 'center', desc: '大能坐化的灵秀之地，灵药遍地', rewards: ['望舒花', '月华芝', '凤栖花', '流光玉', '织云石'], events: ['灵脉暴走', '守园大妖'] },
+  guzhanchang: { name: '古战场·兵魂杀场', emoji: '⚔️', barrier: 'shafa', region: 'west', desc: '上古大战遗迹，战魂游荡', rewards: ['摄魂丹', '血煞髓', '镇魂晶'], events: ['怨魂潮', '残念Boss'] },
+  yifu: { name: '大能遗府', emoji: '🏯', barrier: 'ling', region: 'center', desc: '仙人遗府，丹房与兵库尚存', rewards: ['破障丹', '聚宝丹', '玉甲丹', '凤羽玉', '流光玉'], events: ['守护灵苏醒', '丹炉炸炉'] },
+  zongmen: { name: '上古宗门遗址', emoji: '⛩️', barrier: 'ling', region: 'center', desc: '仙门废墟，藏经阁遗世', rewards: ['灵犀丹', '慧心丹', '凤栖花', '织云石'], events: ['护山残阵触发', '傀儡暴动'] },
+  gumu: { name: '古墓陵寝', emoji: '🪦', barrier: 'shafa', region: 'north', desc: '青铜古棺，陪葬无数', rewards: ['行运丹', '同心丹', '玄阴玉', '阴魂砂', '游魂骨'], events: ['尸傀潮', '主棺异动'] },
+  shilian: { name: '试炼塔', emoji: '🗼', barrier: 'ling', region: 'south', desc: '登天塔，逐层考验', rewards: ['聚宝丹', '灵犀丹', '慧心丹', '星霜草', '青鸾草'], events: ['塔灵异变', '试炼镜像'] },
+  leichi: { name: '渡劫雷池', emoji: '⚡', barrier: 'xueji', region: 'north', desc: '天雷滚滚，雷淬灵物', rewards: ['惊鸿丹', '摄魂丹', '镇魂晶', '血煞髓', '凤羽玉'], events: ['天雷异变', '飞升残影'] },
+  xinmo: { name: '心魔幻境', emoji: '🌫️', barrier: 'tianji', region: 'south', desc: '虚实难辨，道心考验', rewards: ['慧心丹', '同心丹', '凝露丹', '月华芝', '望舒花'], events: ['道心反噬', '心魔具现'] },
+  jinji: { name: '荒古禁地', emoji: '☠️', barrier: 'xueji', region: 'south', desc: '凶物盘踞，深处藏有灵物', rewards: ['惊鸿丹', '玉甲丹', '凤栖花', '凤羽玉'], events: ['禁地凶物', '界域震荡'] },
+  taichu: { name: '太初古矿', emoji: '⛏️', barrier: 'ling', region: 'west', desc: '古矿深处埋有灵石，也封着凶物', rewards: ['月魄石', '星璇石', '流光玉', '织云石', '凤羽玉'], events: ['矿脉塌陷', '挖出禁忌'] },
+  shifang: { name: '万法残墟', emoji: '🌌', barrier: 'tianji', region: 'shared', desc: '万法凋零后的废墟，残碑里仍有道则回响', rewards: ['聚宝丹', '灵犀丹', '慧心丹', '流光玉', '织云石'], events: ['残碑共鸣', '道则反噬'] },
+  longgong: { name: '海底龙宫', emoji: '🐉', barrier: 'xueji', region: 'east', desc: '潮汐涨落，龙宫宝库', rewards: ['灵犀丹', '惊鸿丹', '玄阴玉', '镇魂晶', '凤羽玉'], events: ['海啸', '龙宫守卫暴动'] },
+  tiangong: { name: '天宫残殿', emoji: '✨', barrier: 'tianji', region: 'center', desc: '仙庭碎片，仙家禁制', rewards: ['慧心丹', '玉甲丹', '凤羽玉', '流光玉'], events: ['禁制连环', '仙兵共鸣'] },
+  moyuan: { name: '魔渊裂缝', emoji: '🌑', barrier: 'xueji', region: 'west', desc: '魔气滔天，魔宝诱惑', rewards: ['摄魂丹', '血煞髓', '阴魂石', '凤羽玉'], events: ['魔潮', '魔化加剧'] },
+  zhenmo: { name: '镇魔古狱', emoji: '⛓️', barrier: 'shafa', region: 'shared', desc: '封印大凶之地', rewards: ['镇魂晶', '血煞髓', '摄魂铁', '阴魂石'], events: ['封印松动', '镇压反噬'] },
+  shijian: { name: '时间夹缝', emoji: '⏳', barrier: 'tianji', region: 'north', desc: '时光流速异常，岁月冲刷', rewards: ['凝露丹', '慧心丹', '星霜草', '望舒花', '云裳仙蕊'], events: ['时间风暴', '岁月冲刷'] },
+  xumi: { name: '须弥小世界', emoji: '🌀', barrier: 'tianji', region: 'south', desc: '不断崩塌的狭小空间', rewards: ['行运丹', '同心丹', '星璇石', '流光玉', '造梦神玉'], events: ['空间崩塌加速'] },
+  zhenhai: { name: '镇海海眼', emoji: '🌊', barrier: 'tianji', region: 'east', desc: '东海极深处的海眼，镇海珠孕育之地；海眼闭合时任何传送都无法进出', rewards: [], events: ['海眼漩涡', '镇海兽苏醒'] }
 }
 export const TERRAIN_KEYS = Object.keys(TERRAINS)
+
+/** 地形归属: center/east/west/north/south=该大区专属; shared=所有大区公用 */
+export const TERRAIN_REGIONS = { center: '中州', east: '东海', west: '西域', north: '北境', south: '南疆', shared: '公用' }
+export function terrainAllowedInRegion (terrain, region) {
+  const t = TERRAINS[terrain]
+  return !!(t && (t.region === 'shared' || t.region === region))
+}
+export function terrainPoolForRegion (region, { excludeZhenhai = false } = {}) {
+  return TERRAIN_KEYS.filter(k => terrainAllowedInRegion(k, region) && !(excludeZhenhai && k === 'zhenhai'))
+}
+
+/**
+ * 大区专属材料层: 该大区所有秘境都会出, 不替换原混池。
+ * 以后其他大区加材料往这里追加即可:
+ *   regionKey: { materials: [...], chance: 0.45, table: [{name,weight,min,max}], guarantee: {name,count} }
+ */
+export const REGION_EXCLUSIVE_DROPS = {
+  east: {
+    materials: ZHENHAI_MATERIALS,
+    chance: ZHENHAI_DROP_CHANCE,
+    table: ZHENHAI_DROP_TABLE,
+    guarantee: { name: '镇海砂', min: 1, max: 3 }
+  }
+}
+/** 按权重抽大区专属材料; 没有配置返回 null */
+export function rollRegionExclusive (region, random = Math.random) {
+  const cfg = REGION_EXCLUSIVE_DROPS[region]
+  if (!cfg) return null
+  const table = Array.isArray(cfg.table) && cfg.table.length ? cfg.table : cfg.materials.map(name => ({ name, weight: 1, min: 1, max: 1 }))
+  const total = table.reduce((sum, x) => sum + (Number(x.weight) || 1), 0)
+  let cursor = random() * total
+  for (const item of table) {
+    cursor -= Number(item.weight) || 1
+    if (cursor < 0) {
+      const min = Math.max(1, Number(item.min) || 1)
+      const max = Math.max(min, Number(item.max) || min)
+      return { name: item.name, count: min + Math.floor(random() * (max - min + 1)) }
+    }
+  }
+  return { name: cfg.guarantee?.name || cfg.materials[0], count: cfg.guarantee?.count || 1 }
+}
 export const DIFFS = {
   huang: { name: '黄阶', realm: '筑基~金丹', rewardQuality: [1, 4], quantity: [1, 2], barrier: 1, events: [0, 2], special: 0.07 },
   xuan: { name: '玄阶', realm: '元婴~化神', rewardQuality: [2, 5], quantity: [1, 3], barrier: 1.5, events: [0, 3], special: 0.07 },
@@ -175,15 +271,15 @@ export const DIFFS = {
 }
 export const DIFF_KEYS = Object.keys(DIFFS)
 export const BARRIERS = {
-  ling: { name: '灵纹屏障', desc: '仙纹流转，需合力铭刻' },
-  xueji: { name: '血祭屏障', desc: '血气缭绕，撼动方可破' },
-  tianji: { name: '天机屏障', desc: '天机晦涩，力量与时机并重' },
+  ling: { name: '灵纹屏障', desc: '仙纹交织，封住入口' },
+  xueji: { name: '血祭屏障', desc: '血气凝成屏障' },
+  tianji: { name: '天机屏障', desc: '天机遮蔽，入口难辨' },
   shafa: { name: '杀伐屏障', desc: '杀伐之气凝成坚壁' }
 }
 export const GENERIC_EVENTS = [
-  { name: '隐藏秘藏现世', kind: 'treasure', text: '🌈 秘境深处气息骤变，隐藏秘藏现世！' },
-  { name: '守护者苏醒', kind: 'guardian', text: '👹 沉睡的秘境守护者苏醒，拦住了所有去路！' },
-  { name: '灵潮紊乱', kind: 'chaos', text: '🌪️ 秘境灵潮紊乱，所有队伍的行动节奏被打乱！' }
+  { name: '隐藏秘藏现世', kind: 'treasure', text: '🌈 秘境深处出现秘藏。' },
+  { name: '守护者苏醒', kind: 'guardian', text: '👹 守护者苏醒，封住去路。' },
+  { name: '灵潮紊乱', kind: 'chaos', text: '🌪️ 灵潮紊乱，各队行动受阻。' }
 ]
 
 /* ---------- 状态与并发 ---------- */
@@ -194,8 +290,9 @@ function emptyRealm () {
     barrier: null, teams: {}, chaos: 0, eventsFired: 0, lastEventChaos: 0, firedEvents: [],
     title: '', desc: '', rewardPool: [], extraRewards: [],
     specialPending: false, specialGranted: 0,
+    fakeSpecialPending: false, fakeSpecialGranted: 0,
     private: false, privateId: '', ownerUid: null, ownerPartyId: null,
-    ambushAt: 0, ambushRound: 0
+    ambushAt: 0, ambushRound: 0, nightClockAt: 0, nightResumePending: false
   }
 }
 export function getRealm (gid) {
@@ -213,6 +310,8 @@ export function getRealm (gid) {
     const st = Object.assign(emptyRealm(), JSON.parse(fs.readFileSync(file, 'utf8')))
     st.gid = g
     if (!st.teams || typeof st.teams !== 'object') st.teams = {}
+    migratePublicTerrain(st)
+    syncRealmNightClock(st)
     return st
   } catch (err) {
     const st = emptyRealm(); st.gid = g; return st
@@ -302,11 +401,19 @@ export { isNight, reconcileFakeBusy }
 
 /* ---------- 刷新与奖励 ---------- */
 export function rollRealm (random = Math.random, opts = {}) {
-  const terrain = opts.terrain || TERRAIN_KEYS[Math.floor(random() * TERRAIN_KEYS.length)]
-  const diff = opts.diff || DIFF_KEYS[Math.floor(random() * DIFF_KEYS.length)]
-  const exploreMin = opts.exploreMin || 15 + Math.floor(random() * 46)
   const normalRegions = REGION_KEYS.filter(k => !(REGIONS[k] && REGIONS[k].special))
   const region = opts.region || normalRegions[Math.floor(random() * normalRegions.length)]
+  /* 镇海海眼是东海专属地形: 东海秘境有概率刷出, 其他大区绝不出现 */
+  let terrain = opts.terrain
+  if (!terrain) {
+    if (region === 'east' && random() < 0.4) terrain = 'zhenhai'
+    else {
+      const pool = terrainPoolForRegion(region, { excludeZhenhai: true })
+      terrain = pool[Math.floor(random() * pool.length)] || 'dongtian'
+    }
+  }
+  const diff = opts.diff || DIFF_KEYS[Math.floor(random() * DIFF_KEYS.length)]
+  const exploreMin = opts.exploreMin || 15 + Math.floor(random() * 46)
   return { terrain, diff, exploreMin, region }
 }
 function validRewardName (name) {
@@ -338,7 +445,7 @@ export function realmRewardInfo (st, diffKey = st?.diff, cfg = {}) {
 const REALM_EXCLUDED_REWARDS = new Set([
   '遗蜕古钥', '万魂幡残卷', '无主幽魂', '阴魂砂', '游魂骨', '鬼火草', '幽冥木',
   '摄魂铁', '阴魂石', '玄阴玉', '镇魂晶', '血煞髓', '万魂帝晶', '万阵核心',
-  '还魂丹', '登仙令', '神游蛊', '灵宝盒'
+  '还魂丹', '登仙令', '神游蛊', '灵宝盒', '仙帝丹'
 ])
 export const REALM_REWARD_MATERIALS = [
   '星霜草', '青鸾草', '望舒花', '月华芝', '凤栖花', '云裳仙蕊',
@@ -417,16 +524,23 @@ function realmMoneyAmount (diffKey, random = Math.random) {
   return min + Math.floor(random() * (max - min + 1))
 }
 export function rollReward (st, diffKey, random = Math.random, cfg = {}) {
-  const useSpecial = cfg.special === true && st?.specialPending && Number(st.specialGranted) < SPECIAL_MAX
-  /* 特殊彩奖励名额优先; 未命中彩奖励的每个正常掉落件, 先按固定概率判残丹, 命中即本件为残丹 */
+  /* 玩家/伪玩家各自独立特殊彩名额, 互不抢占 */
+  const pendingKey = cfg.fake ? 'fakeSpecialPending' : 'specialPending'
+  const grantedKey = cfg.fake ? 'fakeSpecialGranted' : 'specialGranted'
+  const useSpecial = cfg.special === true && st?.[pendingKey] && Number(st?.[grantedKey] || 0) < SPECIAL_MAX
+  /* 特殊彩奖励名额优先; 地形专属材料层再优先; 未命中彩奖励的每个正常掉落件, 先按固定概率判残丹 */
   const candanChance = typeof cfg.candan === 'number' ? cfg.candan : REALM_CANDAN_CHANCE
+  const exclusiveCfg = REGION_EXCLUSIVE_DROPS[st?.region]
   let name = null
+  let exclusive = null
   if (useSpecial) name = pickRealmSpecialReward(random)
+  else if (exclusiveCfg && random() < (Number(exclusiveCfg.chance) || 0)) exclusive = rollRegionExclusive(st.region, random)
   else if (candanChance > 0 && random() < candanChance) name = '残丹'
   else name = pickRealmReward(realmRewardPool(st, cfg), diffKey, random)
-  if (useSpecial) st.specialGranted = (Number(st.specialGranted) || 0) + 1
+  if (exclusive) name = exclusive.name
+  if (useSpecial) st[grantedKey] = (Number(st[grantedKey]) || 0) + 1
   const currency = name === '灵石'
-  const count = currency ? realmMoneyAmount(diffKey, random) : 1
+  const count = currency ? realmMoneyAmount(diffKey, random) : (exclusive ? exclusive.count : 1)
   return { name, count, quality: itemQuality(name), currency, rare: itemQuality(name) >= 6 }
 }
 /** 每个事件按阶别掉落件数抽多次，每件独立按品质权重抽取。 */
@@ -434,6 +548,20 @@ export function rollRewardList (st, diffKey, random = Math.random, cfg = {}) {
   const count = realmMaterialCount(diffKey)
   const list = []
   for (let i = 0; i < count; i++) list.push(rollReward(st, diffKey, random, cfg))
+  /* 大区专属材料保底: 每场秘境至少 1 件本区材料, 事件内不重复保底 */
+  const exclusiveCfg = REGION_EXCLUSIVE_DROPS[st?.region]
+  if (exclusiveCfg && !st.exclusiveGranted) {
+    if (list.some(i => exclusiveCfg.materials.includes(i.name))) {
+      st.exclusiveGranted = true
+    } else {
+      const g = exclusiveCfg.guarantee || { name: exclusiveCfg.materials[0], min: 1, max: 1 }
+      const min = Math.max(1, Number(g.min ?? g.count) || 1)
+      const max = Math.max(min, Number(g.max ?? g.count) || min)
+      const count = min + Math.floor(random() * (max - min + 1))
+      list[0] = { name: g.name, count, quality: itemQuality(g.name), currency: false, rare: false }
+      st.exclusiveGranted = true
+    }
+  }
   return list
 }
 /** 奖励列表文案: 同名同属性奖励合并，避免秘境推送过长 */
@@ -489,17 +617,27 @@ async function barrierHpFor (gid, diffMult) {
 }
 export async function spawnRealm (st, gid, cfg = DEF_CFG) {
   const r = rollRealm()
+  /* 封海期间镇海海眼不刷新: 防止封海者垄断自己的升级材料 */
+  try {
+    if (r.terrain === 'zhenhai' && sealCoversRegion(getWorld(gid), 'east')) {
+      const pool = terrainPoolForRegion(r.region, { excludeZhenhai: true })
+      r.terrain = pool[Math.floor(Math.random() * pool.length)] || 'dongtian'
+    }
+  } catch (err) { }
   const terrain = TERRAINS[r.terrain]; const diff = DIFFS[r.diff]; const barrier = BARRIERS[terrain.barrier]
   st.gid = String(gid); st.realmId = `${gid}:${Date.now()}:${Math.floor(Math.random() * 100000)}`
   st.region = r.region; st.terrain = r.terrain; st.diff = r.diff; st.exploreMin = r.exploreMin
   st.title = `${terrain.emoji}${terrain.name}`; st.desc = `${terrain.desc}（${barrier.name}：${barrier.desc}）`
   st.rewardPool = realmRewardPool(st, cfg); st.extraRewards = cfg.extra_rewards || []
   st.phase = 'barrier'
+  st.nightClockAt = Date.now(); st.nightResumePending = false
   st.barrier = { maxHp: await barrierHpFor(gid, diff.barrier), hp: 0, damage: {}, lastHit: {}, auto: {} }; st.barrier.hp = st.barrier.maxHp
   st.teams = {}; st.chaos = 0; st.eventsFired = 0; st.firedEvents = []; st.startAt = 0; st.endAt = 0
   /* 特殊彩奖励: 每场按难度概率决定是否命中, 命中后最多替换10次真实探索奖励 */
   st.specialPending = Math.random() * 100 < (diff.special || 0)
   st.specialGranted = 0
+  st.fakeSpecialPending = Math.random() * 100 < (diff.special || 0)
+  st.fakeSpecialGranted = 0
   /* 真实伪玩家在破界时仍属于世界, 屏障破碎后才标记进入/暂停外部行为 */
   const fakes = genFakeTeams(gid, st)
   for (const t of Object.values(fakes)) st.teams[t.id] = t
@@ -541,8 +679,20 @@ export function syncPlayerTeam (st, gid, team) {
   return changed
 }
 export async function openPrivateRealm (gid, cfg, ownerUid, partyId, partyMembers) {
+  const w = getWorld(gid)
+  const ownerRegion = getLoc(w, ownerUid)
+  if (!['center', 'east', 'west', 'north', 'south'].includes(ownerRegion)) {
+    return { ok: false, msg: '专属秘境只能在正常大区开启，请先离开简月王朝。' }
+  }
   const st = emptyRealm()
-  const r = rollRealm()
+  /* 古钥秘境固定在使用者当前大区, 地形只从该大区可用池抽取 */
+  const r = rollRealm(Math.random, { region: ownerRegion })
+  try {
+    if (r.terrain === 'zhenhai' && sealCoversRegion(w, 'east')) {
+      const pool = terrainPoolForRegion(r.region, { excludeZhenhai: true })
+      r.terrain = pool[Math.floor(Math.random() * pool.length)] || 'dongtian'
+    }
+  } catch (err) { }
   st.gid = String(gid); st.privateId = nextPrivateRealmId(gid); st.realmId = `p:${gid}:${st.privateId}`
   const terrain = TERRAINS[r.terrain]; const diff = DIFFS[r.diff]
   st.private = true; st.ownerUid = String(ownerUid); st.ownerPartyId = partyId
@@ -552,6 +702,7 @@ export async function openPrivateRealm (gid, cfg, ownerUid, partyId, partyMember
   st.phase = 'explore'; st.startAt = Date.now(); st.endAt = Date.now() + st.exploreMin * 60000
   st.chaos = 0; st.eventsFired = 0; st.lastEventChaos = 0; st.firedEvents = []
   st.specialPending = Math.random() * 100 < (diff.special || 0); st.specialGranted = 0
+  st.fakeSpecialPending = Math.random() * 100 < (diff.special || 0); st.fakeSpecialGranted = 0
   /* 拥有者先进入, 其余队员仍需各自发送 #进入秘境 */
   const partyList = (partyMembers || [ownerUid]).map(String)
   const members = [String(ownerUid)]
@@ -562,7 +713,7 @@ export async function openPrivateRealm (gid, cfg, ownerUid, partyId, partyMember
     node: null, pendingDisposal: null, hidden: false, exposedUntil: 0, revenge: [], lives: 3, dao: 0, dead: false, startedAt: Date.now(),
     ambush: null, ambushNode: null, injured: 0
   }
-  for (const uid of members) { team.contrib[uid] = 0; team.victory[uid] = 0; try { const w = getWorld(gid); if (getLoc(w, uid) !== st.region) setLoc(w, uid, st.region) } catch (err) { } }
+  for (const uid of members) { team.contrib[uid] = 0; team.victory[uid] = 0; try { const w = getWorld(gid); const seal = getSeal(w); if (getLoc(w, uid) !== st.region && !(seal && seal.region === st.region && Number(seal.until) > Date.now() && String(seal.owner) !== String(uid))) setLoc(w, uid, st.region) } catch (err) { } }
   st.teams[team.id] = team
   savePrivateRealm(st, gid)
   return { ok: true, st, team, info: { privateId: st.privateId, title: st.title, region: st.region, diffName: diff.name, realm: diff.realm, exploreMin: st.exploreMin, fakeTeams: 0 } }
@@ -607,7 +758,7 @@ function mkFakeTeam (st, id, persons, name) {
 /** 每人独立决定出发; 只有已经决定出发的人才可能被随机匹配, 不强制拉朋友/同门 */
 export function genFakeTeams (gid, st) {
   const f = getFake(gid)
-  const alive = Object.values(f.roster || {}).filter(p => p.alive && !isInSectMine(f, p.name) && !p.realmBusy)
+  const alive = Object.values(f.roster || {}).filter(p => p.alive && !isInSectMine(f, p.name) && !p.realmBusy && !warActorOwner(f, 'fake', p.name))
   const willing = shuffle(alive.filter(p => Math.random() < wantChance(p)))
   const available = new Map(willing.map(p => [p.name, p]))
   const teams = {}; let seq = 0
@@ -759,6 +910,15 @@ function playerParty (gid, uid) {
 }
 export async function enterRealm (st, gid, uid) {
   if (!['barrier', 'explore'].includes(st.phase) || teamOf(st, uid)) return { ok: false, msg: '' }
+  /* 镇海珠封锁: 区外玩家不能借"进入秘境自动跨区"绕过封海; 已在区内的玩家可正常进秘境 */
+  try {
+    const w = getWorld(gid)
+    const seal = getSeal(w)
+    if (seal && seal.region === st.region && Number(seal.until) > Date.now() &&
+        String(seal.owner) !== String(uid) && getLoc(w, uid) !== st.region) {
+      return { ok: false, msg: `🌊【${regionNameOf(st.region)}】已被${ZHENHAI_NAME}封锁，无法进入该大区的秘境。` }
+    }
+  } catch (err) { }
   let party = playerParty(gid, uid); let partyId = party ? `party:${party.id}` : `solo:${uid}`
   /* 外部小队记录丢失时, 已入场的本队成员按本场原队进场(专属秘境 partyMembers 兜底, 避免落成散修单人) */
   if (!party) {
@@ -776,11 +936,11 @@ export async function enterRealm (st, gid, uid) {
     st.teams[team.id] = team
   }
   team.members.push(String(uid)); if (!team.contrib[String(uid)]) team.contrib[String(uid)] = 0; if (!team.victory[String(uid)]) team.victory[String(uid)] = 0
-  /* 进入前往秘境大区, 这是跨区赶路的统一入口; 不会把未入场队员带进来 */
-  try { const w = getWorld(gid); if (getLoc(w, uid) !== st.region) setLoc(w, uid, st.region) } catch (err) { }
+  /* 进入前往秘境大区, 这是跨区赶路的统一入口; 不会把未入场队员带进来; 封海时区外玩家不得借道 */
+  try { const w = getWorld(gid); const seal = getSeal(w); if (getLoc(w, uid) !== st.region && !(seal && seal.region === st.region && Number(seal.until) > Date.now() && String(seal.owner) !== String(uid))) setLoc(w, uid, st.region) } catch (err) { }
   if (st.private) savePrivateRealm(st, gid)
   else saveRealmState(st, gid)
-  return { ok: true, team, msg: `${st.phase === 'barrier' ? '你已在秘境屏障前，可协助破界。' : '你已进入秘境。'}\n队伍【${team.name}】当前入场 ${team.members.length}/${team.partyMembers.length} 人。` }
+  return { ok: true, team, msg: `${st.phase === 'barrier' ? '已到达屏障前，可 #攻击屏障 协助破界。' : '已进入秘境。'}\n队伍【${team.name}】已入场 ${team.members.length}/${team.partyMembers.length} 人。` }
 }
 function removeTeamMember (st, team, uid) { team.members = team.members.filter(x => String(x) !== String(uid)); delete team.contrib[String(uid)]; delete team.victory[String(uid)]; if (String(team.leader) === String(uid)) team.leader = team.members[0] || null }
 export async function leaveTeam (st, gid, uid) {
@@ -792,18 +952,20 @@ export async function leaveTeam (st, gid, uid) {
   if (st.phase === 'barrier' && st.barrier?.auto) delete st.barrier.auto[String(uid)]
   removeTeamMember(st, team, uid)
   if (!team.members.length) delete st.teams[team.id]
-  saveRealmState(st, gid)
+  /* 专属秘境必须写回专属档案: 原实现统一 saveRealmState 会写公开档, 专属档未变, 导致 #撤离 后仍在队里 */
+  if (st.private) savePrivateRealm(st, gid)
+  else saveRealmState(st, gid)
   return { ok: true, msgs: share, barrier: st.phase === 'barrier' }
 }
 
 /* ---------- 探索节点: 固定顺序，结果由状态与选择决定 ---------- */
-export const NODE_TYPES = ['treasure', 'dushi', 'fake', 'player', 'chuangguan', 'jueze', 'duojie', 'jiemi', 'beast', 'maze', 'spring', 'scroll', 'elder', 'contest']
+export const NODE_TYPES = ['treasure', 'canwu', 'fake', 'player', 'chuangguan', 'jueze', 'duojie', 'jiemi', 'beast', 'maze', 'spring', 'scroll', 'elder', 'contest']
 const BEAST_POWER = { huang: 800, xuan: 2400, di: 7200, tian: 21600 }
 const BEAST_NAMES = {
   dongtian: '守园妖兽', guzhanchang: '战场凶魂', yifu: '府邸灵兽', zongmen: '护山傀儡',
   gumu: '陵寝尸傀', shilian: '试炼妖兽', leichi: '雷池凶兽', xinmo: '心魔兽影',
-  jinji: '禁地凶物', taichu: '矿脉凶灵', shifang: '源石凶物', longgong: '龙宫蛟卫',
-  tiangong: '仙兵残灵', moyuan: '魔渊魔物', zhenmo: '镇魔古兽', shijian: '岁兽', xumi: '界隙吞兽'
+  jinji: '禁地凶物', taichu: '矿脉凶灵', shifang: '残碑守卫', longgong: '龙宫蛟卫',
+  tiangong: '仙兵残灵', moyuan: '魔渊魔物', zhenmo: '镇魔古兽', shijian: '岁兽', xumi: '界隙吞兽', zhenhai: '镇海兽'
 }
 function combatPowerFor (st, team, multiplier = 1) {
   const base = BEAST_POWER[st.diff] || BEAST_POWER.huang
@@ -819,7 +981,10 @@ function deterministicFightResult (win) {
   }))
   return { myWin: win ? 3 : 0, oppWin: win ? 0 : 3, rounds, winner: win ? 'me' : 'opp' }
 }
-function activeTeams (st, self) { return Object.values(st.teams).filter(t => t.id !== self.id && t.entered !== false && !t.dead && !t.engagedBy && !t.node && (t.members || []).length) }
+function activeTeams (st, self) {
+  const now = Date.now()
+  return Object.values(st.teams).filter(t => t.id !== self.id && t.entered !== false && !t.dead && !t.engagedBy && !t.node && !(Number(t.encounterLockUntil) > now) && (t.members || []).length)
+}
 /** 遭遇目标: 优先选玩家队伍(PvP 遭遇), 没有玩家队时才选伪玩家队; 保持确定性(按 id 排序后取首个) */
 function targetTeam (st, self) {
   const actives = activeTeams(st, self).sort((a, b) => String(a.id).localeCompare(String(b.id)))
@@ -830,39 +995,41 @@ function buildNode (st, team, type, teamPower = Math.max(1, Number(team.combatPo
   const terrain = TERRAINS[st.terrain]
   const node = { type, terrain: st.terrain, title: '', text: '', choices: [], actor: actionActor(team), data: {} }
   if (type === 'treasure') {
-    const reward = rollRewardList(st, st.diff, Math.random); node.title = '💎 发现宝物'; node.text = `你在${terrain.name}深处发现${fmtRewards(reward)}！`; node.data = { kind: 'pick', reward }; node.choices = [{ n: 1, label: '拾取（进入公共池并暴露位置）' }, { n: 2, label: '放弃（不惊动他人）' }]
-  } else if (type === 'dushi') {
-    node.title = '🎲 石坊赌源'; node.text = '一块品相不明的源石横在面前，切法决定固定收益。'; node.data = { kind: 'gamble' }; node.choices = [{ n: 1, label: '切中品源石（获得一份稳定奖励）' }, { n: 2, label: '切天价源石（获得一份高阶奖励并增加乱源）' }, { n: 3, label: '不切' }]
+    const reward = rollRewardList(st, st.diff, Math.random); node.title = '💎 发现宝物'; node.text = `${terrain.name}深处藏有${fmtRewards(reward)}。`; node.data = { kind: 'pick', reward }; node.choices = [{ n: 1, label: '拾取（归入队伍战利品，暴露10分钟）' }, { n: 2, label: '放弃' }]
+  } else if (type === 'canwu') {
+    node.title = '📜 道则残碑'; node.text = '残碑尚存道则，碑灵守在近旁。'; node.data = { kind: 'insight', requiredPower: combatPowerFor(st, team, 0.9) }; node.choices = [{ n: 1, label: '参悟（成功得宝并暴露，失败扣队命）' }, { n: 2, label: '拓印（得宝，乱源+1，暴露10分钟）' }, { n: 3, label: '绕行' }]
   } else if (type === 'fake') {
-    const candidates = Object.values(st.teams).filter(t => t.kind === 'fake' && t.entered !== false && t.members.length && !t.dead && !t.engagedBy && !t.node && t.id !== team.id).sort((a, b) => String(a.id).localeCompare(String(b.id))); const target = candidates[0]
+    const candidates = Object.values(st.teams).filter(t => t.kind === 'fake' && t.entered !== false && t.members.length && !t.dead && !t.engagedBy && !t.node && !(Number(t.encounterLockUntil) > Date.now()) && t.id !== team.id).sort((a, b) => String(a.id).localeCompare(String(b.id))); const target = candidates[0]
     if (!target) return buildNode(st, team, 'treasure')
     target.engagedBy = team.id
-    node.title = '🧙 遭遇伪玩家'; node.text = `前方出现【${target.name}】的队伍！`; node.data = { kind: 'fight', target: target.id, victim: target.members.slice().sort()[0] }; node.choices = [{ n: 1, label: '出手（胜后选择杀/搜刮）' }, { n: 2, label: '买路（300灵石）' }, { n: 3, label: '绕道' }]
+    target.encounterLockUntil = 0
+    node.title = '🧙 遭遇修士'; node.text = `与【${target.name}】相遇。`; node.data = { kind: 'fight', target: target.id, victim: target.members.slice().sort()[0] }; node.choices = [{ n: 1, label: '交战（胜后处置败者）' }, { n: 2, label: '买路（300灵石）' }, { n: 3, label: '绕道' }]
   } else if (type === 'player') {
     const target = targetTeam(st, team); if (!target) return buildNode(st, team, 'treasure')
     target.engagedBy = team.id
-    node.title = '⚔️ 遭遇队伍'; node.text = `你撞上了【${target.name}】！`; node.data = { kind: 'pvp', target: target.id, victim: target.members.slice().sort()[0] }; node.choices = [{ n: 1, label: '强夺（PvP，胜后选择处置）' }, { n: 2, label: '避让' }, { n: 3, label: '观望' }]
+    target.encounterLockUntil = 0
+    node.title = '⚔️ 遭遇队伍'; node.text = `与【${target.name}】相遇。`; node.data = { kind: 'pvp', target: target.id, victim: target.members.slice().sort()[0] }; node.choices = [{ n: 1, label: '交战（胜后处置败者）' }, { n: 2, label: '避让' }, { n: 3, label: '观望' }]
   } else if (type === 'chuangguan') {
-    node.title = '🚩 闯关考验'; node.text = `${terrain.name}的试炼关挡在前方，考验战力将按当前阶别固定。`; node.data = { kind: 'challenge', requiredPower: combatPowerFor(st, team, 0.9) }; node.choices = [{ n: 1, label: '迎战考验（按战力判定，成功得宝）' }, { n: 2, label: '取巧过关（安全通过，不得宝）' }, { n: 3, label: '退回' }]
+    node.title = '🚩 闯关考验'; node.text = `${terrain.name}的试炼关尚未通过。`; node.data = { kind: 'challenge', requiredPower: combatPowerFor(st, team, 0.9) }; node.choices = [{ n: 1, label: '闯关（成功得宝，失败扣队命）' }, { n: 2, label: '绕过考验（无奖励）' }, { n: 3, label: '退回' }]
   } else if (type === 'jueze') {
-    node.title = '🌫️ 心魔抉择'; node.text = `眼前出现一段机缘，也藏着诱惑：一念之间道心沉浮。`; node.choices = [{ n: 1, label: '以德报怨（道心+）' }, { n: 2, label: '顺势而为' }, { n: 3, label: '趁势夺取（道心-，风险高）' }]
+    node.title = '🌫️ 心魔抉择'; node.text = `幻境中，有人负伤求援，身旁散落着宝物。`; node.choices = [{ n: 1, label: '救助（得宝，道心+2）' }, { n: 2, label: '不干涉' }, { n: 3, label: '夺取（得宝，道心-2，乱源+1）' }]
   } else if (type === 'duojie') {
-    node.title = '⚡ 天雷夺劫'; node.text = `一道天雷凝成灵宝，悬在雷池中央！`; node.choices = [{ n: 1, label: '站入中心夺雷（高收益高暴露）' }, { n: 2, label: '外围捡漏' }, { n: 3, label: '躲开' }]
+    node.title = '⚡ 天雷夺劫'; node.text = `雷池中央有灵宝，周围散落着灵物。`; node.choices = [{ n: 1, label: '入池夺宝（成功暴露，失败扣队命）' }, { n: 2, label: '收取外围灵物' }, { n: 3, label: '离开' }]
   } else if (type === 'jiemi') {
-    node.title = '🔒 机关禁制'; node.text = `一道古老禁制挡在藏宝之前。`; node.choices = [{ n: 1, label: '强行破禁（失败增加乱源）' }, { n: 2, label: '寻找线索（稳妥）' }, { n: 3, label: '绕行' }]
+    node.title = '🔒 机关禁制'; node.text = `宝物被古老禁制封住。`; node.choices = [{ n: 1, label: '破禁（成功得宝，失败乱源+1）' }, { n: 2, label: '循阵纹解禁（得宝）' }, { n: 3, label: '绕行' }]
   } else if (type === 'beast') {
-    node.title = '🐾 妖兽拦路'; node.data = { kind: 'beast', enemyName: BEAST_NAMES[st.terrain] || '秘境妖兽', enemyPower: combatPowerFor(st, team) }; node.text = `${node.data.enemyName}盘踞在前方！\n我方战力：${teamPower} · 妖兽战力：${node.data.enemyPower}\n预计胜率：${guardWinRate(teamPower, node.data.enemyPower)}%（按绝对战力计算，结果不再随机）`; node.choices = [{ n: 1, label: '猎杀（按战力判定，成功得兽宝）' }, { n: 2, label: '安抚（花300灵石，安全通过）' }, { n: 3, label: '绕道' }]
+    node.title = '🐾 妖兽拦路'; node.data = { kind: 'beast', enemyName: BEAST_NAMES[st.terrain] || '秘境妖兽', enemyPower: combatPowerFor(st, team) }; node.text = `${node.data.enemyName}拦住去路。\n我方战力：${teamPower} · 妖兽战力：${node.data.enemyPower}\n胜率：${guardWinRate(teamPower, node.data.enemyPower)}%`; node.choices = [{ n: 1, label: '猎杀（成功得宝，失败扣队命）' }, { n: 2, label: '安抚（300灵石）' }, { n: 3, label: '绕道' }]
   } else if (type === 'maze') {
     const correct = (Number(team.step) || 0) % 2 + 1
-    node.title = '🌀 迷阵岔路'; node.text = `面前两条岔路，阵纹已经给出提示：${correct === 1 ? '左路' : '右路'}为正路。`; node.data = { kind: 'maze', correct }; node.choices = [{ n: 1, label: '走左路' }, { n: 2, label: '走右路' }, { n: 3, label: '谨慎观察（得一份奖励）' }]
+    node.title = '🌀 迷阵岔路'; node.text = `岔路口残留阵纹，指向${correct === 1 ? '左路' : '右路'}。`; node.data = { kind: 'maze', correct }; node.choices = [{ n: 1, label: '走左路' }, { n: 2, label: '走右路' }, { n: 3, label: '察看阵纹（得宝）' }]
   } else if (type === 'spring') {
-    node.title = '💧 灵泉淬体'; node.text = `一汪灵泉映入眼帘，浸泡可稳定淬体，不会额外触发随机袭击。`; node.choices = [{ n: 1, label: '泡灵泉（战力+10%，获得奖励）' }, { n: 2, label: '不泡，离开' }]
+    node.title = '💧 灵泉淬体'; node.text = `泉中灵气充盈，可用于淬体。`; node.choices = [{ n: 1, label: '淬体（本场战力+10%，得宝）' }, { n: 2, label: '离开' }]
   } else if (type === 'scroll') {
-    node.title = '📜 灵材遗藏'; node.text = `石缝里露出秘境本源灵材。`; node.choices = [{ n: 1, label: '拾取灵材（收入公共池）' }, { n: 2, label: '留给后来人' }]
+    node.title = '📜 灵材遗藏'; node.text = `石缝中生有灵材。`; node.choices = [{ n: 1, label: '采集（归入队伍战利品）' }, { n: 2, label: '离开' }]
   } else if (type === 'elder') {
-    node.title = '🧓 神秘老者'; node.text = `一位看不清面容的老者叫住你：“小友，可要一场机缘？”规则已明示：求机缘得奖励并付出代价，问路稳定获得小奖励，试探按战力判定。`; node.data = { kind: 'elder', requiredPower: combatPowerFor(st, team, 1.1) }; node.choices = [{ n: 1, label: '求机缘（获得一份奖励）' }, { n: 2, label: '问路（获得一份稳定奖励）' }, { n: 3, label: '试探（按战力判定）' }]
+    node.title = '🧓 神秘老者'; node.text = `老者独坐路旁，身边放着几件灵物。`; node.data = { kind: 'elder', requiredPower: combatPowerFor(st, team, 1.1) }; node.choices = [{ n: 1, label: '求赠（得宝）' }, { n: 2, label: '问路（得宝）' }, { n: 3, label: '试探（成功得宝，失败扣队命）' }]
   } else if (type === 'contest') {
-    node.title = '🏆 天材地宝'; node.text = `一株天材地宝现世，各方目光齐聚！`; node.choices = [{ n: 1, label: '出手夺宝（得宝但暴露位置）' }, { n: 2, label: '等待时机（小概率捡漏）' }, { n: 3, label: '放弃离开' }]
+    node.title = '🏆 天材地宝'; node.text = `灵物出世，附近修士已向此处赶来。`; node.choices = [{ n: 1, label: '夺宝（得宝，乱源+1，暴露10分钟）' }, { n: 2, label: '伺机收取（得宝）' }, { n: 3, label: '离开' }]
   }
   return node
 }
@@ -898,23 +1065,23 @@ async function teamFight (st, gid, a, b) {
   return { win, myPower, oppPower, winRate, victim, result }
 }
 function transferVictory (loser, winner) { let total = 0; for (const uid of Object.keys(loser.victory || {})) { const n = Math.floor((loser.victory[uid] || 0) * 0.3); loser.victory[uid] -= n; total += n }; const m = winner.members || []; if (m.length) for (const uid of m) winner.victory[uid] = (winner.victory[uid] || 0) + Math.floor(total / m.length) }
-function fightText (r) { return `⚔️ 战力 ${r.myPower} vs ${r.oppPower}（胜率${r.winRate}%）→ ${r.win ? '你方胜出！' : '你方落败！'}` }
+function fightText (r) { return `⚔️ 我方 ${r.myPower} · 对方 ${r.oppPower} · 胜率${r.winRate}%\n${r.win ? '我方获胜。' : '我方落败。'}` }
 
 /* ---------- 节点结算 ---------- */
 async function grantReward (st, team, actor, cfg = {}) {
-  const r = rollRewardList(st, st.diff, Math.random, { ...cfg, special: true })
+  const r = rollRewardList(st, st.diff, Math.random, { ...cfg, special: true, fake: team.kind === 'fake' })
   const got = []
   for (const item of r) got.push(addToPool(st, team, item, actor))
   return { r, got }
 }
 function loseLife (team, msgs) {
   team.lives = Math.max(0, (team.lives || 3) - 1)
-  msgs.push(`⛔ 你受创，队命-1（剩余${team.lives}）。`)
-  if (team.lives <= 0) { team.dead = true; msgs.push('队命耗尽，队伍被秘境遣返。') }
+  msgs.push(`⛔ 队命-1，剩余${team.lives}。`)
+  if (team.lives <= 0) { team.dead = true; msgs.push('队命耗尽，已遣返。') }
 }
 export async function resolveNode (st, gid, team, node, idx, cfg) {
-  if (!node || !team || team.node !== node) return { valid: false, msgs: ['这个选择已经失效~'] }
-  if (!node.choices.some(c => c.n === idx)) return { valid: false, msgs: [`请输入 ${node.choices.map(c => c.n).join('、')} 选择~`] }
+  if (!node || !team || team.node !== node) return { valid: false, msgs: ['该选择已失效。'] }
+  if (!node.choices.some(c => c.n === idx)) return { valid: false, msgs: [`请回复选项序号：${node.choices.map(c => c.n).join('、')}。`] }
   const msgs = []
   const actor = node.actor
   let autoDisposalDone = false
@@ -924,37 +1091,54 @@ export async function resolveNode (st, gid, team, node, idx, cfg) {
 
   if (node.type === 'treasure') {
     if (idx === 1) {
-      const reward = st.specialPending && Number(st.specialGranted) < SPECIAL_MAX
-        ? rollRewardList(st, st.diff, Math.random, { special: true })
+      const fake = team.kind === 'fake'
+      const pendingKey = fake ? 'fakeSpecialPending' : 'specialPending'
+      const grantedKey = fake ? 'fakeSpecialGranted' : 'specialGranted'
+      const reward = st[pendingKey] && Number(st[grantedKey] || 0) < SPECIAL_MAX
+        ? rollRewardList(st, st.diff, Math.random, { special: true, fake })
         : (node.data.reward || [])
       const gots = []
       for (const item of reward) gots.push(addToPool(st, team, item, actor))
       expose(team)
-      msgs.push(`你拾取${fmtRewards(gots)}，收入公共池并暴露位置。${gots.some(g => g && g.rare) ? '\n✨ 天降彩色机缘！' : ''}`)
+      msgs.push(`获得${fmtRewards(gots)}，归入队伍战利品；位置暴露10分钟。${gots.some(g => g && g.rare) ? ' ✨' : ''}`)
     }
-    else msgs.push('你放弃宝物，未惊动四周。')
-  } else if (node.type === 'dushi') {
-    if (idx === 3) msgs.push('你放弃赌石，悄然离开。')
-    else if (idx === 1 || idx === 2) { const got = (await grantReward(st, team, actor, cfg)).got; if (idx === 2) st.chaos += 1; expose(team); msgs.push(`你切出${fmtRewards(got)}${idx === 2 ? '（高阶切法，乱源上升；位置暴露）' : '（位置暴露）'}`) }
+    else msgs.push('已放弃宝物。')
+  } else if (node.type === 'canwu' || node.type === 'dushi') {
+    if (idx === 3) msgs.push('已绕过残碑。')
+    else if (idx === 1) {
+      if (success) {
+        const got = (await grantReward(st, team, actor, cfg)).got
+        expose(team)
+        msgs.push(`参悟成功，获得${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}（位置暴露10分钟）。`)
+      } else {
+        loseLife(team, msgs)
+        msgs.push('参悟失败，遭到道则反噬。')
+      }
+    } else if (idx === 2) {
+      const got = (await grantReward(st, team, actor, cfg)).got
+      st.chaos += 1
+      expose(team)
+      msgs.push(`拓印完成，获得${fmtRewards(got)}（乱源+1，位置暴露10分钟）。`)
+    }
   } else if (node.type === 'fake' || node.type === 'player') {
-    if (idx === 2 && node.type === 'fake') msgs.push(await payLeader(team, gid, 300) ? '你支付300灵石买路，安全通过。' : '你的灵石不足，买路失败，只能原地绕行。')
+    if (idx === 2 && node.type === 'fake') msgs.push(await payLeader(team, gid, 300) ? '支付300灵石，已通过。' : '灵石不足，已绕行。')
     else if (idx === 1) {
       const target = st.teams[node.data.target]
       if (target?.kind === 'fake') syncFakeTeam(gid, st, target)
-      if (!target || !target.members.length) msgs.push('对方已经离开了。')
+      if (!target || !target.members.length) msgs.push('对方已离场。')
       else {
         const r = await teamFight(st, gid, team, target)
         msgs.push(fightText(r))
         if (r.win) {
           if (team.kind === 'fake') { msgs.push(...(await autoFakeDisposal(st, gid, team, target, r.victim, cfg))); autoDisposalDone = true }
           else {
-            team.node = { type: 'disposal', title: '⚖️ 处置战败者', text: `你击败了【${target.name}】的成员【${r.victim}】，选择处置：`, choices: disposalChoices(target), data: { target: target.id, victim: r.victim, disposalVersion: 2 } }
+            team.node = { type: 'disposal', title: '⚖️ 处置战败者', text: `败者：【${r.victim}】（${target.name}）`, choices: disposalChoices(target), data: { target: target.id, victim: r.victim, disposalVersion: 2 } }
             team.pendingDisposal = { targetId: target.id, victim: r.victim }
             team.lastActionAt = Date.now(); saveRealmState(st, gid)
             return { valid: true, msgs, disposalFor: { leaderUid: team.leader, text: menuText(team.node) } }
           }
         } else if (target.kind === 'player') {
-          target.node = { type: 'disposal', title: '⚖️ 处置战败者', text: `你击败了【${team.name}】的成员【${r.victim}】，选择处置：`, choices: disposalChoices(team), data: { target: team.id, victim: r.victim, disposalVersion: 2 } }
+          target.node = { type: 'disposal', title: '⚖️ 处置战败者', text: `败者：【${r.victim}】（${team.name}）`, choices: disposalChoices(team), data: { target: team.id, victim: r.victim, disposalVersion: 2 } }
           target.pendingDisposal = { targetId: team.id, victim: r.victim }
           releaseNodeTarget(st, team, node)
           if (team.kind === 'fake') { team.node = null; team.pendingDisposal = null; team.nextActionAt = Date.now() + actionDelay(); team.lastActionAt = Date.now() }
@@ -962,58 +1146,58 @@ export async function resolveNode (st, gid, team, node, idx, cfg) {
           return { valid: true, msgs, disposalFor: { leaderUid: target.leader, text: menuText(target.node) } }
         } else msgs.push(...(await autoFakeDisposal(st, gid, target, team, r.victim, cfg)))
       }
-    } else msgs.push(idx === 3 ? '你选择避开这次遭遇。' : '双方短暂对峙后擦肩而过。')
+    } else msgs.push(idx === 3 ? '已避开对方。' : '双方未交战。')
   } else if (node.type === 'trial') {
     const enemyPower = Number(node.data.requiredPower) || combatPowerFor(st, team, 1.15)
     const winRate = guardWinRate(teamPower, enemyPower)
-    msgs.push(`⚔️ 异变战力 ${enemyPower} · 你方战力 ${teamPower} · 胜率 ${winRate}%`)
-    if (idx === 1 && success) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`你击退异变，得到${fmtRewards(got)}。`) }
-    else if (idx === 1) { loseLife(team, msgs); msgs.push('你未能击退异变。') }
-    else msgs.push('你绕开异变，未与其交战。')
+    msgs.push(`⚔️ 我方 ${teamPower} · 对方 ${enemyPower} · 胜率${winRate}%`)
+    if (idx === 1 && success) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`迎战获胜，获得${fmtRewards(got)}。`) }
+    else if (idx === 1) { loseLife(team, msgs); msgs.push('迎战落败。') }
+    else msgs.push('已绕行。')
   } else if (node.type === 'chuangguan') {
-    if (idx === 3) msgs.push('你退回上一层。')
-    else if (idx === 1 && success) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`闯关成功，得到${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}。`) }
-    else if (idx === 2) msgs.push('你取巧绕过考验，安全通过，但没有获得奖励。')
-    else { loseLife(team, msgs); msgs.push('考验失败。') }
+    if (idx === 3) msgs.push('已退出考验。')
+    else if (idx === 1 && success) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`闯关成功，获得${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}。`) }
+    else if (idx === 2) msgs.push('已绕过考验，无奖励。')
+    else { loseLife(team, msgs); msgs.push('闯关失败。') }
   } else if (node.type === 'jueze') {
-    if (idx === 1) { team.dao = (team.dao || 0) + 2; const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`你守住本心，道心上升并得到${fmtRewards(got)}。`) }
-    else if (idx === 3) { team.dao = (team.dao || 0) - 2; st.chaos += 1; const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`你选择夺取，得到${fmtRewards(got)}，但乱源上升。`) }
-    else msgs.push('你选择顺势而为，平稳通过。')
+    if (idx === 1) { team.dao = (team.dao || 0) + 2; const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`救助完成，道心+2，获得${fmtRewards(got)}。`) }
+    else if (idx === 3) { team.dao = (team.dao || 0) - 2; st.chaos += 1; const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`获得${fmtRewards(got)}，道心-2，乱源+1。`) }
+    else msgs.push('未干涉幻境，已离开。')
   } else if (node.type === 'duojie') {
-    if (idx === 1 && success) { const got = (await grantReward(st, team, actor, cfg)).got; expose(team); msgs.push(`你抢到雷池中心的${fmtRewards(got)}，位置暴露。`) }
-    else if (idx === 1) { loseLife(team, msgs); msgs.push('天雷反噬，你被劈中。') }
-    else if (idx === 2) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`你在外围捡到${fmtRewards(got)}。`) }
-    else msgs.push('你躲开了天雷。')
+    if (idx === 1 && success) { const got = (await grantReward(st, team, actor, cfg)).got; expose(team); msgs.push(`夺宝成功，获得${fmtRewards(got)}；位置暴露10分钟。`) }
+    else if (idx === 1) { loseLife(team, msgs); msgs.push('夺宝失败，遭到雷击。') }
+    else if (idx === 2) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`收取灵物，获得${fmtRewards(got)}。`) }
+    else msgs.push('已避开雷池。')
   } else if (node.type === 'jiemi') {
-    if (idx === 1 && !success) { st.chaos += 1; msgs.push('强行破禁失败，机关反噬，乱源上升。') }
-    else if (idx === 3) msgs.push('你绕开禁制。')
-    else { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`机关被解开，得到${fmtRewards(got)}。`) }
+    if (idx === 1 && !success) { st.chaos += 1; msgs.push('破禁失败，乱源+1。') }
+    else if (idx === 3) msgs.push('已绕过禁制。')
+    else { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`禁制解除，获得${fmtRewards(got)}。`) }
   } else if (node.type === 'beast') {
     const enemyPower = Number(node.data.enemyPower) || combatPowerFor(st, team)
     const winRate = guardWinRate(teamPower, enemyPower)
-    msgs.push(`⚔️ ${node.data.enemyName || '秘境妖兽'}战力 ${enemyPower} · 你方战力 ${teamPower} · 胜率 ${winRate}%`)
-    if (idx === 1) { if (success) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`你猎杀了妖兽，得到兽宝${fmtRewards(got)}！`) } else { loseLife(team, msgs); msgs.push('你被妖兽所伤。') } }
-    else if (idx === 2) msgs.push(await payLeader(team, gid, 300) ? '你安抚了妖兽，安全通过。' : '灵石不足，你只能绕道。')
-    else msgs.push('你绕道而行。')
+    msgs.push(`⚔️ 我方 ${teamPower} · ${node.data.enemyName || '秘境妖兽'} ${enemyPower} · 胜率${winRate}%`)
+    if (idx === 1) { if (success) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`猎杀成功，获得${fmtRewards(got)}。`) } else { loseLife(team, msgs); msgs.push('猎杀失败，遭到妖兽攻击。') } }
+    else if (idx === 2) msgs.push(await payLeader(team, gid, 300) ? '支付300灵石，已通过。' : '灵石不足，已绕行。')
+    else msgs.push('已绕行。')
   } else if (node.type === 'maze') {
-    if (idx === 3) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`你谨慎观察，找到了正路，得到${fmtRewards(got)}。`) }
-    else if (idx === node.data.correct) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`你走对了路，得到${fmtRewards(got)}。`) }
-    else { st.chaos += 0.5; msgs.push('你走进了死路，浪费了时间，乱源略升。') }
+    if (idx === 3) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`辨明阵纹，获得${fmtRewards(got)}。`) }
+    else if (idx === node.data.correct) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`穿过迷阵，获得${fmtRewards(got)}。`) }
+    else { st.chaos += 0.5; msgs.push('误入死路，乱源+0.5。') }
   } else if (node.type === 'spring') {
-    if (idx === 1) { team.powerBoost = (team.powerBoost || 1) + 0.1; const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`你泡入灵泉，淬体成功，战力+10%，得到${fmtRewards(got)}。`) }
-    else msgs.push('你放弃灵泉。')
+    if (idx === 1) { team.powerBoost = (team.powerBoost || 1) + 0.1; const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`淬体完成，本场战力+10%，获得${fmtRewards(got)}。`) }
+    else msgs.push('已离开灵泉。')
   } else if (node.type === 'scroll') {
-    if (idx === 1) { const got = grantScroll(st, team); msgs.push(`你拾得灵材${fmtRewards([got])}，收入公共池。`) }
-    else msgs.push('你留下灵材，给后来人留一分机缘。')
+    if (idx === 1) { const got = grantScroll(st, team); msgs.push(`采得${fmtRewards([got])}，归入队伍战利品。`) }
+    else msgs.push('未采集，已离开。')
   } else if (node.type === 'elder') {
-    if (idx === 1) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`老者抚须而笑：“你有缘！”得${fmtRewards(got)}。`) }
-    else if (idx === 2) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`老者为你指路，你安稳前行，得${fmtRewards(got)}。`) }
-    else if (success) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`老者眼神一凝，你试探到他的深浅，得${fmtRewards(got)}。`) }
-    else { loseLife(team, msgs); msgs.push('老者出手如电，你吃了个暗亏。') }
+    if (idx === 1) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`老者赠予${fmtRewards(got)}。`) }
+    else if (idx === 2) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`老者指明去路，赠予${fmtRewards(got)}。`) }
+    else if (success) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`试探得手，获得${fmtRewards(got)}。`) }
+    else { loseLife(team, msgs); msgs.push('试探失败，被老者击退。') }
   } else if (node.type === 'contest') {
-    if (idx === 1) { const got = (await grantReward(st, team, actor, cfg)).got; expose(team); st.chaos += 1; msgs.push(`你抢到了天材地宝${fmtRewards(got)}，位置暴露！`) }
-    else if (idx === 2) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`众人乱斗，你按时机捡到${fmtRewards(got)}。`) }
-    else msgs.push('你放弃了天材地宝。')
+    if (idx === 1) { const got = (await grantReward(st, team, actor, cfg)).got; expose(team); st.chaos += 1; msgs.push(`获得${fmtRewards(got)}，乱源+1，位置暴露10分钟。`) }
+    else if (idx === 2) { const got = (await grantReward(st, team, actor, cfg)).got; msgs.push(`趁隙收取，获得${fmtRewards(got)}。`) }
+    else msgs.push('已放弃夺宝。')
   }
 
   releaseNodeTarget(st, team, node)
@@ -1050,42 +1234,49 @@ function disposalPlan (idx) { return DISPOSAL_PLANS[Number(idx)] || null }
 function normalizeDisposalIndex (idx, version) { return Number(version) >= 2 ? idx : ({ 1: 8, 2: 9, 3: 10 }[idx] || idx) }
 export function disposalChoices (target = {}) {
   return [
-    { n: 1, label: '放过（不拿任何战利品）' },
+    { n: 1, label: '放过（不搜刮）' },
     { n: 2, label: '只取奖励池份额30%' },
     { n: 3, label: '只取奖励池份额全部（位置暴露）' },
-    { n: 4, label: '只取背包30%（非绑定，受搜刮上限）' },
-    { n: 5, label: '只取背包全部（非绑定，位置暴露）' },
+    { n: 4, label: '只取背包30%（含穿戴，非绑定，有上限）' },
+    { n: 5, label: '只取背包全部（含穿戴，非绑定，暴露）' },
     { n: 6, label: '只取随身灵石30%' },
     { n: 7, label: '只取随身灵石全部（位置暴露）' },
     { n: 8, label: '综合搜刮30%（奖励池+背包+灵石）' },
-    { n: 9, label: '全搜（全部可取物，位置暴露）' },
-    { n: 10, label: target.kind === 'fake' ? '杀人夺宝（斩灭其身，业力+吸魂）' : '杀人夺宝（重伤遣返本场）' }
+    { n: 9, label: '全搜（奖励池+背包+灵石，暴露）' },
+    { n: 10, label: target.kind === 'fake' ? '杀人夺宝（斩灭其身，业力+2，万魂幡可吸魂）' : '杀人夺宝（重伤遣返本场）' }
   ]
 }
 export function menuText (node) { return [node.title, node.text, ...node.choices.map(c => `${c.n}. ${c.label}`)].join('\n') }
 function releaseNodeTarget (st, team, node) {
   const id = node && node.data && node.data.target
   const target = id ? st.teams[id] : null
-  if (target && target.engagedBy === team.id) delete target.engagedBy
+  if (target && target.engagedBy === team.id) {
+    delete target.engagedBy
+    /* 普通遭遇结束后 2 分钟保护: 防止同一目标被连续两三队轮流贴身打 */
+    target.encounterLockUntil = Date.now() + 2 * 60000
+  }
 }
 
 /* ---------- 搜刮/击杀 ---------- */
 function fakeDisposalIndex (leader) { return isBigEvil(leader) ? 10 : (leader.trait === '好斗' ? 9 : 8) }
 async function autoFakeDisposal (st, gid, winnerFake, loser, victim, cfg) {
-  const persons = currentFakePersons(gid, winnerFake); const leader = persons.find(p => p.name === winnerFake.leader) || persons[0]; if (!leader) return ['伪玩家队已经无人可行动。']
+  const persons = currentFakePersons(gid, winnerFake); const leader = persons.find(p => p.name === winnerFake.leader) || persons[0]; if (!leader) return ['对方队伍已无人可行动。']
   return (await resolveDisposal(st, gid, winnerFake, fakeDisposalIndex(leader), cfg, { targetId: loser.id, victim, disposalVersion: 2 })).msgs
 }
 export async function resolveDisposal (st, gid, team, idx, cfg, forced = null) {
   const pending = forced || team.pendingDisposal; const target = pending && st.teams[pending.targetId]; const victim = pending && pending.victim
   const choices = forced ? disposalChoices(target || {}) : (team.node?.choices || disposalChoices(target || {}))
-  if (!target || !victim) return { valid: false, msgs: ['处置对象已经不在场~'] }
-  if (!choices.some(c => c.n === idx)) return { valid: false, msgs: ['这个处置选项不存在~'] }
+  if (!target || !victim) return { valid: false, msgs: ['处置对象已离场。'] }
+  if (!choices.some(c => c.n === idx)) return { valid: false, msgs: ['无此处置选项。'] }
   /* 兼容更新前正在等待回复的旧三项处置菜单。 */
   const version = forced ? Number(forced.disposalVersion) || 2 : Number(team.node?.data?.disposalVersion || pending.disposalVersion) || 1
   const choiceIdx = normalizeDisposalIndex(idx, version)
   const plan = disposalPlan(choiceIdx)
-  if (!plan) return { valid: false, msgs: ['这个处置选项不存在~'] }
-  if (target.engagedBy === team.id) delete target.engagedBy
+  if (!plan) return { valid: false, msgs: ['无此处置选项。'] }
+  if (target.engagedBy === team.id) {
+    delete target.engagedBy
+    target.encounterLockUntil = Date.now() + 2 * 60000
+  }
   const msgs = []
   if (!plan.release) {
     const loot = await lootPerson(st, gid, team, target, victim, plan, cfg)
@@ -1096,13 +1287,13 @@ export async function resolveDisposal (st, gid, team, idx, cfg, forced = null) {
       const killed = killFakePerson(gid, st, target, victim, team)
       msgs.push(...killed.msgs)
       if (killed.level && team.kind === 'player') {
-        const soul = Wanhun.captureSoul(team.leader, gid, killed.level, 1); if (soul.gained) msgs.push(`👻 万魂幡吸魂成功，收魂${soul.gained}。`)
+        const soul = Wanhun.captureSoul(team.leader, gid, killed.level, 1); if (soul.gained) msgs.push(`👻 万魂幡收魂${soul.gained}。`)
         const karma = await xujing_data.addPlayerKarma(gid, team.leader, 2); msgs.push(`☯️ 业力+2（当前${karma}）。`)
       }
     } else {
       removeTeamMember(st, target, victim)
       if (!target.members.length) delete st.teams[target.id]
-      msgs.push(`☠️ 【${victim}】被重伤遣返出秘境。`)
+      msgs.push(`☠️ 【${victim}】重伤，已遣返。`)
       if (team.kind === 'player') {
         const karma = await xujing_data.addPlayerKarma(gid, team.leader, 1)
         msgs.push(`☯️ 业力+1（当前${karma}）。`)
@@ -1113,9 +1304,9 @@ export async function resolveDisposal (st, gid, team, idx, cfg, forced = null) {
   } else if (plan.expose) {
     expose(team)
     target.revenge = [...new Set([...(target.revenge || []), team.id])]
-    msgs.push(`📢 搜刮完成，${team.name}的位置暴露10分钟。`)
-  } else if (plan.release) msgs.push('🤝 你放过了对方，没有拿走任何战利品。')
-  else msgs.push('搜刮完成，对方仍留在秘境中。')
+    msgs.push(`📢 ${team.name}位置暴露10分钟。`)
+  } else if (plan.release) msgs.push('🤝 已放过对方，未取战利品。')
+  else msgs.push('搜刮完成，对方仍在场。')
   team.pendingDisposal = null; team.node = null; team.step = (team.step || 0) + 1; team.nextActionAt = Date.now() + actionDelay(); team.lastActionAt = Date.now(); saveRealmState(st, gid); return { valid: true, msgs }
 }
 async function lootPerson (st, gid, winner, target, victim, plan, cfg) {
@@ -1126,7 +1317,7 @@ async function lootPerson (st, gid, winner, target, victim, plan, cfg) {
     const itemsText = fmtRewards(poolShare.items)
     const moneyText = poolShare.money ? `${itemIcon('灵石')}灵石×${poolShare.money}` : ''
     const poolText = [itemsText, moneyText].filter(Boolean).join('、')
-    if (poolText) msgs.push(`🧳 搜刮奖励：${poolText}`)
+    if (poolText) msgs.push(`🧳 夺得奖励池份额：${poolText}`)
     if (poolShare.money) addPoolItem(winner, { name: '灵石', count: poolShare.money, currency: true, quality: 1 })
   }
   if (plan.bagRate <= 0 && plan.moneyRate <= 0) return { msgs }
@@ -1135,13 +1326,13 @@ async function lootPerson (st, gid, winner, target, victim, plan, cfg) {
     for (const x of r.items) addPoolItem(winner, x)
     if (r.money) addPoolItem(winner, { name: '灵石', count: r.money, currency: true, quality: 1 })
     const inventoryText = fmtRewards(r.items)
-    if (r.items.length || r.money) msgs.push(`🎒 从【${victim}】背包搜得${inventoryText}${r.money ? `${inventoryText ? '、' : ''}${itemIcon('灵石')}灵石×${r.money}` : ''}`)
+    if (r.items.length || r.money) msgs.push(`🎒 从【${victim}】搜得${inventoryText}${r.money ? `${inventoryText ? '、' : ''}${itemIcon('灵石')}灵石×${r.money}` : ''}`)
   } else {
     const r = extractFakeInventory(gid, victim, plan.bagRate, plan.moneyRate, cfg)
     for (const x of r.items) addPoolItem(winner, x)
     if (r.money) addPoolItem(winner, { name: '灵石', count: r.money, currency: true, quality: 1 })
     const inventoryText = fmtRewards(r.items)
-    if (r.items.length || r.money) msgs.push(`🎒 从【${victim}】身上搜得${inventoryText}${r.money ? `${inventoryText ? '、' : ''}${itemIcon('灵石')}灵石×${r.money}` : ''}`)
+    if (r.items.length || r.money) msgs.push(`🎒 从【${victim}】搜得${inventoryText}${r.money ? `${inventoryText ? '、' : ''}${itemIcon('灵石')}灵石×${r.money}` : ''}`)
   }
   return { msgs }
 }
@@ -1172,7 +1363,7 @@ async function extractPlayerInventory (gid, uid, bagRate, moneyRate, cfg) {
     const bag = getBag(uid, gid)
     const equipped = new Set(Object.values(bag.equipped || {}).filter(Boolean))
     const names = Object.keys(bag.items || {}).filter(n => !equipped.has(n) && !isBound(n))
-    const total = names.reduce((s, n) => s + Math.max(0, Number(bag.items[n]?.count ?? bag.items[n]) || 0), 0)
+    const total = names.reduce((s, n) => s + Math.max(0, Number(bag.items[n]?.count ?? bag.items[n]) || 0), 0) + equipped.size
     let left = inventoryLootLimit(total, bagRate, cfg)
     for (const n of names.sort()) {
       if (left <= 0) break
@@ -1182,6 +1373,19 @@ async function extractPlayerInventory (gid, uid, bagRate, moneyRate, cfg) {
       consumeItem(uid, n, take, null, gid)
       items.push({ name: n, count: take, quality: itemQuality(n), rare: itemQuality(n) >= 6 })
       left -= take
+    }
+    /* 搜刮包含穿在身上的装备: 直接脱下并从玩家装备栏移除, 避免死亡后装备凭空消失 */
+    if (left > 0) {
+      for (const [slot, name] of Object.entries(bag.equipped || {})) {
+        if (left <= 0) break
+        if (!name || isBound(name) || !EQUIP_TPL[name]) continue
+        const attr = bag.equippedAttr?.[slot] || null
+        bag.equipped[slot] = ''
+        if (bag.equippedAttr) bag.equippedAttr[slot] = null
+        items.push({ name, count: 1, quality: itemQuality(name), rare: itemQuality(name) >= 6, attr })
+        left -= 1
+      }
+      saveBag(uid, bag, gid)
     }
   }
   let money = 0
@@ -1209,7 +1413,7 @@ function extractFakeInventory (gid, victim, bagRate, moneyRate, cfg) {
     if (!p.bag) p.bag = { items: {}, equipped: {} }
     const equipped = new Set(Object.values(p.bag.equipped || {}).filter(Boolean))
     const names = Object.keys(p.bag.items || {}).filter(n => !equipped.has(n) && !isBound(n))
-    const total = names.reduce((s, n) => s + (Number(p.bag.items[n]?.count ?? p.bag.items[n]) || 0), 0)
+    const total = names.reduce((s, n) => s + (Number(p.bag.items[n]?.count ?? p.bag.items[n]) || 0), 0) + equipped.size
     let left = inventoryLootLimit(total, bagRate, cfg)
     for (const n of names.sort()) {
       if (left <= 0) break
@@ -1225,6 +1429,17 @@ function extractFakeInventory (gid, victim, bagRate, moneyRate, cfg) {
       }
       items.push({ name: n, count: take, quality: itemQuality(n), rare: itemQuality(n) >= 6 })
       left -= take
+    }
+    if (left > 0) {
+      for (const [slot, name] of Object.entries(p.bag.equipped || {})) {
+        if (left <= 0) break
+        if (!name || isBound(name) || !EQUIP_TPL[name]) continue
+        const attr = p.bag.equippedAttr?.[slot] || null
+        p.bag.equipped[slot] = ''
+        if (p.bag.equippedAttr) p.bag.equippedAttr[slot] = null
+        items.push({ name, count: 1, quality: itemQuality(name), rare: itemQuality(name) >= 6, attr })
+        left -= 1
+      }
     }
   }
   const haveMoney = Math.max(0, Number(p.money) || 0)
@@ -1257,7 +1472,7 @@ function killFakePerson (gid, st, team, victim, killerTeam) {
   saveFake(f, gid)
   team.members = team.members.filter(n => n !== victim)
   if (!team.members.length) delete st.teams[team.id]
-  return { msgs: [`☠️ ${victim} 已被斩杀，身死道消。`], level }
+  return { msgs: [`☠️ ${victim} 已被斩杀。`], level }
 }
 
 /* ---------- 考验与真实意外 ---------- */
@@ -1266,7 +1481,7 @@ export function rollEvent (st, cfg) {
   if (st.phase !== 'explore' || st.eventsFired >= (cfg.event_max || 4) || st.chaos <= 0) return null
   if (Number(st.lastEventChaos) >= Number(st.chaos)) return null
   const terr = TERRAINS[st.terrain]
-  const pool = (terr.events || []).map(name => ({ name, kind: 'terrain', text: `${terr.emoji}${name}！秘境发生异变！` })).concat(GENERIC_EVENTS)
+  const pool = (terr.events || []).map(name => ({ name, kind: 'terrain', text: `${terr.emoji}${name}。` })).concat(GENERIC_EVENTS)
   const ev = pool[st.eventsFired % pool.length]
   st.lastEventChaos = st.chaos
   st.eventsFired++
@@ -1280,7 +1495,7 @@ export function applyEvent (st, gid, ev) {
       const r = rollRewardList(st, st.diff, Math.random, { special: true })
       const got = []
       for (const item of r) got.push(addToPool(st, t, item))
-      msgs.push(`【${t.name}】发现秘藏${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}。`)
+      msgs.push(`【${t.name}】获得秘藏：${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}。`)
     }
   } else if (ev.kind === 'guardian' || ['守园大妖', '残念Boss', '傀儡暴动', '尸傀潮', '龙宫守卫暴动', '禁地凶物', '魔潮', '封印松动'].includes(name)) {
     for (const t of Object.values(st.teams)) if (!t.dead && t.members.length) {
@@ -1288,7 +1503,7 @@ export function applyEvent (st, gid, ev) {
         ? Math.max(1, Math.round(currentFakePersons(gid, t).reduce((sum, p) => sum + personPower(p), 0)))
         : Math.max(1, Number(t.combatPower) || 1)
       const enemyPower = combatPowerFor(st, t, 1.15)
-      const eventNode = { type: 'trial', title: '👹 异变拦路', text: `${ev.text}\n异变战力：${enemyPower} · 你方战力：${teamPower} · 迎战胜率：${guardWinRate(teamPower, enemyPower)}%`, choices: [{ n: 1, label: '迎战异变' }, { n: 2, label: '绕行避开' }], actor: actionActor(t), data: { kind: 'chuangguan', requiredPower: enemyPower } }
+      const eventNode = { type: 'trial', title: '👹 异变拦路', text: `${ev.text}\n我方战力：${teamPower} · 对方战力：${enemyPower} · 胜率：${guardWinRate(teamPower, enemyPower)}%`, choices: [{ n: 1, label: '迎战（成功得宝，失败扣队命）' }, { n: 2, label: '绕行' }], actor: actionActor(t), data: { kind: 'chuangguan', requiredPower: enemyPower } }
       if (t.node) { if (!Array.isArray(t.eventQueue)) t.eventQueue = []; t.eventQueue.push(eventNode) }
       else { t.node = eventNode; t.lastActionAt = Date.now(); if (t.kind === 'player') { syncPlayerTeam(st, gid, t); pushes.push({ team: t, node: t.node }) } }
     }
@@ -1297,7 +1512,7 @@ export function applyEvent (st, gid, ev) {
       const r = rollRewardList(st, st.diff, Math.random, { special: true })
       const got = []
       for (const item of r) got.push(addToPool(st, t, item))
-      msgs.push(`【${t.name}】被异变卷入，意外获得${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}。`)
+      msgs.push(`【${t.name}】在异变中获得${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}。`)
     }
     st.chaos += 1
   } else if (name === '丹炉炸炉') {
@@ -1309,17 +1524,17 @@ export function applyEvent (st, gid, ev) {
         msgs.push(`【${t.name}】的丹炉炸裂，损失${itemIcon(lost.name)}${lost.name}×${lost.count}。`)
       }
     }
-  } else if (name === '护山残阵触发' || name === '禁制连环' || name === '源石连锁' || name === '魔化加剧') {
+  } else if (name === '护山残阵触发' || name === '禁制连环' || name === '残碑共鸣' || name === '道则反噬' || name === '魔化加剧') {
     for (const t of Object.values(st.teams)) t.nextActionAt = Math.max(t.nextActionAt || 0, Date.now() + 2 * 60000)
     st.chaos += 1
-    msgs.push('所有队伍行动被异变拖慢。')
+    msgs.push('各队下次行动至少延后2分钟。')
   } else if (name === '海啸' || name === '界域震荡') {
     for (const t of Object.values(st.teams)) { t.pos = (t.pos || 0) + 1; t.nextActionAt = Math.max(t.nextActionAt || 0, Date.now() + 60000) }
-    msgs.push('潮汐/界域震荡改变了所有队伍的位置。')
+    msgs.push('各队被迫转移，下次行动至少延后1分钟。')
   } else if (name === '矿脉塌陷' || name === '空间崩塌加速' || name === '时间风暴' || (ev.kind === 'terrain' && /塌陷|崩塌|时间风暴/.test(name))) {
     const remain = Math.max(5, Math.ceil((st.endAt - Date.now()) / 60000))
     st.endAt = Date.now() + Math.max(5, Math.floor(remain / 2)) * 60000
-    msgs.push(`⏳ ${name}改变了秘境结构，探索剩余时间缩短。`)
+    msgs.push(`⏳ ${name}，秘境将提前关闭。`)
   } else {
     st.chaos += 1
     for (const t of Object.values(st.teams)) t.nextActionAt = Math.max(t.nextActionAt || 0, Date.now() + 60000)
@@ -1399,7 +1614,7 @@ function fakeChoice (team, node, actor) {
   if (node.type === 'treasure') return greedy ? 1 : 2
   if (node.type === 'fake' || node.type === 'player') return greedy ? 1 : 3
   if (node.type === 'jueze') return evil ? 3 : (actor?.trait === '善良' ? 1 : 2)
-  if (node.type === 'dushi') return 1
+  if (node.type === 'canwu' || node.type === 'dushi') return brave ? 1 : 3
   if (node.type === 'chuangguan') return brave ? 1 : 2
   if (node.type === 'duojie') return brave ? 1 : 2
   if (node.type === 'jiemi') return 2
@@ -1416,20 +1631,21 @@ export function autoPickForPlayer (node) {
   if (!node) return 1
   switch (node.type) {
     case 'treasure': return 2          // 放弃, 不惊动四周
-    case 'dushi': return 3             // 不切
+    case 'canwu':
+    case 'dushi': return 3             // 绕行
     case 'fake':
     case 'player': return 3            // 避让/绕道, 不触发 PvP
     case 'chuangguan': return 2        // 取巧过关
-    case 'jueze': return 2             // 顺势而为
-    case 'duojie': return 3            // 躲开
+    case 'jueze': return 2             // 不干涉
+    case 'duojie': return 3            // 离开
     case 'jiemi': return 3             // 绕行
     case 'beast': return 3             // 绕道
     case 'maze': return 3              // 谨慎观察
     case 'spring': return 2            // 不泡, 离开
-    case 'scroll': return 2            // 留给后来人
+    case 'scroll': return 2            // 离开
     case 'elder': return 2             // 问路(稳定小奖励)
     case 'contest': return 3           // 放弃
-    case 'trial': return 2             // 绕行避开
+    case 'trial': return 2             // 绕行
     case 'disposal': return Number(node.data?.disposalVersion) >= 2 ? 8 : 1 // 新菜单综合30%; 旧存档仍选旧1号
     default: return 1
   }
@@ -1531,7 +1747,7 @@ export function beginAmbush (st, gid, now) {
     t.node = null; t.pendingDisposal = null
     if (t.kind === 'fake') { t.ambush = fakeAmbushChoice(st, t); continue }
     t.ambush = null
-    t.ambushNode = { type: 'ambush', title: '⚔️ 出口围剿', text: '秘境即将关闭，各方涌向出口！你的队伍要？', choices: [{ n: 1, label: '参与围剿混战（伏击抢夺）' }, { n: 2, label: '悄悄溜走（可能被抓）' }] }
+    t.ambushNode = { type: 'ambush', title: '⚔️ 出口围剿', text: '各队正向出口聚集。请选择去留。', choices: [{ n: 1, label: '留守围剿（胜者夺取败者30%战利品）' }, { n: 2, label: '突围离场（失败损失30%战利品）' }] }
     pending.push({ team: t, node: t.ambushNode })
   }
   return pending
@@ -1620,7 +1836,7 @@ async function meleeFight (st, gid, a, b) {
   const winRate = guardWinRate(pa, pb)
   const win = Math.random() * 100 < winRate
   const winner = win ? a : b; const loser = win ? b : a
-  const msgs = [`⚔️ ${a.name} vs ${b.name}（战力 ${pa} vs ${pb}，胜率 ${winRate}%）→ ${winner.name} 胜出`]
+  const msgs = [`⚔️ ${a.name}（${pa}）对阵${b.name}（${pb}）· 前者胜率${winRate}%\n${winner.name}获胜。`]
   const loot = takePoolShare(loser, AMBUSH_TAKE)
   const got = []
   for (const item of loot.items) { addPoolItem(winner, item); got.push(item) }
@@ -1631,8 +1847,8 @@ async function meleeFight (st, gid, a, b) {
     const victim = persons[Math.floor(Math.random() * persons.length)]
     if (victim && Math.random() < 0.08) {
       const killed = killFakePerson(gid, st, loser, victim.name, winner)
-      msgs.push(`☠️ ${victim.name} 战死沙场，身死道消${killed.level ? `（${killed.level}阶）` : ''}！`)
-      if (!currentFakePersons(gid, loser).length) { loser.dead = true; msgs.push(`💀 ${loser.name} 全灭，退出混战`) }
+      msgs.push(`☠️ ${victim.name} 战死${killed.level ? `（${killed.level}阶）` : ''}。`)
+      if (!currentFakePersons(gid, loser).length) { loser.dead = true; msgs.push(`💀 ${loser.name} 全灭，退出围剿`) }
     } else {
       loser.injured = (loser.injured || 0) + 1
       msgs.push(`💥 ${loser.name} 受创，战力-${Math.round((1 - Math.max(0.2, 1 - loser.injured * 0.12)) * 100)}%`)
@@ -1654,7 +1870,7 @@ async function meleeRound (st, gid, now) {
     const r = await meleeFight(st, gid, order[i], order[i + 1])
     msgs.push(...r.msgs)
   }
-  if (order.length % 2) msgs.push(`🌀 ${order[order.length - 1].name} 本轮无人遭遇，暂时观望`)
+  if (order.length % 2) msgs.push(`🌀 ${order[order.length - 1].name} 本轮未交战`)
   if (!fighters.length) msgs.push('🌫️ 出口已无围剿者')
   return msgs
 }
@@ -1670,13 +1886,13 @@ async function tryFleeRound (st, gid, now) {
     const winRate = guardWinRate(my, guardPower)
     if (Math.random() * 100 < winRate) {
       const got = await settleTeamNow(st, t, gid)
-      msgs.push(`🕊️ 【${t.name}】趁乱悄悄溜走，带走战果提前离场${got.msgs.length ? `（${got.msgs.join('、')}）` : ''}！`)
+      msgs.push(`🕊️ 【${t.name}】突围成功，已结算离场${got.msgs.length ? `（${got.msgs.join('、')}）` : ''}。`)
       removeAmbushTeam(st, gid, t)
     } else {
       const loot = takePoolShare(t, AMBUSH_TAKE)
       const gotTxt = shareLoot(fighters, loot)
       await settleTeamNow(st, t, gid)
-      msgs.push(`🚨 【${t.name}】溜走时被围剿方拦截！被搜刮30%${gotTxt.length ? `（${gotTxt.join('、')}）` : ''}，带剩余战果遣返离场`)
+      msgs.push(`🚨 【${t.name}】突围失败，损失30%战利品${gotTxt.length ? `（${gotTxt.join('、')}）` : ''}，剩余战利品已结算离场`)
       removeAmbushTeam(st, gid, t)
     }
   }
@@ -1691,7 +1907,7 @@ export async function processAmbushRound (st, gid, now) {
     if (now < choiceEnd) continue // 表态宽限期内不代选
     t.ambush = await autoPlayerAmbush(st, gid, t)
     t.ambushNode = null
-    msgs.push(`⏳ 【${t.name}】超时未表态，自动选择${t.ambush === 'fight' ? '参与围剿混战' : '悄悄溜走'}`)
+    msgs.push(`⏳ 【${t.name}】选择超时，已自动选择${t.ambush === 'fight' ? '留守围剿' : '突围离场'}`)
   }
   msgs.push(...await meleeRound(st, gid, now))
   msgs.push(...await tryFleeRound(st, gid, now))
@@ -1699,7 +1915,7 @@ export async function processAmbushRound (st, gid, now) {
 }
 
 export async function settleAll (st, gid, cfg = DEF_CFG) {
-  const msgs = ['🏁 秘境关闭，开始结算……']
+  const msgs = ['🏁 秘境结算']
   let top = null; let score = 0
   for (const t of Object.values(st.teams)) {
     if (t.dead) continue

@@ -3,7 +3,7 @@
 // 被埋在下层的交互保留各自待选状态, 等回到栈顶再恢复; unlock 只摘除自己, 不影响他人
 // 用法: await forceLock(gid, uid, 'street') → {ok, prev, prevCN}; 完成后 await unlock(gid, uid, type)
 const TTL = 5 * 60//交互占用默认5分钟(与逛街/换装超时一致)
-const TYPE_CN = { street: '逛街', break: '渡劫', equip: '换装', gift: '赠送', sell: '出售', go: '跨区', list: '上架', 'dismantle-color': '分解彩装', dismantle: '分解红装', 'wanhun-shop': '魔窟商人', 'wanhun-cave': '万魂窟', pet: '搜寻灵兽', realm: '秘境', 'craft-color': '合成彩装', 'craft-rainbow': '合成彩武', 'wanhun-craft': '万魂炼制', 'puppet-craft': '傀儡炼制', 'dynasty-siege': '王朝攻城', sellgf: '出售功法', ambush: '伏击处置' }
+const TYPE_CN = { 'sect-war': '宗门战争', street: '逛街', break: '渡劫', equip: '换装', gift: '赠送', sell: '出售', go: '跨区', list: '上架', 'dismantle-color': '分解彩装', dismantle: '分解红装', 'wanhun-shop': '魔窟商人', 'wanhun-cave': '万魂窟', pet: '搜寻灵兽', realm: '秘境', 'craft-color': '合成彩装', 'craft-rainbow': '合成彩武', 'wanhun-craft': '万魂炼制', 'puppet-craft': '傀儡炼制', 'dynasty-siege': '王朝攻城', sellgf: '出售功法', ambush: '伏击处置' }
 
 /** 交互 key(同旧实现, 不含 type: 一个用户在一个群只对应一个栈) */
 function iKey (gid, uid) {
@@ -30,6 +30,17 @@ export function topType (arr) {
 export function removeType (arr, type) {
   if (!Array.isArray(arr)) return []
   return arr.filter(x => x && x.type !== type)
+}
+
+/* 同一用户的读改写串行；不同群/用户互不阻塞。失败也必须释放队列。 */
+const mutationQueues = new Map()
+async function mutateStack (key, fn) {
+  const previous = mutationQueues.get(key) || Promise.resolve()
+  const current = previous.catch(() => {}).then(fn)
+  mutationQueues.set(key, current)
+  try { return await current } finally {
+    if (mutationQueues.get(key) === current) mutationQueues.delete(key)
+  }
 }
 
 /* ---------- Redis 读写 ---------- */
@@ -61,10 +72,12 @@ async function writeStack (key, arr) {
  */
 export async function forceLock (gid, uid, type) {
   const key = iKey(gid, uid)
-  const stack = await readStack(key)
-  const prev = topType(stack)
-  await writeStack(key, pushStack(stack, type))
-  return { ok: true, prev, prevCN: prev ? TYPE_CN[prev] || prev : '' }
+  return mutateStack(key, async () => {
+    const stack = await readStack(key)
+    const prev = topType(stack)
+    await writeStack(key, pushStack(stack, type))
+    return { ok: true, prev, prevCN: prev ? TYPE_CN[prev] || prev : '' }
+  })
 }
 
 /**
@@ -78,9 +91,11 @@ export async function isCurrent (gid, uid, type) {
 /** 摘除指定类型的交互(栈顶/被埋均可, 只移除自己, 不影响其它交互) */
 export async function unlock (gid, uid, type) {
   const key = iKey(gid, uid)
-  const stack = await readStack(key)
-  if (!Array.isArray(stack)) return
-  await writeStack(key, removeType(stack, type))
+  return mutateStack(key, async () => {
+    const stack = await readStack(key)
+    if (!Array.isArray(stack)) return
+    await writeStack(key, removeType(stack, type))
+  })
 }
 
 /** 查询当前(栈顶)交互类型 */

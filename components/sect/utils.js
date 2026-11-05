@@ -68,13 +68,13 @@ export const CFG = {
   /* 攻打 */
   ATK_BASE: 2000, ATK_PER: 400, PREP_MIN: 30,
   ROUND_MIN: 10, ROUND_MAX: 8, TARGET_CD: 2 * 86400000,
-  /* 发起攻打冷却(分钟): 攻打结束/终止后进入冷却(玩家/散修 30 分钟; AI 伪玩家宗门 60 分钟=1小时) */
-  PLAYER_ATK_CD: 30, FAKE_ATK_CD: 60,
+  /* 发起攻打冷却(分钟): 攻打结束/终止后进入冷却(玩家/散修 30 分钟; AI 伪玩家宗门 240 分钟=4小时) */
+  PLAYER_ATK_CD: 30, FAKE_ATK_CD: 240,
   /* 攻打战力: 每参战人数基础战力(人多势众) + 境界/装备战力×REALM_WEAKEN(境界占100%, 个人战力全额计入, 攻打防守同源) */
   PERSON_BASE: 600, REALM_WEAKEN: 1.0,
-  /* AI(伪玩家)攻打: 不限并发——每个宗门按自身 FAKE_ATK_CD(60分钟) 冷却独立行动; AI_GAP_MIN 已废弃(旧全局战争间隔) */
+  /* AI(伪玩家)攻打: 不限并发——每个宗门按自身 FAKE_ATK_CD(240分钟) 冷却独立行动; AI_GAP_MIN 已废弃(旧全局战争间隔) */
   AI_GAP_MIN: 60,
-  /* 败方战死判定(每场): 基础5%随境界降低; 胜方≥败方×2 或互为仇人 → 提到50% */
+  /* 败方战死判定: 基础5%随境界降低，碾压/明确血仇按倍率计算，50%仅为兼容上限 */
   DEATH_BASE: 5, DEATH_CRUSH_RATE: 50, DEATH_CRUSH_RATIO: 2,
   /* 门人跨区作战传送费(灵石/人): 跨区攻打/防守调兵由宗门宝库出, 日常远行门人自费 */
   SECT_DEPLOY_COST: 2000,
@@ -172,6 +172,7 @@ export function sectTxtOf (f, sid) {
 /** 战争目标完整显示名(小区+宗门都带上): 按 atk.targetType 分派 */
 export function warTargetTxt (f, atk) {
   if (!atk || atk.target == null) return ''
+  if (atk.snapshot) return atk.targetType === 'area' ? `【${atk.snapshot.target}】（${atk.snapshot.defender}）` : `【${atk.snapshot.target}】`
   return atk.targetType === 'area' ? areaTxtOf(f, atk.target) : sectTxtOf(f, atk.target)
 }
 
@@ -230,9 +231,9 @@ export function injuryInfo (p, now = Date.now()) {
   return { level: eff, pct: CFG.INJURY_PCT[eff], remainMin: Math.ceil((total - el) / 60000), totalMin: CFG.INJURY_RECOVER[lv] }
 }
 
-export function applyInjury (f, uid, level, at = Date.now(), gid = 'global') {
+export function applyInjury (f, uid, level, at = Date.now(), gid = 'global', receipt = null) {
   uid = String(uid)
-  const shield = Wanhun.tryShield(uid, gid)
+  const shield = Wanhun.tryShield(uid, gid, receipt)
   if (shield.used) level = Math.max(0, (Number(level) || 0) - 1)
   if (level <= 0) return { level: 0, shield: shield.used, replenished: shield.replenished }
   const p = f.players && f.players[uid]
@@ -315,6 +316,49 @@ export function facilityCost (fac, newLevel) {
     return { stones: stones * 2, mats: bm, build: true, cn: t.cn }
   }
   return { stones, mats, build: false, cn: t.cn }
+}
+
+/* ---------- 战后维护(仅玩家宗主宗门生效) ---------- */
+/** 战后维护窗口: 3 小时; 窗口内材料维护×2, 灵石维护×5 */
+export const WAR_UPKEEP_MS = 3 * 3600000
+export const WAR_UPKEEP_MAT_MULT = 2
+export const WAR_UPKEEP_STONE_MULT = 5
+
+/** 记录宗门参战时间(攻打结算/撤兵时调用; 只保留最近一次) */
+export function markSectWar (f, sid, now = Date.now()) {
+  const s = sid && f && f.sects && f.sects[sid]
+  if (!s) return false
+  const t = Number(now) || Date.now()
+  if (t > (Number(s.lastWarAt) || 0)) { s.lastWarAt = t; return true }
+  return false
+}
+
+/** 宗门是否处于战后维护窗口(3小时) */
+export function inWarUpkeep (f, sid, now = Date.now()) {
+  const s = sid && f && f.sects && f.sects[sid]
+  if (!s) return false
+  const last = Number(s.lastWarAt) || 0
+  return last > 0 && now >= last && now - last < WAR_UPKEEP_MS
+}
+
+/* ---------- 小区被打后的恢复期(无产出) ---------- */
+/** 小区被打后 3 小时内不产出任何收益(灵石/材料都不产), 维护照收 */
+export const AREA_RAID_REST_MS = 3 * 3600000
+
+/** 记录小区被打时间(攻打结算/撤兵时调用, 只保留最近一次) */
+export function markAreaRaid (f, area, now = Date.now()) {
+  if (!area || !f) return false
+  if (!f.areaRaidAt || typeof f.areaRaidAt !== 'object') f.areaRaidAt = {}
+  const t = Number(now) || Date.now()
+  if (t > (Number(f.areaRaidAt[area]) || 0)) { f.areaRaidAt[area] = t; return true }
+  return false
+}
+
+/** 小区是否处于"被打后 3 小时恢复期"(期间无产出) */
+export function areaInRaidRest (f, area, now = Date.now()) {
+  if (!area || !f) return false
+  const last = Number(f.areaRaidAt && f.areaRaidAt[area]) || 0
+  return last > 0 && now >= last && now - last < AREA_RAID_REST_MS
 }
 
 /* ---------- 护城阵 ---------- */

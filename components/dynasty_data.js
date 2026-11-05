@@ -11,7 +11,7 @@
  * ============================================================ */
 import fs from 'fs'
 import { Plugin_Name, Save_Path } from './plugin.js'
-import { getWorld, getLoc, setLoc } from './world_data.js'
+import { getWorld, getLoc, setLoc, getSeal } from './world_data.js'
 import xujing_data from './xujing_data.js'
 import { getBag, consumeBagItem, addItem, saveBag, itemIcon } from './equip_data.js'
 import Wanhun from './wanhun_data.js'
@@ -334,6 +334,10 @@ export function enterDynasty (uid, gid) {
   const cur = getLoc(w, uid)
   if (cur === DYN_KEY) return { ok: false, msg: '你已在【简月王朝】中~' }
   if (cur !== SOUTH_KEY) return { ok: false, msg: '【简月王朝】在南疆以南，须先 #去南疆 再越过界碑进入~' }
+  const seal = getSeal(w)
+  if (seal && seal.region === SOUTH_KEY && Number(seal.until) > Date.now() && String(seal.owner) !== String(uid)) {
+    return { ok: false, msg: '🌊 南疆已被镇海珠封锁，无法越过界碑进入简月王朝。' }
+  }
   const d = getDynasty(gid)
   if (!isUnlocked(d, uid)) {
     const bag = getBag(uid, gid)
@@ -347,11 +351,14 @@ export function enterDynasty (uid, gid) {
   setLoc(w, uid, DYN_KEY)
   return { ok: true, msg: `🗺️ 你展开${itemIcon(MAP_ITEM)}【${MAP_ITEM}】，从南疆越过界碑，踏入凡人王朝【简月王朝】！这里没有灵力，只有凡人的烟火与城郭。` }
 }
-
 /** 离开简月王朝: 回到南疆(来处) */
 export function leaveDynasty (uid, gid) {
   const w = getWorld(gid)
   if (getLoc(w, uid) !== DYN_KEY) return { ok: false, msg: '你并不在简月王朝中~' }
+  const seal = getSeal(w)
+  if (seal && seal.region === SOUTH_KEY && Number(seal.until) > Date.now() && String(seal.owner) !== String(uid)) {
+    return { ok: false, msg: '🌊 南疆已被镇海珠封锁，无法返回南疆。' }
+  }
   setLoc(w, uid, SOUTH_KEY)
   return { ok: true, msg: '🚪 你转身离开简月王朝，回到【南疆】。' }
 }

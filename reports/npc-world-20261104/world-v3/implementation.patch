@@ -1,0 +1,781 @@
+--- a/components/fake_data.js
++++ b/components/fake_data.js
+@@ -1,3 +1,4 @@
++import { sectMemberCapacity, sectOccupancy, canAdmitSectNpc, admitSectNpc } from './sect/capacity.js'
+ import { takeVaultEquipAttrs } from './sect/war_loot.js'
+ import { warActorOwner } from './sect/war_state.js'
+ import { npcCanAct, npcCanThreaten, npcCanBeTarget, resolveNpcEncounter } from './npc_action.js'
+@@ -704,7 +705,8 @@
+   return best
+ }
+ export function addPerson (f, name, sectId, pos, level) {
+-  if (!f.roster[name] && fakeAliveCount(f) >= FAKE_MAX) return null
++  if (!canAdmitSectNpc(f, sectId, name)) return null
++  if (!f.roster[name]?.alive && fakeAliveCount(f) >= FAKE_MAX) return null
+   const path = rollPath()
+   const p = personDefaults({
+     name, sect: sectId, pos, status: 'sect', path, trait: rollTrait(path), act: rollAct(),
+@@ -1292,6 +1294,7 @@
+     const en = op.relations.enemies
+     if (en && en.includes(p.name)) op.relations.enemies = en.filter(n => n !== p.name)
+     if (op.enemyLives) delete op.enemyLives[p.name]
++    if (op.bloodEnemies) delete op.bloodEnemies[p.name]
+   }
+   returnName(f, p.name)
+   /* 死亡/被处决名 1 天禁用: 补员(drawName)避开, 避免同名"复活"观感 */
+@@ -1301,7 +1304,7 @@
+   if (isSect && p.pos === 'dizi') {
+     const n = drawName(f)
+     if (n) {
+-      addPerson(f, n, sid, 'dizi', 1)
++      if (!addPerson(f, n, sid, 'dizi', 1)) { returnName(f, n); return }
+       logEvent(f, 'join', `【入宗】${n} 刚刚踏入修仙界，拜入 ${sectName(f, sid)} 为弟子`, t)
+     }
+   }
+@@ -1385,12 +1388,6 @@
+   for (const x of w) { r -= x.w0; if (r <= 0) return x.p }
+   return w[0].p
+ }
+-/** 是否下杀手: 散修易被灭口(无靠山); 宗门弟子除非穷凶极恶(嗜杀/魔道)否则只抢不杀(杀=结仇) */
+-function shouldKill (f, k, v) {
+-  const evil = k.path === '魔道' || k.trait === '嗜杀'
+-  if (v && v.status === 'sect' && v.sect) return evil && Math.random() < 0.4
+-  return Math.random() < (evil ? 0.5 : 0.3)
+-}
+ /** 击杀宗门弟子 = 与对方全宗结仇(同门/好友记入双方仇人名单, 驱动复仇/仇杀/和解) */
+ function createKillGrudge (f, k, v) {
+   if (!k || !v) return
+@@ -1402,6 +1399,7 @@
+     p.relations ||= {}; p.relations.enemies ||= []
+     if (!p.relations.enemies.includes(k.name)) p.relations.enemies.push(k.name)
+     ;(p.enemyLives ||= {})[k.name] = k.lifeAt ?? k.joinAt ?? 0
++    ;(p.bloodEnemies ||= {})[k.name] = k.lifeAt ?? k.joinAt ?? 0
+   }
+   if (v.sect && f.sects[v.sect] && k.sect && k.sect !== v.sect) {
+     const grudges = f.sects[v.sect].grudges ||= {}
+@@ -1530,10 +1528,7 @@
+     return { type: 'betray', ...evMeta(k), txt: `【叛逃】${k.name} 杀人越货后叛出${oldSectName}，沦为散修` }
+   }
+   const target = otherSect(f, oldSect)
+-  if (target && f.sectMap[target] && f.sectMap[target].zongzhu) {
+-    k.sect = target; k.pos = 'dizi'; k.status = 'sect'
+-    // 任职变化不改变人物实际修为。
+-    f.sectMap[target].dizi.push(k.name)
++  if (target && f.sectMap[target]?.zongzhu && admitSectNpc(f, k, target)) {
+     return { type: 'betray', ...evMeta(k), txt: `【叛逃】${k.name} 杀人越货后叛出${oldSectName}，转投${sectName(f, target)}` }
+   }
+   k.status = 'scatter'; k.sect = null; k.pos = null
+@@ -1547,12 +1542,8 @@
+   killPerson(f, p, `【暴毙】${p.name} 突然暴毙${p.status === 'sect' ? `，${sectName(f, p.sect)}${posCn}之位悬空` : '，客死他乡'}`, t)
+   return null
+ }
+-/** 宗门弟子上限: 20 + 演武场等级×10(伪玩家与玩家宗门一致, 升级演武场扩容) */
+-export function sectCap (f, sid) {
+-  const s = f.sects && f.sects[sid]
+-  const yanwu = (s && s.facilities && s.facilities.yanwu) || 0
+-  return SECT_TARGET + yanwu * 10
+-}
++/** NPC门人容量: min(70, 20 + 演武场等级×10)(伪玩家与玩家宗门一致, 升级演武场扩容) */
++export function sectCap (f, sid) { return sectMemberCapacity(f, sid) }
+ /** 宗门是否超员(在世成员数 > 上限): 超员后弟子更容易离宗/叛宗 */
+ function isSectOver (f, id) {
+   return !!id && sectAlive(f, id).length > sectCap(f, id)
+@@ -1571,38 +1562,24 @@
+   const loy = Number(p.loyalty) >= 0 ? (p.loyalty || 0) : 60
+   return st >= 1.4 || loy < 25
+ }
+-/* 宗门超员结算: 每分钟按超员人数累积概率, 让弟子离宗/叛宗(超员越狠概率越高, 封顶85%); 优先挤走无同宗羁绊者 */
+-function overCapSettle (f, now = Date.now()) {
++/** 旧档或设施降级超员时，优先疏散可自由行动的普通门人；不杀人、不清除资产、不强拆战场。 */
++export function overCapSettle (f, now = Date.now()) {
++  let changed = false
+   for (const id of Object.keys(f.sects || {})) {
+-    const s = f.sects[id]
+-    if (!s) continue
+-    const alive = sectAlive(f, id)
+-    const over = alive.length - sectCap(f, id)
++    const members = sectAlive(f, id)
++    let over = sectOccupancy(f, id) - sectCap(f, id)
+     if (over <= 0) continue
+-    const p = Math.min(0.85, 0.15 * over)
+-    if (Math.random() >= p) continue
+-    /* 超员挤走只挤弟子/执事, 管理层(宗主/太上/副宗)不会被挤走 */
+-    let cands = alive.filter(x => !x.servantOf && !isInSectMine(f, x.name) && x.pos !== 'zongzhu' && x.pos !== 'taishang' && x.pos !== 'fuzong' && !hasBondInSect(f, x))
+-    if (!cands.length) cands = alive.filter(x => !x.servantOf && !isInSectMine(f, x.name) && x.pos !== 'zongzhu' && x.pos !== 'taishang' && x.pos !== 'fuzong')
+-    if (!cands.length) continue
+-    const p2 = cands[Math.floor(Math.random() * cands.length)]
+-    const old = sectName(f, id)
+-    removeFromSectMap(f, id, p2.name)
+-    /* 性格恶劣/概率 → 叛宗(可能转投他宗); 否则离宗 */
+-    const betray = p2.trait === '好斗' || p2.trait === '嗜杀' || Math.random() < 0.4
+-    if (betray && Math.random() < 0.6) {
+-      const target = otherSect(f, id)
+-      if (target && f.sectMap[target] && f.sectMap[target].zongzhu) {
+-        p2.sect = target; p2.pos = 'dizi'; p2.status = 'sect'
+-        p2.level = clamp(p2.level, POS.dizi.band[0], POS.dizi.band[1])
+-        f.sectMap[target].dizi.push(p2.name)
+-        logEvent(f, 'betray', `【叛宗】${p2.name} 因${old}人满为患，叛出并转投${sectName(f, target)}`, now, evMeta(p2))
+-        continue
+-      }
+-    }
+-    p2.status = 'scatter'; p2.sect = null; p2.pos = null
+-    logEvent(f, betray ? 'betray' : 'leave', betray ? `【叛宗】${p2.name} 因${old}人满为患，叛出宗门沦为散修` : `【离宗】${p2.name} 因${old}人满为患，收拾行囊离开`, now, evMeta(p2))
+-  }
++    const candidates = members.filter(p => npcCanAct(f, p) && !['zongzhu', 'taishang', 'fuzong'].includes(p.pos))
++      .sort((a, b) => Number(hasBondInSect(f, a)) - Number(hasBondInSect(f, b)) || (a.loyalty || 0) - (b.loyalty || 0) || (b.joinAt || 0) - (a.joinAt || 0))
++    for (const p of candidates) {
++      if (over <= 0) break
++      removeFromSectMap(f, id, p.name)
++      p.sect = null; p.pos = null; p.status = 'scatter'
++      logEvent(f, 'leave', `【离宗】${sectName(f, id)} 门人超出容量，${p.name} 离宗另寻去处`, now, { who: [p.name], sect: id })
++      over--; changed = true
++    }
++  }
++  return changed
+ }
+ /* 5.叛逃(离宗→散修/转宗; 有同宗羁绊者叛逃概率大降) */
+ function genBetray (f, t) {
+@@ -1626,10 +1603,7 @@
+     return { type: 'betray', ...evMeta(p), txt: `【叛逃】${p.name} 与宗门不和，叛出${old}，沦为散修` }
+   }
+   const target = otherSect(f, sid)
+-  if (target && f.sectMap[target].zongzhu) {
+-    p.sect = target; p.pos = 'dizi'; p.status = 'sect'
+-    // 任职变化不改变人物实际修为。
+-    f.sectMap[target].dizi.push(p.name)
++  if (target && f.sectMap[target]?.zongzhu && admitSectNpc(f, p, target)) {
+     return { type: 'betray', ...evMeta(p), txt: `【叛逃】${p.name} 叛出${old}，转投${sectName(f, target)}` }
+   }
+   p.status = 'scatter'; p.sect = null; p.pos = null
+@@ -1756,17 +1730,13 @@
+   const joinTxt = []
+   for (const nm of mates) {
+     const q = f.roster[nm]
+-    q.sect = id; q.pos = 'dizi'; q.status = 'sect'
+-    // 任职变化不改变人物实际修为。
+-    f.sectMap[id].dizi.push(q.name)
++    if (!admitSectNpc(f, q, id)) continue
+     joinTxt.push(q.name)
+   }
+   /* 再拉若干投缘散修凑足门庭 */
+   const extra = scatters(f).filter(x => x.name !== p.name && !mates.has(x.name)).slice(0, rand([1, 3]))
+   for (const q of extra) {
+-    q.sect = id; q.pos = 'dizi'; q.status = 'sect'
+-    // 任职变化不改变人物实际修为。
+-    f.sectMap[id].dizi.push(q.name)
++    if (!admitSectNpc(f, q, id)) continue
+     joinTxt.push(q.name)
+   }
+   return { type: 'rebuild', ...evMeta(p), who: [p.name, ...joinTxt],
+@@ -1774,7 +1744,7 @@
+ }
+ /* 8.收养遗孤(新弟子入宗) */
+ function genAdopt (f, t) {
+-  const ids = Object.keys(f.sects).filter(id => f.sectMap[id] && f.sectMap[id].zongzhu && sectAlive(f, id).length < sectCap(f, id))
++  const ids = Object.keys(f.sects).filter(id => f.sectMap[id] && f.sectMap[id].zongzhu && canAdmitSectNpc(f, id))
+   if (!ids.length) return null
+   const target = pick(ids)
+   const n = drawName(f)
+@@ -4125,16 +4095,16 @@
+ export function fakeJoinSect (f, name, sid) {
+   const s = f.sects[sid]
+   if (!s || s.wipeAt) return null
+-  if (sectAlive(f, sid).length >= sectCap(f, sid)) return null
++  if (!canAdmitSectNpc(f, sid, name)) return null
+   const np = f.roster[name]
+   if (np && np.alive && np.sect) return null // 已有宗门
+   if (np && np.servantOf) return null // 已是玩家仆从(收服), 不可再入宗
+   if (np && np.alive && np.status === 'scatter') {
+-    np.sect = sid; np.pos = 'dizi'; np.status = 'sect'
++    if (!admitSectNpc(f, np, sid)) return null
+     /* 保留修为: 高手入宗仍是高手(不再压到弟子带1~12, 避免宗门被新招低修弟子拉低; 修为高会被AI宗主重用) */
+     if (f.sectMap[sid] && !f.sectMap[sid].dizi.includes(name)) f.sectMap[sid].dizi.push(name)
+   } else {
+-    addPerson(f, name, sid, 'dizi', 1)
++    if (!addPerson(f, name, sid, 'dizi', 1)) return null
+   }
+   return { type: 'join', who: [name], sect: sid, txt: `【入宗】${name} 拜入 ${s.name} 为弟子` }
+ }
+@@ -4267,7 +4237,7 @@
+   const cand = Object.keys(f.sects).filter(id2 => {
+     const s2 = f.sects[id2]
+     if (!s2 || s2.wipeAt) return false
+-    if (sectAlive(f, id2).length >= sectCap(f, id2)) return false
++    if (!canAdmitSectNpc(f, id2)) return false
+     if (enemies.size && sectAlive(f, id2).some(x => enemies.has(x.name))) return false // 宗门里有仇人, 不想进
+     /* 灭门仇家玩家在宗内 → 不愿入 */
+     if (p && p.vendetta && p.vendetta.culprit && p.vendetta.culprit.length) {
+@@ -4327,7 +4297,7 @@
+   const open = Object.keys(f.sects).filter(id => {
+     const s = f.sects[id]
+     const sm = f.sectMap[id]
+-    return s && !(s.wipeAt > 0) && sm && sm.zongzhu && sectAlive(f, id).length < sectCap(f, id)
++    return s && !(s.wipeAt > 0) && sm && sm.zongzhu && canAdmitSectNpc(f, id)
+   })
+   if (!open.length) {
+     /* 所有宗门都满员/无在世宗门: 同样入世为散修 */
+@@ -4709,6 +4679,7 @@
+       f.lastHistoryCleanup = now
+       if (report.changed) console.log(`[天下大事]历史索引清理: ${gid} 删除${report.removed}项, 过期状态${report.expired}项`)
+     }
++    overCapSettle(f, now)
+     try { fakePetTick(f, gid, now) } catch (err) { console.log('[灵兽]伪玩家推进异常:', err && err.stack) }
+     /* 宗门战争唯一由 sectTick 推进；旧版 f.attacks 已迁移并不再结算。 */
+     try {
+@@ -4717,7 +4688,7 @@
+     } catch (err) { console.log('[宗门系统]推进异常:', err && err.stack) }
+     /* 每分钟: 总部完好的空缺继任；确无门人时自然消亡 */
+     try { rebuildSettle(f) } catch (err) { console.log('[宗门系统]灭门检查异常:', err && err.stack) }
+-    /* 每分钟: 宗门超员→弟子离宗/叛宗概率大增 */
++    /* 每分钟: 容量变化后疏散可自由行动的超额门人 */
+     try { overCapSettle(f, now) } catch (err) { console.log('[宗门系统]超员结算异常:', err && err.stack) }
+     /* 每分钟: 藏宝阁天牢结算(洗劫藏宝阁被抓的伪玩家刑满释放, 记【出狱】) */
+     try { raidJailSettle(f, now) } catch (err) { console.log('[天下大事]藏宝阁天牢结算异常:', err && err.stack) }
+--- a/components/sect/captive.js
++++ b/components/sect/captive.js
+@@ -1,9 +1,11 @@
++import { hasBloodFeud, temperCaptiveWeights } from './survival.js'
++import { canAdmitSectNpc, admitSectNpc, sectOccupancy } from './capacity.js'
+ import { addWarKarma } from './war_journal.js'
+ import { defenderOf, warReceipt } from './war_state.js'
+ import { extractWarLoot, depositWarLoot } from './war_loot.js'
+ import { withImmediateSaveContext } from '../deferred_save.js'
+ /* 由 sect_system.js 拆分自动生成: captive.js */
+-import { getFake, saveFake, sectName, sectAlive, sectCap, removeFromSectMap, killPerson, logEvent, getNick, POS } from '../fake_data.js'
++import { getFake, saveFake, sectName, sectAlive, sectCap, removeFromSectMap, killPerson, logEvent, getNick } from '../fake_data.js'
+ import { addItem, addItemToBag, getBag, saveBag, isBound, MATERIAL_TPL, ITEM_TPL, EQUIP_TPL, itemIcon } from '../equip_data.js'
+ import xujing_data from '../xujing_data.js'
+ import { playerMoney, applyInjury, rand, clamp, atkLog, getVault, ensureCapSub, CFG, posCnOf, playerPower } from './utils.js'
+@@ -136,11 +138,11 @@
+   const sname = winSect && f.sects[winSect] ? sectName(f, winSect) : (atk.rogueName || '散修')
+   const defSect = defenderOf(f, atk)
+   const coreNames = disp.core.map(x => x.name)
+-  const canRecruit = !!winSect && !!f.sects[winSect] && !f.sects[winSect].wipeAt && sectAlive(f, winSect).length < sectCap(f, winSect)
+   const canJail = !!winSect && !!f.sects[winSect] // 有宗门胜方才能关天牢/送矿山
+   for (const n of [...list]) {
+     const p = f.roster[n]
+     if (!p || !p.alive) { removeCaptivesFromPools(atk, [n], []); continue }
++    const canRecruit = !!winSect && canAdmitSectNpc(f, winSect, n)
+     const r = p.relations || {}
+     /* 羁绊: 胜方核心成员里有其 道侣/师父/徒弟/知己/挚友/手足/亲族 */
+     const bonded = coreNames.some(cn => cn === r.master || cn === r.spouse ||
+@@ -154,7 +156,7 @@
+     const danger = p.trait === '嗜杀' ? 0.25 : (p.trait === '好斗' ? 0.12 : 0)
+     const mild = p.trait === '善良' ? 0.18 : (p.trait === '平和' ? 0.1 : 0)
+     /* 各处置倾向(动态加权): 有羁绊大放走, 有仇大处决, 残暴多杀/多关押, 仁慈多放, 贪婪多搜刮/多送矿 */
+-    const w = {
++    let w = {
+       free: clamp(0.15 + disp.mercy + (bonded ? 0.6 : 0) + mild - disp.cruelty * 0.5 - (hated ? 0.15 : 0), 0.01, 0.95),
+       robFree: clamp(0.15 + disp.greed * 0.6 + disp.mercy * 0.3 - disp.cruelty * 0.3 - (hated ? 0.1 : 0), 0.01, 0.9),
+       recruit: canRecruit ? clamp(0.06 + disp.mercy * 0.25 + (bonded ? 0.55 : 0) + mild - (hated ? 0.3 : 0), 0.01, 0.8) : 0,
+@@ -165,6 +167,7 @@
+       /* 送矿山: 贪婪/残暴/危险俘虏倾向押去挖矿(安全奴役); 仁慈/羁绊少送 */
+       mine: canJail ? clamp(0.05 + disp.greed * 0.5 + disp.cruelty * 0.2 + danger * 0.5 - disp.mercy * 0.4 - (bonded ? 0.4 : 0), 0.01, 0.7) : 0
+     }
++    w = temperCaptiveWeights(w, { bloodFeud: disp.core.some(c => hasBloodFeud(c, p) || hasBloodFeud(p, c)), cruelty: disp.cruelty })
+     const total = w.free + w.robFree + w.recruit + w.robKill + w.kill + w.jail + w.mine
+     let rr = Math.random() * total
+     let act = 'free'
+@@ -186,7 +189,7 @@
+       /* 收编: 叛离原宗拜入胜方, 忠诚重头再来 */
+       const oldSect = p.sect
+       if (oldSect) removeFromSectMap(f, oldSect, n)
+-      p.sect = winSect; p.pos = 'dizi'; p.status = 'sect'
++      if (!admitSectNpc(f, p, winSect)) { logEvent(f, 'captive', `【释放】${sname} 门人已满，释放 ${n}`, now, { who: [n] }); removeCaptivesFromPools(atk, [n], []); continue }
+       // 收编任职不改变NPC实际修为。
+       p.joinAt = now
+       if (f.sectMap[winSect]) { if (!f.sectMap[winSect].dizi) f.sectMap[winSect].dizi = []; if (!f.sectMap[winSect].dizi.includes(n)) f.sectMap[winSect].dizi.push(n) }
+@@ -815,8 +818,8 @@
+   if (act === '收编') {
+     if (!cf.length && cp.length) return { ok: false, msg: `❌ 收编失败：当前只有 ${cp.length} 名玩家战俘，玩家不能收编；请使用全杀、全放、搜刮再放或关天牢` }
+     if (!cf.length) return { ok: false, msg: '❌ 收编失败：当前批次的伪玩家战俘已死亡或失联，失效记录已清理' }
+-    if (cf.length && sectAlive(f, atkSect).length >= sectCap(f, atkSect)) {
+-      return { ok: false, msg: `宗门已满员（${sectAlive(f, atkSect).length}/${sectCap(f, atkSect)}），无法再收编战俘` }
++    if (cf.length && sectOccupancy(f, atkSect) >= sectCap(f, atkSect)) {
++      return { ok: false, msg: `宗门已满员（${sectOccupancy(f, atkSect)}/${sectCap(f, atkSect)}），无法再收编战俘` }
+     }
+     if (cp.length) recruitRefused.push(`玩家战俘不可收编（${cp.map(u => (f.players[u] && f.players[u].name) || u).join('、')}，请用 全杀/搜刮再杀/全放/搜刮再放/关天牢 处置）`)
+     for (const n of [...cf]) {
+@@ -827,12 +830,12 @@
+         continue
+       }
+       if (p.servantOf) { recruitRefused.push(`${n}（已有主人，不可收编入宗）`); continue }
+-      if (sectAlive(f, atkSect).length >= sectCap(f, atkSect)) { recruitRefused.push(`${n}（宗门已满员，未能收编）`); break }
++      if (sectOccupancy(f, atkSect) >= sectCap(f, atkSect)) { recruitRefused.push(`${n}（宗门已满员，未能收编）`); break }
+       if (Math.random() < recruitRateOf(f, p)) {
+         /* 收编成功: 叛离原宗拜入本宗, 忠诚重头再来 */
+         const oldSect = p.sect
+         if (oldSect) removeFromSectMap(f, oldSect, n)
+-        p.sect = atkSect; p.pos = 'dizi'; p.status = 'sect'
++        if (!admitSectNpc(f, p, atkSect)) { recruitRefused.push(`${n}（宗门已满员）`); continue }
+         // 收编任职不改变NPC实际修为。
+         p.joinAt = now
+         if (f.sectMap[atkSect]) { if (!f.sectMap[atkSect].dizi) f.sectMap[atkSect].dizi = []; if (!f.sectMap[atkSect].dizi.includes(n)) f.sectMap[atkSect].dizi.push(n) }
+--- a/components/sect/hr.js
++++ b/components/sect/hr.js
+@@ -1,3 +1,4 @@
++import { admitSectNpc, sectOccupancy } from './capacity.js'
+ /* 由 sect_system.js 拆分自动生成: hr.js */
+ import fs from 'fs'
+ import { Save_Path } from '../plugin.js'
+@@ -82,6 +83,7 @@
+   if (!s || s.wipeAt) return { ok: false, msg: '该宗门已覆灭，无法加入' }
+   const left = playerLeaveBanLeft(f, uid, sid, now)
+   if (left > 0) return { ok: false, msg: `你退出【${s.name}】后仍在禁入期，还需 ${Math.ceil(left / 86400000)} 天；可立即加入其他宗门` }
++  if (sectOccupancy(f, sid) >= sectCap(f, sid)) return { ok: false, msg: '宗门已满员，无法加入' }
+   if (!f.players) f.players = {}
+   f.players[uid] = { name: name || uid, sect: sid, pos: 'dizi', joinAt: now, contribution: 0 }
+   logEvent(f, 'join', `【入宗】🌙 玩家 ${name || uid} 拜入【${s.name}】为弟子`, now, { major: true })
+@@ -356,7 +358,7 @@
+   const remain = list.filter(x => !matched.includes(x))
+   const now = Date.now()
+   if (accept) {
+-    const cap = Math.max(0, sectCap(f, sid) - sectAlive(f, sid).length)
++    const cap = Math.max(0, sectCap(f, sid) - sectOccupancy(f, sid))
+     const accepted = cap > 0 ? names.slice(0, cap) : []
+     if (!accepted.length) {
+       reqs[sid] = remain
+@@ -368,7 +370,7 @@
+       if (np && np.alive && np.sect) continue // 已被其他宗门收走则跳过
+       if (np && np.alive && np.status === 'scatter') {
+         /* 散修转正: 直接收入本宗为弟子 */
+-        np.sect = sid; np.pos = 'dizi'; np.status = 'sect'
++        if (!admitSectNpc(f, np, sid)) continue
+         // 收编任职不改变NPC实际修为。
+         if (f.sectMap[sid] && !f.sectMap[sid].dizi.includes(n)) f.sectMap[sid].dizi.push(n)
+       } else {
+@@ -419,7 +421,7 @@
+   if (!arg) return { ok: false, msg: '用法：#拉人入宗 [伪玩家名]（散修或其它宗门弟子均可招揽）' }
+   const s = f.sects[sid]
+   if (!s) return { ok: false, msg: '宗门不存在' }
+-  if (sectAlive(f, sid).length >= sectCap(f, sid)) return { ok: false, msg: `【${s.name}】已满员（${sectCap(f, sid)}人），无法招人` }
++  if (sectOccupancy(f, sid) >= sectCap(f, sid)) return { ok: false, msg: `【${s.name}】已满员（${sectCap(f, sid)}人），无法招人` }
+   const now = Date.now()
+   const sc = Object.values(f.roster).filter(p => p.alive && p.status === 'scatter')
+   const exact = sc.filter(p => p.name === arg)
+@@ -452,7 +454,7 @@
+   if (!arg) return { ok: false, msg: '用法：#挖角 [伪玩家名]（挖其他宗门弟子；招散修用 #拉人入宗）' }
+   const s = f.sects[sid]
+   if (!s) return { ok: false, msg: '宗门不存在' }
+-  if (sectAlive(f, sid).length >= sectCap(f, sid)) return { ok: false, msg: `【${s.name}】已满员（${sectCap(f, sid)}人），无法收人` }
++  if (sectOccupancy(f, sid) >= sectCap(f, sid)) return { ok: false, msg: `【${s.name}】已满员（${sectCap(f, sid)}人），无法收人` }
+   const now = Date.now()
+   /* 目标: 其他宗门在世成员(宗主/太上不挖: 一宗之魂挖不动; 副宗位高但非根基, 忠诚极低才可能被挖——凡事不绝对), 自家不挖 */
+   const all = Object.values(f.roster).filter(p => p.alive && p.status === 'sect' && p.sect !== sid && p.pos !== 'zongzhu' && p.pos !== 'taishang')
+@@ -498,7 +500,7 @@
+   }
+   /* 成功: 脱离旧宗入本宗为弟子(忠诚减半重新开始) */
+   removeFromSectMap(f, oldSid, p.name)
+-  p.sect = sid; p.pos = 'dizi'; p.status = 'sect'
++  if (!admitSectNpc(f, p, sid)) return { ok: false, msg: '宗门已满员，无法接纳' }
+   // 收编任职不改变NPC实际修为。
+   p.joinAt = now
+   p.loyalty = Math.max(10, Math.round(loy * 0.5))
+--- a/components/sect/war.js
++++ b/components/sect/war.js
+@@ -1,11 +1,12 @@
+-import { assessSectDevelopment } from './ai_strategy.js'
++import { hasBloodFeud, defeatDeathRate } from './survival.js'
++import { assessSectDevelopment, commonTerritoryThreat, warIncludesSect } from './ai_strategy.js'
+ import { hasTruce, normalizeDiplomacy, setDiplomacyRelation, forgetSectDiplomacy } from './diplomacy_state.js'
+ import { withImmediateSaveContext } from '../deferred_save.js'
+ import { payWarPlayer, queueWarEffect, flushWarEffects } from './war_journal.js'
+ import { hasWarCaptives, warReceipt, warRoll, warActorAvailable, warActorOwner, defenderOf, initWarState, reconcileWarActors, recordWarExit, creditWarRound, syncWarClock } from './war_state.js'
+ import { planWarDeployment, commitWarDeployment, releaseWarFake, applyWarWithdrawals, withHomeReserve } from './war_roster.js'
+ /* 由 sect_system.js 拆分自动生成: war.js */
+-import { sectName, sectIdByName, sectAlive, sectPower, personPower, logEvent, saveFake, removeFromSectMap, killPerson, evMeta, REBUILD_MIN, createVendetta, fakeCombatPill, sectCap, areaCount, drawName, getNick, sectVitality, isInSectJail, isInRaidJail, isInSectMine } from '../fake_data.js'
++import { sectName, sectIdByName, sectAlive, sectPower, personPower, logEvent, saveFake, removeFromSectMap, killPerson, evMeta, createVendetta, fakeCombatPill, areaCount, getNick, sectVitality, isInSectJail, isInRaidJail, isInSectMine } from '../fake_data.js'
+ import { getWorld, saveWorld, regionNameOf, REGIONS, DEFAULT_REGION, getLoc } from '../world_data.js'
+ import { textToImg } from '../common-lib/reply-img.js'
+ import xujing_data from '../xujing_data.js'
+@@ -291,6 +292,37 @@
+   commitWarDeployment(f, sid, atk, 'atk', plan)
+   initWarState(f, atk)
+   return { ok: true }
++}
++
++/** 霸主竞争仅使用AI盟友实际同意的可派门人，不替真人报名。 */
++export function planAiCoalition (f, gid, sid, target, region, now = Date.now()) {
++  if (!target || commonTerritoryThreat(f, sid) !== target) return []
++  const plans = []
++  for (const ally of f.sects[sid]?.allies || []) {
++    const s = f.sects[ally]
++    if (!s || s.owner || s.wipeAt || (s.allies || []).includes(target) || hasTruce(f, ally, target, now)) continue
++    if ((s.atkCdUntil || 0) > now) continue
++    const draft = { ...s }
++    if (!assessSectDevelopment({ ...f, sects: { ...f.sects, [ally]: draft } }, ally, now).ready) continue
++    const tai = new Set(f.sectMap[ally]?.taishang || [])
++    const available = sectAlive(f, ally).filter(p => !tai.has(p.name) && canFakeFight(f, p.name) && warActorAvailable(f, 'fake', p.name) && willFight(p, false, f))
++    const reserve = CFG.ATK_BASE + sectAlive(f, ally).length * CFG.ATK_PER
++    const budget = Math.max(0, (getVault(f, ally).stones || 0) - reserve)
++    const plan = planWarDeployment(f, gid, ally, region, withHomeReserve(f, ally, available), 0, null, budget)
++    if (plan.units.length) plans.push({ sid: ally, plan })
++  }
++  return plans
++}
++
++function coalitionPlanValid (f, gid, sid, target, region, support, now) {
++  if (!support || commonTerritoryThreat(f, sid) !== target || !(f.sects[sid]?.allies || []).includes(support.sid)) return false
++  const s = f.sects[support.sid]
++  if (!s || s.owner || s.wipeAt || (s.allies || []).includes(target) || hasTruce(f, support.sid, target, now)) return false
++  if ((s.atkCdUntil || 0) > now || (f.sectAttacks || []).some(w => w.phase !== 'done' && warIncludesSect(f, w, support.sid))) return false
++  const people = support.plan.units.map(u => f.roster[u.name]).filter(p => p && p.sect === support.sid)
++  const reserve = CFG.ATK_BASE + sectAlive(f, support.sid).length * CFG.ATK_PER
++  const fresh = planWarDeployment(f, gid, support.sid, region, withHomeReserve(f, support.sid, people), 0, null, Math.max(0, getVault(f, support.sid).stones - reserve))
++  return fresh.units.length === support.plan.units.length && fresh.cost === support.plan.cost
+ }
+ 
+ export async function startSectAttack (f, gid, atkSect, rawTarget, by = 'player', options = {}) {
+@@ -326,11 +358,14 @@
+   const plan = planWarDeployment(f, gid, atkSect, region, willing, count, null, vault.stones - cost)
+   if (!plan.units.length) return { ok: false, msg: '无法发起攻打：没有可派门人，或预算/封海限制无法调派；未扣费、未宣战' }
+   const kind = ATK_KINDS.find(k => k.key === options.tactic) || pickKind()
++  const supportPlans = by === 'ai' ? (options.coalitionPlans || []) : []
++  if (new Set(supportPlans.map(x => x.sid)).size !== supportPlans.length || supportPlans.some(x => !coalitionPlanValid(f, gid, atkSect, defSect, region, x, now))) return { ok: false, msg: '盟友兵力或储备已变化，暂缓联合出兵；未扣费' }
+   if (by === 'ai' && defSect) {
+-    const attackPower = deploymentPower(f, atkSect, plan.units.map(u => f.roster[u.name]), [], { bonus: kind.key === '两宗合围' ? 0 : kind.bonus })
++    const attackPower = deploymentPower(f, atkSect, [...plan.units, ...supportPlans.flatMap(x => x.plan.units)].map(u => f.roster[u.name]), [], { bonus: kind.key === '两宗合围' ? 0 : kind.bonus })
+     const defensePower = await aiTargetDefensePower(f, gid, defSect, region, targetType, target)
+     if (attackPower < defensePower * aiTargetMinAttackRatio(f, atkSect, defSect)) return { ok: false, msg: '实际可派兵力不足，暂缓出征；未扣费、未宣战' }
+   }
++  if (supportPlans.some(x => !coalitionPlanValid(f, gid, atkSect, defSect, region, x, Date.now()))) return { ok: false, msg: '盟友状态已变化；未扣费' }
+   const checkedPlan = planWarDeployment(f, gid, atkSect, region, plan.units.map(u => f.roster[u.name]).filter(Boolean), count, null, vault.stones - cost)
+   if (checkedPlan.units.length !== plan.units.length || checkedPlan.cost !== plan.cost || hasTruce(f, atkSect, defSect) || (targetType === 'area' ? (f.areas[target] || null) !== defSect : !f.sects[defSect])) return { ok: false, msg: '兵力、预算或目标状态已变化，请重新选择；未扣费' }
+   const atk = {
+@@ -345,6 +380,11 @@
+   // 至此才提交：失败的宣战不触发守方调兵、敌对关系或丹药消耗。
+   vault.stones -= cost
+   commitWarDeployment(f, atkSect, atk, 'atk', plan)
++  for (const support of supportPlans) {
++    commitWarDeployment(f, support.sid, atk, 'atk', support.plan)
++    setDiplomacyRelation(f, support.sid, defSect, 'hostile', now, '联合出兵')
++    f.sects[support.sid].atkCdUntil = now + CFG.FAKE_ATK_CD * 60000
++  }
+   if (defSect) {
+     setDiplomacyRelation(f, atkSect, defSect, 'hostile', now, '攻打')
+   }
+@@ -357,6 +397,10 @@
+     if (atk.defended) defendRespond(f, atk)
+   }
+   await recordCoalition(f, gid, atk, atkSect)
++  for (const support of supportPlans) {
++    await recordCoalition(f, gid, atk, support.sid)
++    atkLog(atk, `【联合出兵】${sectName(f, support.sid)} 派出 ${support.plan.units.length} 人，调兵费 ${support.plan.cost} 灵石`, now)
++  }
+   atkLog(atk, `【宣战】${sectName(f, atkSect)} 向${warTargetTxt(f, atk)}宣战；出征 ${plan.units.length} 人，发起费 ${cost}、调兵费 ${plan.cost}`, now)
+   logEvent(f, 'attack', `【宣战】${sectName(f, atkSect)} 向${warTargetTxt(f, atk)}宣战（战场 #${atk.id}）`, now)
+   saveFake(f, gid)
+@@ -1270,7 +1314,7 @@
+ /**
+  * 败方战死判定(每场结算统一判定, 不再每轮死人):
+  *  - 基础死亡率 DEATH_BASE(5%), 境界越高越难死(68级≈0.5%)
+- *  - 胜方战力≥败方×DEATH_CRUSH_RATIO(碾压) 或 攻守互为仇人 → 提到 DEATH_CRUSH_RATE(50%)
++ *  - 碾压按基础率×2.5，明确血仇×3；普通争执不触发50%处决式战死
+  *  - 城破(isCityFall)未死者 → 远遁(逃跑, 仍在宗门, 只记事件)
+  * @param excludeFakes 已被俘虏的成员(打宗门时排除, 由胜方处置)
+  */
+@@ -1285,19 +1329,8 @@
+   const fled = []
+   const loseName = sectName(f, loseSect)
+   for (const p of loseMembers) {
+-    /* 境界越高越难死: 1级≈5%, 68级≈0.5% */
+-    let rate = CFG.DEATH_BASE * (1 - 0.9 * (Number(p.level) || 0) / 68)
+-    rate = Math.max(0.5, rate)
+-    if (crush) {
+-      rate = CFG.DEATH_CRUSH_RATE
+-    } else {
+-      const pr = p.relations || {}
+-      const hasEnemy = winMembers.some(w => {
+-        const wr = w.relations || {}
+-        return (wr.enemies || []).includes(p.name) || (pr.enemies || []).includes(w.name)
+-      })
+-      if (hasEnemy) rate = CFG.DEATH_CRUSH_RATE
+-    }
++    const bloodFeud = winMembers.some(w => hasBloodFeud(p, w) || hasBloodFeud(w, p))
++    const rate = defeatDeathRate(p.level, { crush, bloodFeud, base: CFG.DEATH_BASE, ceiling: CFG.DEATH_CRUSH_RATE })
+     if (warRoll(atk, `death:${p.name}`) * 100 < rate) dead.push(p)
+     else if (isCityFall) fled.push(p)
+   }
+@@ -2308,11 +2341,14 @@
+     const warK = (zzAtk && (zzAtk.trait === '好斗' || zzAtk.trait === '嗜杀' || zzAtk.path === '魔道')) ? 1.15 : (zzAtk && (zzAtk.trait === '平和' || zzAtk.trait === '善良')) ? 0.8 : 1
+     const smart = []
+     for (const c of choices) {
+-      const sc = await scoreAiTarget(f, gid, atk, c, sReg, myPw, warK, now)
++      const targetId = c.tt === 'sect' ? sectIdByName(f, c.t) : f.areas?.[c.t]
++      const coalitionPlans = planAiCoalition(f, gid, atk, targetId, c.region, now)
++      const coalitionPower = coalitionPlans.reduce((sum, x) => sum + deploymentPower(f, atk, x.plan.units.map(u => f.roster[u.name])), 0)
++      const sc = await scoreAiTarget(f, gid, atk, c, sReg, myPw + coalitionPower, warK, now)
+       if (sc <= 0) continue
+       const tSect = c.tt === 'sect' ? sectIdByName(f, c.t) : (f.areas ? f.areas[c.t] : null)
+       const targetPw = tSect ? await aiTargetDefensePower(f, gid, tSect, c.region, c.tt, c.t) : 0
+-      smart.push({ ...c, score: Math.round(sc), targetPw })
++      smart.push({ ...c, coalitionPlans, score: Math.round(sc), targetPw })
+     }
+     if (!smart.length) {
+       /* 破釜沉舟: 好斗/嗜杀/魔道宗主宗门若无稳赢目标, 仍会挑最弱目标一战(避免江湖僵死); 平和/善良保持克制 */
+@@ -2376,7 +2412,7 @@
+     let rr2 = Math.random() * total
+     let ch = cand[0]
+     for (const c of cand) { rr2 -= c.score; if (rr2 <= 0) { ch = c; break } }
+-    const r = await startSectAttack(f, gid, atk, ch.t, 'ai')
++    const r = await startSectAttack(f, gid, atk, ch.t, 'ai', { coalitionPlans: ch.coalitionPlans || [] })
+     if (r.ok) {
+       started++
+       /* 本轮后续宗门避开刚发起的目标与被围宗门(atkRec.target 才是 sect 的 id / area 名) */
+--- a/components/sect/diplomacy.js
++++ b/components/sect/diplomacy.js
+@@ -1,3 +1,4 @@
++import { commonTerritoryThreat } from './ai_strategy.js'
+ import { diplomacyPair, setDiplomacyRelation, normalizeDiplomacy, hasTruce, recordDiplomacyAid } from './diplomacy_state.js'
+ import { defenderOf, initWarState, warActorAvailable } from './war_state.js'
+ import { planWarDeployment, commitWarDeployment, releaseWarFake, withHomeReserve } from './war_roster.js'
+@@ -135,6 +136,8 @@
+       const memory = diplomacyPair(f, a, b, now)
+       want += memory.trust / 500 - memory.grievance / 500 - ((f.sects[a].grudges?.[b] || 0) + (f.sects[b].grudges?.[a] || 0)) / 500
+       if ((f.sects[a].enemies || []).some(id => (f.sects[b].enemies || []).includes(id))) want += 0.15
++      const threat = commonTerritoryThreat(f, a, b)
++      if (threat && !(f.sects[a].allies || []).includes(threat) && !(f.sects[b].allies || []).includes(threat)) want += 0.3
+       if (za && zb && za.path === zb.path) want += 0.15
+       if (regionOfS(a) && regionOfS(a) === regionOfS(b)) want += 0.15
+       const pa = sectPower(f, a), pb = sectPower(f, b)
+--- a/components/sect/ai_strategy.js
++++ b/components/sect/ai_strategy.js
+@@ -1,5 +1,14 @@
+ import { npcCanAct } from '../npc_action.js'
+ import { defenderOf } from './war_state.js'
++
++export function warIncludesSect (f, war, sid) { return war.atkSect === sid || defenderOf(f, war) === sid || !!war.coalition?.[sid] }
++
++export function commonTerritoryThreat (f, a, b = null) {
++  const counts = {}
++  for (const sid of Object.values(f.areas || {})) counts[sid] = (counts[sid] || 0) + 1
++  const threshold = Math.max(8, Math.ceil(Object.keys(f.areas || {}).length * 0.4))
++  return Object.keys(counts).find(id => id !== a && id !== b && counts[id] >= threshold && counts[id] > (counts[a] || 0) && (!b || counts[id] > (counts[b] || 0))) || null
++}
+ 
+ const HOUR = 3600000
+ export const AI_WAR_REST = { win: 4 * HOUR, lose: 8 * HOUR, abort: 2 * HOUR, peace: 6 * HOUR }
+@@ -9,13 +18,14 @@
+   const s = f.sects?.[sid]
+   if (!s || s.owner) return { ready: false, phase: 'player' }
+   const members = Object.values(f.roster || {}).filter(p => p.alive && p.sect === sid && p.status === 'sect')
+-  const active = (f.sectAttacks || []).some(w => w.phase !== 'done' && (w.atkSect === sid || defenderOf(f, w) === sid))
++  const active = (f.sectAttacks || []).some(w => w.phase !== 'done' && warIncludesSect(f, w, sid))
+   let phase = 'expand', reason = '人员与积蓄允许寻找扩张机会', until = 0
+-  const latest = (f.sectAttacks || []).filter(w => w.phase === 'done' && (w.atkSect === sid || defenderOf(f, w) === sid))
++  const latest = (f.sectAttacks || []).filter(w => w.phase === 'done' && warIncludesSect(f, w, sid))
+     .sort((a, b) => (b.endAt || 0) - (a.endAt || 0))[0]
+   if (latest) {
+-    const ownWin = latest.atkSect === sid ? latest.result === 'win' : latest.result === 'lose'
+-    const ownLose = latest.atkSect === sid ? latest.result === 'lose' : latest.result === 'win'
++    const attacking = latest.atkSect === sid || !!latest.coalition?.[sid]
++    const ownWin = attacking ? latest.result === 'win' : latest.result === 'lose'
++    const ownLose = attacking ? latest.result === 'lose' : latest.result === 'win'
+     until = (latest.endAt || 0) + (ownWin ? AI_WAR_REST.win : ownLose ? AI_WAR_REST.lose : AI_WAR_REST[latest.result] || 0)
+   }
+   const available = members.filter(p => npcCanAct(f, p, now))
+--- a/components/sect/utils.js
++++ b/components/sect/utils.js
+@@ -74,7 +74,7 @@
+   PERSON_BASE: 600, REALM_WEAKEN: 1.0,
+   /* AI(伪玩家)攻打: 不限并发——每个宗门按自身 FAKE_ATK_CD(240分钟) 冷却独立行动; AI_GAP_MIN 已废弃(旧全局战争间隔) */
+   AI_GAP_MIN: 60,
+-  /* 败方战死判定(每场): 基础5%随境界降低; 胜方≥败方×2 或互为仇人 → 提到50% */
++  /* 败方战死判定: 基础5%随境界降低，碾压/明确血仇按倍率计算，50%仅为兼容上限 */
+   DEATH_BASE: 5, DEATH_CRUSH_RATE: 50, DEATH_CRUSH_RATIO: 2,
+   /* 门人跨区作战传送费(灵石/人): 跨区攻打/防守调兵由宗门宝库出, 日常远行门人自费 */
+   SECT_DEPLOY_COST: 2000,
+--- a/apps/user/play_guide.js
++++ b/apps/user/play_guide.js
+@@ -117,6 +117,8 @@
+         '· 伪玩家与玩家的灵兽袋、红彩天机和捕获池完全分开；刷新周期相同但互不抢占',
+         '· 宗门总部被攻破即永久灭门（玩家小队攻破同样适用）；散修可另立新宗，原宗门不换皮复活。',
+         '· 总部未破时由在世门人继任；转投或被收编不降低修为。',
++        '· 宗门容量为20＋演武场等级×10，真人与伪玩家合计最高70人；满员停止接纳。',
++        '· 面对占地霸主，AI盟友可联合出兵，按实际阵容、调兵费和留守条件决定是否开战。',
+         '· NPC宗门平时积蓄修炼，出征冷却4小时；战胜整顿4小时、战败休养8小时，重伤较多或缺少储备时先发展。休养期间仍需正常防守。',
+         '· 议和后双方停战6小时，覆盖总部和小区；所属宗门的停战义务同样适用于小队攻打与助攻。',
+         '· 仇杀、劫道可能负伤、失财或死亡；人物会避开强敌，负伤后休养。',
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,10 @@
++# 宗门容量、留存与霸主竞争（2026-11-05）
++
++* 玩家与NPC宗门成员合计最高70人，统一各入宗、补员、挖角和批量收编入口；NPC演武场后续升至5级，旧八级也按70人封顶。旧超员优先疏散空闲普通NPC，保留属性与资产；不自动踢真人或强拆战场身份。成员界面显示人数/容量。
++* 普通结怨不再将战败死亡率拉到50%，碾压与明确血仇按随境界递减的基础率计算。AI无血仇时减少处决和送矿，转为释放；玩家手动处置不变。总部攻破仍永久灭门。
++* AI针对占地霸主可按共同威胁结盟并提交真实联合出兵计划，逐宗复核人员、预算、停战与留守后统一提交；盟友实际出人、付费、担损并进入战后休养。
++* 回归与三日模拟结果见 reports/npc-world-20261104/world-v3/改动与验证.md。旧版完整七日/三十日数据保留，中间文件21项已归档移出项目；未重启机器人，未直接修改正式存档。
++
+ # 小世界发展节奏与文案（2026-11-05）
+ 
+ * NPC宗门出征冷却4小时，战胜整顿4小时、战败休养8小时；缺少出征与维护储备或中重伤较多时先经营恢复，仍正常防守。不改变成长倍率、补人优势或总部攻破即灭门的设定。
+--- a/test/npc_world_evolution.test.js
++++ b/test/npc_world_evolution.test.js
+@@ -1,3 +1,13 @@
++import { resolveSectAttacks } from '../components/sect/war.js'
++import { REGIONS } from '../components/world_data.js'
++import { spawnAiSectAttacks } from '../components/sect/war.js'
++import { joinPlayerSect } from '../components/sect/hr.js'
++import { disposeFakeCaptives } from '../components/sect/captive.js'
++import { fillSects } from '../components/sect/economy.js'
++import { sectMemberCapacity, canAdmitSectNpc, admitSectNpc } from '../components/sect/capacity.js'
++import { hasBloodFeud, defeatDeathRate, temperCaptiveWeights } from '../components/sect/survival.js'
++import { addPerson, fakeJoinSect, overCapSettle } from '../components/fake_data.js'
++import { planAiCoalition } from '../components/sect/war.js'
+ import { assessSectDevelopment } from '../components/sect/ai_strategy.js'
+ import { poachFakeFromSect } from '../components/sect/hr.js'
+ import test from 'node:test'
+@@ -69,3 +79,32 @@
+ test('战胜后整顿4小时，期满可扩张',()=>{const f=fixture(),now=Date.now();f.sectAttacks=[{phase:'done',result:'win',atkSect:'a',defSect:'b',endAt:now}];assert.equal(assessSectDevelopment(f,'a',now+3*3600000).ready,false);assert.equal(assessSectDevelopment(f,'a',now+4*3600000).ready,true)})
+ test('中重伤过多先恢复，期满自然恢复行动资格',()=>{const f=fixture(),now=Date.now();f.roster.甲.injury={level:2,at:now};assert.equal(assessSectDevelopment(f,'a',now).phase,'recover');assert.equal(assessSectDevelopment(f,'a',now+120*60000).ready,true)})
+ test('发展状态重算不改变开始时间，不抢真人决策',()=>{const f=fixture(),now=Date.now();assessSectDevelopment(f,'a',now);assessSectDevelopment(f,'a',now+60000);assert.equal(f.sects.a.aiStrategy.since,now);f.sects.a.owner='1';assert.equal(assessSectDevelopment(f,'a',now).phase,'player')})
++
++test('玩家和NPC统一最高70，旧八级设施也不能突破',()=>{const f=fixture();f.sects.a.facilities.yanwu=8;for(let i=0;i<97;i++) f.roster['门人'+i]={...f.roster.甲,name:'门人'+i};assert.equal(sectMemberCapacity(f,'a'),70);assert.equal(canAdmitSectNpc(f,'a'),false);f.sects.a.owner='1';assert.equal(sectMemberCapacity(f,'a'),70)})
++test('批量入宗只接纳剩余名额，保留未接纳者归属和修为',()=>{const f=fixture();for(let i=0;i<18;i++)f.roster['门人'+i]={...f.roster.甲,name:'门人'+i};const a={...f.roster.乙,name:'新甲',level:68},b={...f.roster.乙,name:'新乙',level:69};f.roster[a.name]=a;f.roster[b.name]=b;assert.equal(admitSectNpc(f,a,'a'),true);assert.equal(admitSectNpc(f,b,'a'),false);assert.equal(a.level,68);assert.equal(b.sect,'b');assert.equal(b.level,69)})
++test('底层新增与散修入宗都不能突破容量',()=>{const f=fixture();for(let i=0;i<19;i++)f.roster['门人'+i]={...f.roster.甲,name:'门人'+i};assert.equal(addPerson(f,'新人','a','dizi',1),null);f.roster.游侠={...f.roster.乙,name:'游侠',sect:null,status:'scatter'};assert.equal(fakeJoinSect(f,'游侠','a'),null);assert.equal(f.roster.游侠.status,'scatter')})
++test('同一成员重复接纳不占新名额或降职',()=>{const f=fixture();f.roster.甲.pos='zongzhu';assert.equal(admitSectNpc(f,f.roster.甲,'a'),true);assert.equal(f.roster.甲.pos,'zongzhu')})
++test('普通争执不再把战败死亡率设为50%',()=>{assert.ok(defeatDeathRate(36)<5);assert.ok(defeatDeathRate(36,{crush:true})<10);assert.ok(defeatDeathRate(36,{bloodFeud:true})<15);assert.ok(defeatDeathRate(68,{crush:true})<defeatDeathRate(1,{crush:true}))})
++test('血仇校验人物生涯，不把普通仇人当死仇',()=>{const f=fixture(),a=f.roster.甲,b=f.roster.乙;a.relations.enemies=['乙'];assert.equal(hasBloodFeud(a,b),false);a.bloodEnemies={乙:1};assert.equal(hasBloodFeud(a,b),true);b.lifeAt=2;assert.equal(hasBloodFeud(a,b),false)})
++test('AI无血仇减少处决倾向，真实血仇保留',()=>{const w={kill:0.4,robKill:0.5,free:0.3};assert.ok(temperCaptiveWeights(w).kill<w.kill);assert.equal(temperCaptiveWeights(w,{bloodFeud:true}),w);assert.ok(temperCaptiveWeights(w,{cruelty:0.6}).kill>temperCaptiveWeights(w).kill)})
++function coalitionFixture(){const f=fixture();f.roster.甲.level=14;f.roster.乙.level=29;f.roster.丙={...f.roster.甲,name:'丙',sect:'c'};for(let i=0;i<12;i++)f.areas['地盘'+i]='b';setDiplomacyRelation(f,'a','c','allied');return f}
++test('联合出兵只计算真实可派AI盟友，真人宗主不被代派',t=>{t.mock.method(Math,'random',()=>0);const f=coalitionFixture();const plans=planAiCoalition(f,f.gid,'a','b','center');assert.equal(plans.length,1);assert.deepEqual(plans[0].plan.units.map(x=>x.name),['丙']);f.sects.c.owner='3';assert.deepEqual(planAiCoalition(f,f.gid,'a','b','center'),[])})
++test('弱宗可以用真实合军通过最终风险复核',async t=>{t.mock.method(Math,'random',()=>0);const f=coalitionFixture();const plans=planAiCoalition(f,f.gid,'a','b','center');const r=await startSectAttack(f,f.gid,'a','b','ai',{coalitionPlans:plans,tactic:'正面强攻'});assert.equal(r.ok,true,r.msg);assert.deepEqual(new Set(r.atk.atkFakes),new Set(['甲','丙']));assert.equal(r.atk.actorSects['fake:丙'],'c');assert.ok(r.atk.coalition.c)})
++test('盟友预算在提交前变化则整场取消，不扣主宗费用',async t=>{t.mock.method(Math,'random',()=>0);const f=coalitionFixture();f.roster.丙.loc='east';const plans=planAiCoalition(f,f.gid,'a','b','center');assert.equal(plans.length,1);const before=f.sects.a.vault.stones;f.sects.c.vault.stones=0;const r=await startSectAttack(f,f.gid,'a','b','ai',{coalitionPlans:plans});assert.equal(r.ok,false);assert.equal(f.sects.a.vault.stones,before);assert.equal(f.sectAttacks.length,0)})
++test('有双边停战的盟友不能参加联合攻打',t=>{t.mock.method(Math,'random',()=>0);const f=coalitionFixture();setDiplomacyRelation(f,'c','b','neutral',Date.now(),'停战',{truce:true});assert.deepEqual(planAiCoalition(f,f.gid,'a','b','center'),[])})
++test('联军支援者同样需要战后休养',()=>{const f=fixture(),now=Date.now();f.sectAttacks=[{phase:'done',atkSect:'b',defSect:'c',coalition:{a:{}},result:'lose',endAt:now}];assert.equal(assessSectDevelopment(f,'a',now+7*3600000).phase,'recover')})
++
++test('旧档超员转为散修，保留修为装备关系，战场人物暂不迁移',()=>{const f=fixture();f.roster.甲.level=60;f.sects.a.facilities.yanwu=5;for(let i=0;i<97;i++)f.roster['门人'+i]={...f.roster.甲,name:'门人'+i,level:60};const p=f.roster.门人0;f.sectAttacks=[{id:1,phase:'fight',atkFakes:[p.name],defFakes:[]}];const before=Object.keys(f.roster).length;overCapSettle(f);assert.equal(Object.keys(f.roster).length,before);assert.equal(p.sect,'a');const departed=Object.values(f.roster).filter(x=>x.status==='scatter');assert.equal(departed.length,28);assert.equal(departed[0].level,60);assert.equal(Object.values(f.roster).filter(x=>x.sect==='a').length,70)})
++
++test('普通俘虏减少处决和送矿，减少的权重转为释放',()=>{const w={free:0.2,recruit:0.2,robFree:0.1,kill:0.2,robKill:0.2,mine:0.1,jail:0.1};const z=temperCaptiveWeights(w);assert.ok(z.free>w.free);assert.ok(z.mine<w.mine);assert.ok(Math.abs(Object.values(w).reduce((a,b)=>a+b,0)-Object.values(z).reduce((a,b)=>a+b,0))<1e-9)})
++test('全世界满399人时不补建无宗主空壳',()=>{const f=fixture();for(let i=0;i<397;i++)f.roster['散修'+i]={...f.roster.甲,name:'散修'+i,status:'scatter',sect:null};assert.equal(fillSects(f),0);assert.equal(Object.keys(f.sects).length,3)})
++test('自动整批收编逐人复核容量，满员后活人释放',async t=>{t.mock.method(Math,'random',()=>0.8);const f=fixture();f.roster.甲.pos='zongzhu';f.sectMap.a.zongzhu='甲';for(let i=0;i<18;i++)f.roster['门人'+i]={...f.roster.甲,name:'门人'+i,pos:'dizi'};const names=['俘甲','俘乙','俘丙'];for(const n of names)f.roster[n]={...f.roster.乙,name:n,level:68,relations:{friends:['甲'],enemies:[]}};const w={id:55,phase:'done',result:'win',atkSect:'a',defSect:'b',targetType:'sect',target:'b',atkFakes:[],defFakes:[],atkPlayers:[],defPlayers:[],captives:{fakes:[...names],players:[],byAtk:{fakes:[...names],players:[]},byDef:{fakes:[],players:[]}},log:[]};f.sectAttacks=[w];await disposeFakeCaptives(f,f.gid,w,'a',Date.now());assert.equal(Object.values(f.roster).filter(x=>x.alive&&x.sect==='a').length,20);for(const n of names){assert.equal(f.roster[n].alive,true);assert.equal(f.roster[n].level,68)}assert.deepEqual(w.captives.fakes,[])})
++
++test('真人与NPC合计占名额，满员不再接纳任一身份',()=>{const f=fixture();for(let i=0;i<19;i++)f.players[String(i)]={name:'真人'+i,sect:'a',pos:'dizi'};assert.equal(canAdmitSectNpc(f,'a'),false);assert.equal(joinPlayerSect(f,f.gid,'新玩家','新人','a').ok,false)})
++test('超员只疏散NPC，保留既有真人身份',()=>{const f=fixture();for(let i=0;i<20;i++)f.players[String(i)]={name:'真人'+i,sect:'a',pos:'dizi'};overCapSettle(f);assert.equal(Object.keys(f.players).length,20);assert.equal(f.roster.甲.status,'scatter')})
++
++test('真人占满名额时散修自动入宗也被统一拦截',()=>{const f=fixture();for(let i=0;i<19;i++)f.players[String(i)]={sect:'a',pos:'dizi'};f.roster.游侠={...f.roster.乙,name:'游侠',status:'scatter',sect:null};assert.equal(fakeJoinSect(f,'游侠','a'),null);assert.equal(f.roster.游侠.status,'scatter')})
++
++test('自动调度会实际联合盟友争夺霸主领地',async t=>{t.mock.method(Math,'random',()=>0);const f=coalitionFixture();for(const r of Object.values(REGIONS))for(const area of r.areas)f.areas[area]='b';const ok=await spawnAiSectAttacks(f,f.gid,Date.now());assert.equal(ok,true);const w=f.sectAttacks.find(w=>w.atkSect==='a');assert.ok(w);assert.ok(w.coalition.c);assert.ok(w.atkFakes.includes('甲'));assert.ok(w.atkFakes.includes('丙'))})
++
++test('联合军队能完成真实战斗结算，盟友保留参战记录',async t=>{const base=+new Date('2026-11-05T12:00:00+08:00');t.mock.method(Date,'now',()=>base);t.mock.method(Math,'random',()=>0);const f=coalitionFixture();const plans=planAiCoalition(f,f.gid,'a','b','center',base);const r=await startSectAttack(f,f.gid,'a','b','ai',{coalitionPlans:plans,tactic:'正面强攻'});assert.equal(r.ok,true,r.msg);for(let minute=10;minute<=240&&r.atk.phase!=='done';minute+=10)await resolveSectAttacks(f,f.gid,base+minute*60000);assert.equal(r.atk.phase,'done');assert.ok(r.atk.actors['fake:丙'].rounds>0);assert.equal(r.atk.actorSects['fake:丙'],'c')})
+--- a/apps/user/sect_system.js
++++ b/apps/user/sect_system.js
+@@ -1,3 +1,4 @@
++import { sectMemberCapacity, sectOccupancy } from '../../components/sect/capacity.js'
+ /* ============================================================
+  * 玩家宗门系统 · 指令层 (第二步~第七步)
+  * 设施/宝库/上供/兑换/创建/任命/传位/问退位/夺权
+@@ -432,7 +433,7 @@
+         `贡献：${(p.pos === 'zongzhu' || p.pos === 'fuzong' || p.pos === 'taishang') ? '无需贡献（可直接 #取用宝库）' : `${p.contribution || 0}`}${injTxt}`,
+         '',
+         `宗主：${owner ? `🌙${owner.name}（玩家）` : (sm.zongzhu || '（空缺·副宗代掌）')}`,
+-        `宗门门人：${fakes.length} 人`,
++        `宗门成员：${sectOccupancy(f, sid)}/${sectMemberCapacity(f, sid)} 人`,
+         `宝库灵石：${v.stones || 0}`,
+         `设施：演武场${fac.yanwu || 0}级/护山阵${fac.hushan || 0}级/灵脉${fac.lingmai || 0}级/药园${fac.yaoyuan || 0}级`,
+         `地盘：${areas}`,
+--- a/apps/user/world_news.js
++++ b/apps/user/world_news.js
+@@ -1,3 +1,4 @@
++import { sectMemberCapacity, sectOccupancy } from '../../components/sect/capacity.js'
+ /* ============================================================
+  * 天下大事 · 伪玩家宗门世界 - 指令与流程 (每群独立世界)
+  * #天下大事 / #查看天下大事: 查本群江湖最近24小时事件
+@@ -390,6 +391,7 @@
+       lines.push(
+         `━━━ ${s.name}${owner ? ' 🌙' : ''} ━━━`,
+         `所在大区：${regionNameOf(regionOfSect(id))}`,
++        `成员：${sectOccupancy(f, id)}/${sectMemberCapacity(f, id)}`,
+         `太上长老：${ts}`,
+         `宗主：${zz}`,
+         `副宗主：${fz}`,
+--- a/components/sect/economy.js
++++ b/components/sect/economy.js
+@@ -1,7 +1,7 @@
+ import { takeVaultEquipAttrs } from './war_loot.js'
+ /* 由 sect_system.js 拆分自动生成: economy.js */
+ import fs from 'fs'
+-import { getFake, saveFake, sectName, sectIdByName, addPerson, drawName, sectAlive, sectCap, areaCount, killPerson, logEvent, SECT_START_BAND } from '../fake_data.js'
++import { getFake, saveFake, sectName, sectIdByName, addPerson, drawName, sectAlive, sectCap, areaCount, killPerson, logEvent, SECT_START_BAND, FAKE_MAX } from '../fake_data.js'
+ import { getWorld, saveWorld, regionNameOf, DEFAULT_REGION, getLoc, renameSect } from '../world_data.js'
+ import xujing_data from '../xujing_data.js'
+ import { addItem, getBag, saveBag, EQUIP_TPL, GONGFA_TPL, vaultEquipContrib, itemIcon, fmtItem } from '../equip_data.js'
+@@ -662,9 +662,11 @@
+ /** 伪玩家宗门补齐: 伪玩家宗门数(无玩家宗主) < MAX_SECTS 时自动创建补齐
+  *  玩家创建的宗门不占名额; 灭门宗门不顶替(由 fake_data rebuildSettle 5~30分钟换皮重生) */
+ export function fillSects (f, now = Date.now()) {
++  if (Object.values(f.roster || {}).filter(p => p?.alive).length >= FAKE_MAX) return 0
+   let made = 0
+   const aiCnt = Object.values(f.sects || {}).filter(s => s && !s.owner).length
+   while (aiCnt + made < CFG.MAX_SECTS) {
++    if (Object.values(f.roster || {}).filter(p => p?.alive).length >= FAKE_MAX) break
+     const zz = drawName(f)
+     if (!zz) break
+     const name = drawNewSectName(f)
+@@ -995,7 +997,7 @@
+     if (!s.facilities) s.facilities = { yanwu: 0, hushan: 0, lingmai: 0, yaoyuan: 1 }
+     /* 优先补0级设施(演武场→护山阵→灵脉), 再升已有最低级(上限8级) */
+     const toBuild = FAC.find(x => (s.facilities[x] || 0) === 0)
+-    const fac = toBuild || FAC.filter(x => (s.facilities[x] || 0) < (x === 'yaoyuan' ? 5 : 8)).sort((a, b) => (s.facilities[a] || 0) - (s.facilities[b] || 0))[0]
++    const fac = toBuild || FAC.filter(x => (s.facilities[x] || 0) < (x === 'yaoyuan' || x === 'yanwu' ? 5 : 8)).sort((a, b) => (s.facilities[a] || 0) - (s.facilities[b] || 0))[0]
+     if (!fac) continue
+     const c = facilityCost(fac, (s.facilities[fac] || 0) + 1)
+     const stones = Math.max(1, Math.round(c.stones * FAKE_FAC_MULT))
+--- a/components/sect/capacity.js
++++ b/components/sect/capacity.js
+@@ -0,0 +1,31 @@
++/** 玩家与NPC宗门成员合计统一最高70人，已有真人不自动迁移。 */
++export function sectMemberCapacity (f, sid) {
++  const grade = Math.max(0, Math.trunc(Number(f.sects?.[sid]?.facilities?.yanwu) || 0))
++  return Math.min(70, 20 + grade * 10)
++}
++export function sectNpcCount (f, sid) {
++  return Object.values(f.roster || {}).filter(p => p?.alive && p.status === 'sect' && p.sect === sid).length
++}
++export function sectOccupancy (f, sid) {
++  return sectNpcCount(f, sid) + Object.values(f.players || {}).filter(p => p?.sect === sid).length
++}
++export function canAdmitSectNpc (f, sid, name = null) {
++  const s = f.sects?.[sid]
++  if (!s || s.wipeAt || !f.sectMap?.[sid]) return false
++  const p = name && f.roster?.[name]
++  if (p?.alive && p.status === 'sect' && p.sect === sid) return true
++  return sectOccupancy(f, sid) < sectMemberCapacity(f, sid)
++}
++export function admitSectNpc (f, p, sid) {
++  if (!p?.alive || p.servantOf || !canAdmitSectNpc(f, sid, p.name)) return false
++  if (p.status === 'sect' && p.sect === sid) return true
++  const old = f.sectMap?.[p.sect]
++  if (old) {
++    if (old.zongzhu === p.name) old.zongzhu = null
++    for (const key of ['dizi', 'zhishi', 'fuzong', 'taishang']) old[key] = (old[key] || []).filter(n => n !== p.name)
++  }
++  p.sect = sid; p.pos = 'dizi'; p.status = 'sect'
++  const map = f.sectMap[sid]; map.dizi ||= []
++  if (!map.dizi.includes(p.name)) map.dizi.push(p.name)
++  return true
++}
+--- a/components/sect/survival.js
++++ b/components/sect/survival.js
+@@ -0,0 +1,21 @@
++/** 普通争执不等于血仇；只承认明确杀亲或灭门对象。 */
++export function hasBloodFeud (a, b) {
++  if (!a || !b) return false
++  const life = b.lifeAt ?? b.joinAt ?? 0
++  const saved = a.bloodEnemies?.[b.name]
++  if (saved !== undefined && saved === life) return true
++  return (a.vendetta?.culprit || []).includes(b.name) &&
++    (a.enemyLives?.[b.name] === undefined || a.enemyLives[b.name] === life)
++}
++export function defeatDeathRate (level, { crush = false, bloodFeud = false, base = 5, ceiling = 50 } = {}) {
++  const normal = Math.max(0.5, base * (1 - 0.9 * Math.min(68, Math.max(1, Number(level) || 1)) / 68))
++  return Math.min(ceiling, normal * (bloodFeud ? 3 : crush ? 2.5 : 1))
++}
++export function temperCaptiveWeights (weights, { bloodFeud = false, cruelty = 0 } = {}) {
++  if (bloodFeud) return weights
++  // 无血仇时优先释放、收编或关押；残暴宗门仍可能处决。
++  const factor = cruelty >= 0.4 ? 0.35 : 0.1
++  const mineFactor = cruelty >= 0.4 ? 0.6 : 0.25
++  const spared = weights.kill * (1 - factor) + weights.robKill * (1 - factor) + (weights.mine || 0) * (1 - mineFactor)
++  return { ...weights, free: (weights.free || 0) + spared, kill: weights.kill * factor, robKill: weights.robKill * factor, mine: (weights.mine || 0) * mineFactor }
++}

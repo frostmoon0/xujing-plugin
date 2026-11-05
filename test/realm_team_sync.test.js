@@ -278,7 +278,7 @@ test('围剿混战: 强队抢弱队池子, 弱溜走队被拦截搜刮后遣返'
 
   const joined = msgs.join('\n')
   assert.ok(joined.includes('第 1 轮混战'), '应推进混战: ' + joined)
-  assert.ok(joined.includes('溜走时被围剿方拦截'), '弱溜走队应被抓: ' + joined)
+  assert.ok(joined.includes('突围失败'), '弱溜走队应被抓: ' + joined)
   assert.ok((st.teams.strong.pool || []).some(x => x.name === '修为丹' && x.count >= 3), '围剿强队应分到被搜刮的30%池子')
   assert.equal(st.teams.weak, undefined, '被抓的溜走队被遣返移除')
   rm(`${WORLD_DIR}/fake_${gid}.json`)
@@ -301,7 +301,7 @@ test('无围剿者时溜走队成功突围带走战果', async () => {
   Math.random = origRandom
 
   const joined = msgs.join('\n')
-  assert.ok(joined.includes('悄悄溜走'), '无围剿者应成功溜走: ' + joined)
+  assert.ok(joined.includes('突围成功'), '无围剿者应成功溜走: ' + joined)
   assert.equal(st.teams.weak, undefined, '溜走队提前结算离场')
   rm(`${WORLD_DIR}/fake_${gid}.json`)
 })
@@ -327,7 +327,7 @@ test('出口围剿搜刮: 单件物品也应被搜走, 不能只剩灵石', asyn
   Math.random = origRandom
 
   const joined = msgs.join('\n')
-  assert.ok(joined.includes('溜走时被围剿方拦截'), '弱溜走队应被抓: ' + joined)
+  assert.ok(joined.includes('突围失败'), '弱溜走队应被抓: ' + joined)
   const strongPool = st.teams.strong?.pool || []
   assert.ok(strongPool.some(x => x.name === '修为丹' && x.count >= 1), '单件修为丹应被搜刮走: ' + JSON.stringify(strongPool))
   assert.ok(strongPool.some(x => x.name === '星霜草' && x.count >= 1), '单件星霜草应被搜刮走: ' + JSON.stringify(strongPool))

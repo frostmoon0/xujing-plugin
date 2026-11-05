@@ -255,7 +255,7 @@ export class trial extends plugin {
             const rounds = []
             let total = 0
             for (let r = 1; r <= cfg.rounds; r++) {
-                const { dmg } = calcDamage(level, bag, 0.2, buff)
+                const { dmg } = calcDamage(level, bag, 0.2, buff, gid, user_id)
                 rounds.push(dmg)
                 total += dmg
             }

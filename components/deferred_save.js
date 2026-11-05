@@ -12,6 +12,11 @@ export function withDeferredSaveContext (fn) {
   return saveContext.run(true, fn)
 }
 
+/** 跨存档事务的检查点必须先落盘，再执行外部账户/背包操作。 */
+export function withImmediateSaveContext (fn) {
+  return saveContext.run(false, fn)
+}
+
 /** 后台推进只登记最新写入；普通玩家操作直接写盘。 */
 export function saveOrDefer (key, save) {
   const normalizedKey = String(key)

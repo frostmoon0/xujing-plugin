@@ -1,0 +1,17 @@
+{
+  "components/fake_data.js": "57f0ef88be020b7f711f560dc6db0f2e18b13130a02b61fc2c3e6d548dba42ce",
+  "components/sect/captive.js": "fe1dc4d76784e07c31700c94804109d59d8fa9e64100c7e1f47ea026393d39f7",
+  "components/sect/hr.js": "568f03637f8deeb43caeaa064fdb38f8ca344f6a4a765ddb7c6f10889546d0e8",
+  "components/sect/war.js": "ffd5a10d0968e33d524145c376cf61989089976751d636e6f2f5ff4122b61444",
+  "components/sect/diplomacy.js": "4fcdc1f0e5ad88e8b6d506510158bdf807d6d5e2ae91fed8ef084c42cc85c45e",
+  "components/sect/ai_strategy.js": "5b7b004ac241863c40585c9bdf7e993be00ecad5e2a592beb20183e35d74de96",
+  "components/sect/utils.js": "b9e766479330edaae21da6cb44a0f664895412b4d7336cbba84bbe3643bd3c54",
+  "apps/user/play_guide.js": "10f0a68078f49a19f8e1fdb5f4bd7d720b6b0694059daf44ce094124865bf4a6",
+  "CHANGELOG.md": "4fbf3d566dd92b994ec77560edcc9278022d3bcf4c09c6c10206aa733aa88bf5",
+  "test/npc_world_evolution.test.js": "dffc60df62ec08b8b7d2794d4dcc44269f9a358b94b49585c77d34d89548bf9a",
+  "apps/user/sect_system.js": "55144470ab1d80b0f7848a647a87d0f9c80887e82984268a0238f7069a9f987e",
+  "apps/user/world_news.js": "5bf6302bf59b2e84c9ef937413e97b2c3881e401e7989c2ccb82bd338f6092ec",
+  "components/sect/economy.js": "c99fb8c994875db3d3ec43f937c80f99698e9bc2993a74f3b5a1b58558c2a3ab",
+  "components/sect/capacity.js": "6caacde29349c81f7c63ec0341a526ba5ba03d0d70a13316d781030ebacd0adb",
+  "components/sect/survival.js": "51451d4916d905cc4616c4491637cdcf772bdd0312fa510bc7fdae0692611415"
+}

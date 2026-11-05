@@ -1,3 +1,4 @@
+import { sectMemberCapacity, sectOccupancy } from '../../components/sect/capacity.js'
 /* ============================================================
  * 天下大事 · 伪玩家宗门世界 - 指令与流程 (每群独立世界)
  * #天下大事 / #查看天下大事: 查本群江湖最近24小时事件
@@ -84,7 +85,7 @@ export class world_news extends plugin {
       priority: 280,
       rule: [
         { reg: '^[#＃]?(天下大事|查看天下大事|今日大事)$', fnc: 'worldNews' },
-        { reg: '^[#＃]?(天下战争|战争状态|战争记录|战争史|战争详情|战报)\s*([0-9０-９]{0,3})$', fnc: 'warList' },
+        { reg: '^[#＃]?(天下战争|战争状态|战争记录|战争史|战争详情|战报)\s*([0-9０-９]*)$', fnc: 'warList' },
         { reg: '^[#＃]?(天下宗门|宗门名单|宗门概况)$', fnc: 'sectList' },
         { reg: '^[#＃]?(查宗门|查看宗门|宗门详情|宗门内部|宗门情报)\\s*(\\S*)\\s*$', fnc: 'sectDetail' },
         { reg: '^[#＃]?(查人|修士详情|人物详情)\\s*(\\S*)\\s*$', fnc: 'personInfo' },
@@ -147,7 +148,7 @@ export class world_news extends plugin {
   async worldNews (e) {
     try {
       const gid = String(e.group_id || '')
-      if (!gid) { e.reply('需在群内查看~'); return true }
+      if (!gid) { e.reply('需在群内查看'); return true }
       const f = getFake(gid)
       const evs = recentEvents(f, 48, true)
       if (!evs.length) {
@@ -162,7 +163,7 @@ export class world_news extends plugin {
       return true
     } catch (err) {
       logger.error('[天下大事]异常:' + (err && err.stack))
-      e.reply('📜 查询天下大事出错了，请稍后再试~')
+      e.reply('📜 查询天下大事出错了，请稍后再试')
       return true
     }
   }
@@ -171,16 +172,16 @@ export class world_news extends plugin {
   async warList (e) {
     try {
       const gid = String(e.group_id || '')
-      if (!gid) { e.reply('需在群内查看~'); return true }
+      if (!gid) { e.reply('需在群内查看'); return true }
       const f = getFake(gid)
-      const m = String(e.msg || '').match(/(天下战争|战争状态|战争记录|战争史|战争详情|战报)\s*([0-9０-９]{0,3})/)
+      const m = String(e.msg || '').match(/(天下战争|战争状态|战争记录|战争史|战争详情|战报)\s*([0-9０-９]*)/)
       const idx = (m && m[2]) ? parseInt(String(m[2]).replace(/[０-９]/g, d => String.fromCharCode(d.charCodeAt(0) - 0xFEE0)), 10) : 0
       const wars = (f.sectAttacks || []).slice(-100).reverse() // 最近100场(含进行中), 倒序
-      const atkName = (a) => a.atkSect ? sectName(f, a.atkSect) : (a.teamName ? `散修小队【${a.teamName}】` : (a.rogueName || '散修'))
+      const atkName = (a) => a.snapshot?.attacker || (a.atkSect ? sectName(f, a.atkSect) : (a.teamName ? `散修小队【${a.teamName}】` : (a.rogueName || '散修')))
       /* 目标(打的是啥): 宗门战=宗门名, 地盘争夺=小区名; 统一带 小区+宗门名 完整显示 */
       const targetTxt = (a) => warTargetTxt(f, a)
       /* 守方(谁在守): 宗门战=目标宗门, 地盘争夺=占领该小区的宗门(无主=无主之地) */
-      const defName = (a) => a.targetType === 'sect' ? sectName(f, a.target) : (f.areas && f.areas[a.target] ? sectName(f, f.areas[a.target]) : '无主之地')
+      const defName = a => a.snapshot?.defender || (a.targetType === 'sect' ? sectName(f, a.target) : (f.areas?.[a.target] ? sectName(f, f.areas[a.target]) : '无主之地'))
       /* 玩家显示一律用群名片/昵称(getNick, 取不到回退QQ号), 不直接显示QQ号 */
       const playerNames = async (uids) => {
         const names = []
@@ -199,9 +200,10 @@ export class world_news extends plugin {
 
       /* ---------- 有序号: 详细战报(多详细有多详细) ---------- */
       if (idx) {
-        if (!warIdxList.length) { e.reply('⚔️ 暂无战争记录~'); return true }
-        if (idx < 1 || idx > warIdxList.length) { e.reply(`请输入 1~${warIdxList.length} 之间的序号~`); return true }
-        const a = warIdxList[idx - 1]
+        if (!warIdxList.length) { e.reply('⚔️ 暂无战争记录'); return true }
+        const fixed = ['战争详情', '战报'].includes(m?.[1])
+        if (fixed ? !wars.some(a => Number(a.id) === idx) : (idx < 1 || idx > warIdxList.length)) { e.reply(fixed ? '该固定战役编号不存在，请查看 #天下战争' : `请输入 1~${warIdxList.length} 之间的序号`); return true }
+        const a = fixed ? wars.find(a => Number(a.id) === idx) : warIdxList[idx - 1]
         const durMin = a.phase === 'done' ? Math.max(0, Math.round((a.endAt - a.start) / 60000)) : Math.max(0, Math.round((Date.now() - a.start) / 60000))
         const est = await estimateWinRate(f, gid, a)
         const estTxt = est.pct === null ? '（无有效战力对比）' : `攻方 ${est.pct}%（战力 ${est.atk} vs ${est.def}）`
@@ -240,7 +242,7 @@ export class world_news extends plugin {
           `目标：${targetTxt(a)}（${a.targetType === 'sect' ? '宗门战' : `地盘争夺·守方${defName(a)}`}）`,
           `状态：${a.phase === 'done' ? (a.result === 'win' ? '✅ 攻占成功' : '❌ 攻打失败') : '⏳ 进行中'}`,
           `时间：${fmtWarTime(a)}（${durMin} 分钟｜${a.round || 0} 轮）`,
-          `系统评估胜率：${estTxt}`,
+          `系统单轮优势估算：${estTxt}`,
           `士气：攻方 ${Math.max(0, Math.round(a.moraleA))}% ｜ 守方 ${Math.max(0, Math.round(a.moraleD))}%`,
           '━━━━━━━━━━━━━━',
           `参战·攻方：门人 ${fmtList(atkFakes)}`,
@@ -263,7 +265,7 @@ export class world_news extends plugin {
         const log = (a.log || [])
         if (!log.length) lines.push('（暂无详细战报记录）')
         else for (const l of log) lines.push(`[${fmtTime(l.t)}] ${l.txt}`)
-        await replyLines(e, `⚔️ 战争详情 #${idx}`, lines)
+        await replyLines(e, `⚔️ 战争详情 #${a.id}`, lines)
         return true
       }
 
@@ -283,7 +285,7 @@ export class world_news extends plugin {
         raidActive = raids.filter(r => String(r.gid) === gid && r.st && (r.st.phase === 'raid' || r.st.phase === 'escape'))
       } catch (err) { }
       if (!live.length && !hist.length && !bossLine && !raidActive.length) {
-        e.reply('🕊️ 天下太平，当前没有战争，也无近期战争记录~')
+        e.reply('🕊️ 天下太平，当前没有战争，也无近期战争记录')
         return true
       }
       const lines = []
@@ -304,9 +306,9 @@ export class world_news extends plugin {
           const atkP = (a.atkPlayers || []).length
           const defP = (a.defPlayers || []).length
           const est = await estimateWinRate(f, gid, a)
-          const estTxt = est.pct === null ? '' : `｜评估胜率 攻方 ${est.pct}%`
+          const estTxt = est.pct === null ? '' : `｜单轮优势估算 攻方 ${est.pct}%`
           lines.push(
-            `━━━ 战争 #${li + 1} ━━━`,
+            `━━━ 序号 ${li + 1} · 固定战役 #${a.id} ━━━`,
             `攻方：${atkName(a)}${a.atkSect ? `（弟子${atkFakeN}人` : `（玩家${atkP}人`}${atkP ? ` + 🌙玩家${atkP}人` : ''}）${estTxt}`,
             `守方：${defName(a)}（${defFakeN ? `弟子${defFakeN}人` : '暂无守军'}${defP ? ` + 🌙玩家${defP}人` : ''}）`,
             `目标：${targetTxt(a)}（${a.targetType === 'sect' ? '宗门战' : '地盘争夺'}）｜战法：${a.kind || '正面强攻'}`
@@ -338,7 +340,7 @@ export class world_news extends plugin {
       return true
     } catch (err) {
       logger.error('[天下战争]异常:' + (err && err.stack))
-      e.reply('查询天下战争出错了，请稍后再试~')
+      e.reply('查询天下战争出错了，请稍后再试')
       return true
     }
   }
@@ -346,7 +348,7 @@ export class world_news extends plugin {
   /* ---- #天下宗门: 本群宗门名单/职位/地盘 ---- */
   async sectList (e) {
     const gid = String(e.group_id || '')
-    if (!gid) { e.reply('需在群内查看~'); return true }
+    if (!gid) { e.reply('需在群内查看'); return true }
     const f = getFake(gid)
     const regionOfSect = (id) => {
       const s = f.sects[id]
@@ -389,6 +391,7 @@ export class world_news extends plugin {
       lines.push(
         `━━━ ${s.name}${owner ? ' 🌙' : ''} ━━━`,
         `所在大区：${regionNameOf(regionOfSect(id))}`,
+        `成员：${sectOccupancy(f, id)}/${sectMemberCapacity(f, id)}`,
         `太上长老：${ts}`,
         `宗主：${zz}`,
         `副宗主：${fz}`,
@@ -407,13 +410,13 @@ export class world_news extends plugin {
   /* ---- #宗门详情 [宗门名]: 本群宗门内部全员 ---- */
   async sectDetail (e) {
     const gid = String(e.group_id || '')
-    if (!gid) { e.reply('需在群内查看~'); return true }
+    if (!gid) { e.reply('需在群内查看'); return true }
     const f = getFake(gid)
     const m = String(e.msg || '').match(/(查宗门|查看宗门|宗门详情|宗门内部|宗门情报)\s*(\S*)/)
     const name = (m && m[2]) ? m[2] : ''
     if (!name) { e.reply('用法：#宗门详情 宗门名（#天下宗门 查看所有宗门）'); return true }
     const id = sectIdByName(f, name)
-    if (!id) { e.reply(`没有找到宗门【${name}】，发 #天下宗门 看看有哪些~`); return true }
+    if (!id) { e.reply(`没有找到宗门【${name}】，发 #天下宗门 看看有哪些`); return true }
     if (f.sects[id] && f.sects[id].wipeAt) { e.reply(`【${name}】已灭门，废墟之上等待新的开宗者……（#天下宗门 看现存宗门）`); return true }
     const sm = f.sectMap[id]
     const memberLine = (n) => {
@@ -483,7 +486,7 @@ export class world_news extends plugin {
   /* ---- #查人 [名字]: 本群伪玩家详情 ---- */
   async personInfo (e) {
     const gid = String(e.group_id || '')
-    if (!gid) { e.reply('需在群内查看~'); return true }
+    if (!gid) { e.reply('需在群内查看'); return true }
     const f = getFake(gid)
     const m = String(e.msg || '').match(/(查人|修士详情|人物详情)\s*(\S*)/)
     const name = (m && m[2]) ? m[2] : ''
@@ -615,9 +618,9 @@ export class world_news extends plugin {
   /* ---- #伪玩家宠物榜: 独立 fake pet 存档, 不混入真实玩家灵兽榜 ---- */
   async fakePetRank (e) {
     const gid = String(e.group_id || '')
-    if (!gid) { e.reply('需在群内查看~'); return true }
+    if (!gid) { e.reply('需在群内查看'); return true }
     const ranked = groupPetRank(gid, 20, 'fake')
-    if (!ranked.length) { e.reply('🐾 伪玩家尚无灵兽上榜，江湖仍在结缘~'); return true }
+    if (!ranked.length) { e.reply('🐾 伪玩家尚无灵兽上榜，江湖仍在结缘'); return true }
     const lines = ranked.map((x, i) => {
       const status = x.canBattle ? '可出战' : '尚幼'
       return `${i + 1}. ${x.uid}｜${qualityNameOf(x.quality)}【${x.name}】·${x.stage}·${status}｜战力 ${x.power}（大成 ${x.maxPower}）`
@@ -633,10 +636,10 @@ export class world_news extends plugin {
   /* ---- #战力榜: 本群伪玩家战力排行 ---- */
   async powerRank (e) {
     const gid = String(e.group_id || '')
-    if (!gid) { e.reply('需在群内查看~'); return true }
+    if (!gid) { e.reply('需在群内查看'); return true }
     const f = getFake(gid)
     const all = Object.values(f.roster).filter(p => p.alive)
-    if (!all.length) { e.reply('⚔️ 江湖尚无修士~'); return true }
+    if (!all.length) { e.reply('⚔️ 江湖尚无修士'); return true }
     const ranked = all.map(p => ({ p, power: personPower(p) }))
       .sort((a, b) => b.power - a.power || (Number(b.p.level) || 0) - (Number(a.p.level) || 0))
     const shown = ranked.slice(0, 20)
@@ -655,16 +658,16 @@ export class world_news extends plugin {
   async wealthRank (e) {
     try {
       const gid = String(e.group_id || '')
-      if (!gid) { e.reply('需在群内查看~'); return true }
+      if (!gid) { e.reply('需在群内查看'); return true }
       if (!e.group || typeof e.group.getMemberMap !== 'function') {
-        e.reply('暂时无法读取群成员，请稍后再试~')
+        e.reply('暂时无法读取群成员，请稍后再试')
         return true
       }
       /* 只读已存在的家庭存档，避免查看榜单时给全群成员批量建档 */
       const homeData = await xujing_data.getQQYUserHomeData(`${gid}.json`)
       const all = buildWealthRank(homeData, await e.group.getMemberMap())
       if (!all.length) {
-        e.reply('💰 本群暂无灵石记录，快去 #摆摊 或 #挂机结算赚取第一桶金~')
+        e.reply('💰 本群暂无灵石记录，快去 #摆摊 或 #挂机结算赚取第一桶金')
         return true
       }
       const shown = all.slice(0, 10)
@@ -708,7 +711,7 @@ export class world_news extends plugin {
       return true
     } catch (err) {
       logger.error('[天下灵石]异常:' + (err && err.stack))
-      e.reply('查询天下灵石出错了，请稍后再试~')
+      e.reply('查询天下灵石出错了，请稍后再试')
       return true
     }
   }
@@ -716,12 +719,12 @@ export class world_news extends plugin {
   /* ---- #江湖交易: 本群伪玩家三阁交易记录 ---- */
   async tradeNews (e) {
     const gid = String(e.group_id || '')
-    if (!gid) { e.reply('需在群内查看~'); return true }
+    if (!gid) { e.reply('需在群内查看'); return true }
     const f = getFake(gid)
     const cut = Date.now() - 24 * 3600000
     const trades = (f.trades || []).filter(x => x.t >= cut).slice().reverse()
     if (!trades.length) {
-      e.reply('🏪 江湖买卖兴隆，最近 24 小时暂无交易（三阁货物正等伪修士光顾）~')
+      e.reply('🏪 江湖买卖兴隆，最近 24 小时暂无交易（三阁货物正等伪修士光顾）')
       return true
     }
     const shown = trades.slice(0, 100)
@@ -736,12 +739,12 @@ export class world_news extends plugin {
   async smallNews (e) {
     try {
       const gid = String(e.group_id || '')
-      if (!gid) { e.reply('需在群内查看~'); return true }
+      if (!gid) { e.reply('需在群内查看'); return true }
       const f = getFake(gid)
       const cut = Date.now() - 24 * 3600000
       const evs = (f.minor || []).filter(x => x.t >= cut).sort((a, b) => b.t - a.t)
       if (!evs.length) {
-        e.reply('🍃 江湖风平浪静，最近 24 小时无琐事~')
+        e.reply('🍃 江湖风平浪静，最近 24 小时无琐事')
         return true
       }
       const lines0 = evs.map(x => `[${fmtTime(x.t)}] ${x.type === 'player' ? '🌙 ' : ''}${x.txt}`)
@@ -752,7 +755,7 @@ export class world_news extends plugin {
       return true
     } catch (err) {
       logger.error('[天下小事]异常:' + (err && err.stack))
-      e.reply('🍃 查询天下小事出错了，请稍后再试~')
+      e.reply('🍃 查询天下小事出错了，请稍后再试')
       return true
     }
   }
@@ -761,7 +764,7 @@ export class world_news extends plugin {
   async jailListCmd (e) {
     try {
       const gid = String(e.group_id || '')
-      if (!gid) { e.reply('需在群内查看~'); return true }
+      if (!gid) { e.reply('需在群内查看'); return true }
       const f = getFake(gid)
       const now = Date.now()
       const lines = []
@@ -819,7 +822,7 @@ export class world_news extends plugin {
       return true
     } catch (err) {
       logger.error('[天下天牢]异常:' + (err && err.stack))
-      e.reply('⛓️ 查询天下天牢出错了，请稍后再试~')
+      e.reply('⛓️ 查询天下天牢出错了，请稍后再试')
       return true
     }
   }

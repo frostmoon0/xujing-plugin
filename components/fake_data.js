@@ -1,3 +1,8 @@
+import { sectMemberCapacity, sectOccupancy, canAdmitSectNpc, admitSectNpc } from './sect/capacity.js'
+import { takeVaultEquipAttrs } from './sect/war_loot.js'
+import { warActorOwner } from './sect/war_state.js'
+import { npcCanAct, npcCanThreaten, npcCanBeTarget, resolveNpcEncounter } from './npc_action.js'
+import { settleSectSuccession } from './sect/succession.js'
 /* ============================================================
  * 天下大事 · 伪玩家宗门世界 - 数据与核心逻辑
  * 伪玩家(含魔修/善恶性格)分布于宗门, 每天持续生成千奇百怪事件
@@ -5,7 +10,7 @@
  * 职位(可空缺): 宗主1/副宗主2/太上长老2/执事5/弟子N
  * 晋升: 达到本职位带上限(巅峰)+在宗资历达标 → 空缺时递补
  * 宗门战争: 统一由 components/sect/war.js 管理攻打、守备、结算与俘虏
- * 宗门覆灭: 换皮重建(改名+新宗主+慢慢招徒弟, 身份不变)
+ * 宗门覆灭: 总部攻破永久灭门；总部完好的空缺由在世门人继任
  * ============================================================ */
 import fs from 'fs'
 import YAML from 'yaml'
@@ -13,15 +18,17 @@ import { writeJsonAtomic } from './json_store.js'
 import { recoverCorruptJson } from './save_backup.js'
 import { saveOrDefer, withDeferredSaveContext } from './deferred_save.js'
 import { Plugin_Path, Save_Path } from './plugin.js'
-import { getWorld, saveWorld, getRate, addTax, taxFor, regionNameOf, REGION_KEYS, DEFAULT_REGION, REGIONS, levelNameOf } from './world_data.js' // 摆摊交税/跨区/攻打位置校验需世界经济
+import { getWorld, saveWorld, getRate, addTax, taxFor, regionNameOf, REGION_KEYS, DEFAULT_REGION, REGIONS, levelNameOf, sealBlocksTravel, FORCE_MIN, FORCE_DROP_MAX, TELEPORT_COST } from './world_data.js' // 摆摊交税/跨区/攻打位置校验需世界经济
 import { REALM_MAX_LEVEL } from './realm_cap.js'
-import { ITEM_PRICE, ITEM_TPL, MATERIAL_TPL, GONGFA_TPL, EQUIP_TPL, equipPrice, gongfaPrice, getTotalAttr, isBound, vaultEquipContrib, ensureBagShape, addItemToBag, consumeBagItem, autoEquipBest, rollEquipAttr, attrPower, itemIcon } from './equip_data.js'
+import { ITEM_PRICE, ITEM_TPL, MATERIAL_TPL, GONGFA_TPL, EQUIP_TPL, equipPrice, gongfaPrice, getTotalAttr, isBound, vaultEquipContrib, ensureBagShape, addItemToBag, consumeBagItem, autoEquipBest, rollEquipAttr, attrPower, itemIcon, isRainbowRef } from './equip_data.js'
 import { getStock, buyStock, recordActive, SHOP_CN } from './shop_data.js'
 import { RAID_LEVELS, guardPowerFor } from './raid_data.js' // 伪玩家洗劫藏宝阁(与玩家同20档难度, 用守卫战力判定成败)
 import {
   PET_CFG, getPetState, savePetState, tickPetGroup, settlePet,
   resolveEncounter, petPower, canBattle, getActivePetPower, maturePet
 } from './pet_data.js'
+import { getPuppetPower, getPuppetBattleBuff, PUPPET_INITIAL_COST, PUPPET_PASSIVE_KEYS } from './puppet_data.js'
+import { rollCaveLoot } from './cave_loot.js'
 import { speciesMeta, qualityNameOf } from './pet_species.js'
 
 const SLOT_MAP = { weapon: 'weapon', helmet: 'helmet', chest: 'chest', pants: 'pants', shoes: 'shoes', ring: 'ring' }
@@ -43,6 +50,8 @@ function fakeAddItem (bag, name, count = 1, attr = null, autoEquip = true) {
   if (EQUIP_TPL[name] || ITEM_TPL[name] || MATERIAL_TPL[name] || GONGFA_TPL[name]) {
     return addItemToBag(bag, name, count, attr, autoEquip)
   }
+  /* 成长性特殊彩武是伪玩家自铸中间物; 其余未登记模板一律不进伪玩家背包, 防止旧战利品名污染装备栏 */
+  if (name !== '成长性特殊彩武') return []
   const old = bag.items[name]
   if (!old || typeof old !== 'object') bag.items[name] = { count: itemCount(old) }
   bag.items[name].count = itemCount(bag.items[name]) + count
@@ -77,6 +86,27 @@ function fakeTransferEntry (fromBag, toBag, name) {
   if (!entry) return false
   fakeAddItem(toBag, entry.name, 1, entry.attr)
   return true
+}
+/** 旧档装备修复: 删除未登记模板的垃圾战利品, 清理空装备位/陈旧属性, 再自动穿最好的有效装备 */
+export function repairFakeEquipment (bag) {
+  if (!bag || typeof bag !== 'object') return
+  ensureBagShape(bag, { removeEquippedFromItems: false })
+  bag.equipped = bag.equipped || {}
+  bag.equippedAttr = bag.equippedAttr || {}
+  for (const slot of Object.keys(bag.equipped)) {
+    const name = bag.equipped[slot]
+    if (!name) {
+      bag.equipped[slot] = ''
+      bag.equippedAttr[slot] = null
+    } else if (!EQUIP_TPL[name] && !isRainbowRef(name)) {
+      bag.equipped[slot] = ''
+      bag.equippedAttr[slot] = null
+    }
+  }
+  for (const [name, entry] of Object.entries(bag.items || {})) {
+    if (!EQUIP_TPL[name] && !ITEM_TPL[name] && !MATERIAL_TPL[name] && !GONGFA_TPL[name] && name !== '成长性特殊彩武') delete bag.items[name]
+  }
+  autoEquipBest(bag)
 }
 function fakeAutoEquip (p) {
   ensureFakeBag(p.bag || (p.bag = {}))
@@ -183,7 +213,12 @@ function isFakeNight () {
 }
 /** 灭门后重建延迟(分钟): 散修创建宗门随机等 5~30 分钟(用户要求灭门后尽快重生) */
 export const REBUILD_MIN = [30, 30] // 伪玩家灭门重建固定30分钟(灭门空位玩家可立即覆盖建宗, 伪玩家等30分钟)
-/** 伪玩家境界上限: 与玩家一致, 最高仙帝第499重(level 567) */
+/** 伪玩家永远不能打造/使用/获得的世界级法宝; 以后新增玩家专属法宝也加这里 */
+export const FAKE_ARTIFACT_BLACKLIST = ['镇海珠']
+/** 伪玩家法宝黑名单判断 */
+export function fakeCanUseArtifact (name) {
+  return !FAKE_ARTIFACT_BLACKLIST.includes(String(name || ''))
+}
 const FAKE_MAX_LEVEL = REALM_MAX_LEVEL
 /** 散修修为带(受境界上限约束) */
 const SCATTER_BAND = [1, FAKE_MAX_LEVEL]
@@ -238,7 +273,7 @@ function actFx (p) { return ACT_FX[p && p.act] || ACT_FX['普通'] }
 /* ---------- 数据读写 ---------- */
 function emptyFake () {
   return {
-    pool: [], sects: {}, roster: {}, sectMap: {}, areas: {},
+    pool: [], sects: {}, roster: {}, sectMap: {}, areas: {}, worldLifecycleVersion: 2,
     trades: [], day: '', lastSettle: 0, lastEvents: 0, lastHistoryCleanup: 0,
     sectMines: {}, lastMaint: 0, mineEvents: [],
     evSeq: 0,
@@ -321,7 +356,7 @@ export function getFake (gid) {
   const f = Object.assign(emptyFake(), loaded || {})
   f.gid = g
   /* 只有成功解析出的真正空档才允许初始化 */
-  if (!Object.keys(f.sects || {}).length || !Object.values(f.roster || {}).some(p => p && p.alive)) {
+  if (!loaded?.preRan && !loaded?.worldLifecycleVersion && !Object.keys(f.sects || {}).length && !Object.values(f.roster || {}).some(p => p && p.alive)) {
     const nf = emptyFake()
     nf.gid = g
     initFake(nf)
@@ -451,13 +486,12 @@ export function getFake (gid) {
     saveFake(f, g)
   }
   /* 伪玩家背包迁移到 canonical 格式；版本命中后不再重复扫描全部人口。 */
-  const FAKE_BAG_VERSION = 1
+  const FAKE_BAG_VERSION = 2
   if ((Number(f.bagVersion) || 0) < FAKE_BAG_VERSION) {
     for (const p of Object.values(f.roster || {})) {
       if (!p) continue
       const bag = p.bag || (p.bag = {})
-      ensureBagShape(bag, { removeEquippedFromItems: false })
-      autoEquipBest(bag)
+      repairFakeEquipment(bag)
     }
     f.bagVersion = FAKE_BAG_VERSION
     saveFake(f, g)
@@ -611,6 +645,7 @@ function bindFakeGid (p, gid) {
 /* 补齐伪玩家默认字段(玩家化: 钱/exp/背包/活动/大区位置 + 关系链), 兼容旧档 */
 function personDefaults (p) {
   if (!p) return p
+  if (p.lifeAt === undefined) p.lifeAt = p.joinAt || Date.now()
   if (!p.relations) p.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], siblings: [], kin: [] }
   if (!p.relations.confidants) p.relations.confidants = []
   if (!p.relations.siblings) p.relations.siblings = []
@@ -670,7 +705,8 @@ function sectLocOf (f, sectId) {
   return best
 }
 export function addPerson (f, name, sectId, pos, level) {
-  if (!f.roster[name] && fakeAliveCount(f) >= FAKE_MAX) return null
+  if (!canAdmitSectNpc(f, sectId, name)) return null
+  if (!f.roster[name]?.alive && fakeAliveCount(f) >= FAKE_MAX) return null
   const path = rollPath()
   const p = personDefaults({
     name, sect: sectId, pos, status: 'sect', path, trait: rollTrait(path), act: rollAct(),
@@ -702,7 +738,7 @@ export function cleanSectMaps (f) {
   let changed = false
   const valid = (sid, name) => {
     const p = name && f.roster && f.roster[name]
-    return !!(p && p.alive && !p.realmBusy && p.status === 'sect' && p.sect === sid)
+    return !!(p && p.alive && p.status === 'sect' && p.sect === sid)
   }
   for (const [sid, sm] of Object.entries(f.sectMap)) {
     if (!sm) continue
@@ -824,6 +860,22 @@ export function personPower (p) {
   const realm = realmPowerOf(p.level)
   const equip = getTotalAttr(p.bag || {}).power
   const pet = p && p.__fakeGid ? getActivePetPower(p.__fakeGid, p.name, 'fake') : 0
+  /* 傀儡祭出战力与玩家 calcCombatPower 同源; 被动buff也接进伪玩家战力 */
+  let puppet = 0
+  let puppetBuff = { atk: 1, def: 1, hp: 1, crit: 0, cdmg: 0 }
+  try { puppet = getPuppetPower(p.bag || {}); puppetBuff = getPuppetBattleBuff(p.bag || {}) } catch (err) { puppet = 0 }
+  /* 万魂幡魂力/辅助: 与玩家 getWanhunSoulPower/getWanhunBattleBuff 同口径 */
+  let soulPower = 0
+  let wanhunAtk = 1
+  const wanhun = p.bag && p.bag.artifacts ? p.bag.artifacts.wanhun : null
+  if (wanhun && wanhun.equipped && wanhun.mainSoul) {
+    const cap = Math.max(0, Number(p.level) || 0)
+    const ml = Math.max(0, Math.min(cap, Number(wanhun.mainSoul.level) || 0))
+    soulPower = realmPowerOf(ml)
+    for (const d of (wanhun.deputySouls || [])) if (d) soulPower += Math.round(realmPowerOf(Math.min(cap, Number(d.level) || 0)) / 3)
+    if (wanhun.deployed) wanhunAtk = 1 + (0.02 + (Math.max(1, Math.min(9, Number(wanhun.rank) || 1)) - 1) * (0.98 / 8))
+  }
+  const dingxianyou = !!(p.bag && p.bag.artifacts && p.bag.artifacts.dingxianyou && p.bag.artifacts.dingxianyou.equipped)
   /* 功法攻击倍率(与玩家一致: 运转功法 fx.atk 百分比) */
   let atk = 1
   const g = p.activeGongfa && GONGFA_TPL[p.activeGongfa]
@@ -833,7 +885,8 @@ export function personPower (p) {
     const b = PILL_BUFF[p.pill.name]
     if (b && b.atk) atk += b.atk
   }
-  let pw = Math.max(0, Math.round((realm + equip + pet) * atk))
+  let pw = Math.max(0, Math.round((realm + equip + pet + puppet + soulPower) * atk * wanhunAtk * (puppetBuff.atk || 1)))
+  if (dingxianyou) pw = Math.round(pw * 1.1)
   /* 负伤: 有效伤势等级随时间衰减, 轻/中/重伤 扣20/40/60%战力 — 伪玩家受伤后战力真实下降, 不再"活蹦乱跳" */
   if (p.injury && p.injury.level) {
     const total = FAKE_INJ_RECOVER_MIN[p.injury.level] * 60000
@@ -893,7 +946,7 @@ export function clearRealmBusy (f, names, realmId = null, gid) {
   return changed
 }
 /** 散修列表 */
-function scatters (f) { return Object.values(f.roster).filter(p => p.alive && !p.realmBusy && p.status === 'scatter' && !p.servantOf && !isInSectMine(f, p.name)) }
+function scatters (f) { return Object.values(f.roster).filter(p => npcCanAct(f, p) && p.status === 'scatter') }
 
 /* ---------- 事件记录 ---------- */
 /** 自动归类为大事的事件类型(江湖格局变化) */
@@ -1150,11 +1203,76 @@ export function playerTitle (gid, uid, nickname) {
   return `散修 ${name}`
 }
 
+/* ---------- 伪玩家遗产/机缘库 ---------- */
+function fatePoolOf (f) {
+  if (!f.fatePool || typeof f.fatePool !== 'object') f.fatePool = { stones: 0, items: [] }
+  if (!Array.isArray(f.fatePool.items)) f.fatePool.items = []
+  f.fatePool.stones = Math.max(0, Math.floor(Number(f.fatePool.stones) || 0))
+  return f.fatePool
+}
+/** 死亡者最亲的在世之人: 道侣 > 知己/手足 > 师父/徒弟 > 亲族 > 好友 > 同门 */
+function closestKin (f, p) {
+  const r = p && p.relations ? p.relations : {}
+  const order = []
+  const add = n => { if (n && n !== p.name && !order.includes(n)) order.push(n) }
+  add(r.spouse)
+  for (const n of (r.confidants || [])) add(n)
+  for (const n of (r.siblings || [])) add(n)
+  add(r.master)
+  for (const n of (r.disciples || [])) add(n)
+  for (const n of (r.kin || [])) add(n)
+  for (const n of (r.friends || [])) add(n)
+  try { for (const n of sectAlive(f, p.sect || '')) add(n.name) } catch (err) { }
+  return order.map(n => f.roster[n]).find(q => q && q.alive && q.name !== p.name) || null
+}
+/** 无亲属时把装备/道具/灵石放进本群机缘库, 等别的伪玩家随机遇到 */
+function assetsToFatePool (f, p) {
+  const pool = fatePoolOf(f)
+  if (!p || !p.bag) return
+  pool.stones += Math.max(0, Math.floor(Number(p.money) || 0))
+  p.money = 0
+  const bag = ensureFakeBag(p.bag)
+  for (const [name, raw] of Object.entries(bag.items || {})) {
+    if (isBound(name)) continue
+    const groups = EQUIP_TPL[name] && Array.isArray(raw?.list) && raw.list.length
+      ? raw.list.map(g => ({ count: itemCount(g), attr: g.attr || null }))
+      : [{ count: itemCount(raw), attr: raw && typeof raw === 'object' ? raw.attr || null : null }]
+    for (const g of groups) {
+      if (g.count > 0) pool.items.push({ name, count: g.count, attr: g.attr || null })
+    }
+    delete bag.items[name]
+  }
+  for (const [slot, name] of Object.entries(bag.equipped || {})) {
+    if (!name || isBound(name)) continue
+    pool.items.push({ name, count: 1, attr: bag.equippedAttr?.[slot] || null })
+    bag.equipped[slot] = ''
+    if (bag.equippedAttr) bag.equippedAttr[slot] = null
+  }
+}
+/** 死亡资产处置: 有最亲在世者直接继承; 没有则进机缘库 */
+export function inheritFakeAssets (f, p, now = Date.now()) {
+  if (!p || !p.bag) return
+  const hasAssets = (Number(p.money) || 0) > 0 || Object.keys(p.bag.items || {}).length > 0 || Object.values(p.bag.equipped || {}).some(Boolean)
+  if (!hasAssets) return
+  const kin = closestKin(f, p)
+  if (kin) {
+    const loot = robSpoils(f, kin, p)
+    logEvent(f, 'inherit', `【遗产】${p.name} 陨落，遗物由${kin.name}继承${loot.length ? `：${loot.join('、')}` : ''}`, now, { who: [p.name, kin.name], onlyPerson: true })
+    return
+  }
+  assetsToFatePool(f, p)
+  logEvent(f, 'fate', `【机缘库】${p.name} 陨落后无人继承，遗物封入机缘库，等待有缘人`, now, { who: [p.name], onlyPerson: true })
+}
+
 /* ---------- 死亡处理 ---------- */
 /** 伪玩家死亡: 名字回池; 弟子立即补新人(刚刚踏入修仙界); 管理层职位留空等递补 */
-export function killPerson (f, p, txt, t = Date.now()) {
+export function killPerson (f, p, txt, t = Date.now(), opts = {}) {
   if (!p || !p.alive) return
   p.alive = false
+  /* 死亡前先处理资产: 有在世最亲者继承, 无亲属进机缘库; PvP 已 robSpoils 清空则不重复 */
+  if (opts.inherit !== false) {
+    try { inheritFakeAssets(f, p, t) } catch (err) { }
+  }
   const isSect = p.status === 'sect' && p.sect
   const sid = p.sect
   if (isSect) removeFromSectMap(f, sid, p.name)
@@ -1175,6 +1293,8 @@ export function killPerson (f, p, txt, t = Date.now()) {
     if (!op.alive || !op.relations) continue
     const en = op.relations.enemies
     if (en && en.includes(p.name)) op.relations.enemies = en.filter(n => n !== p.name)
+    if (op.enemyLives) delete op.enemyLives[p.name]
+    if (op.bloodEnemies) delete op.bloodEnemies[p.name]
   }
   returnName(f, p.name)
   /* 死亡/被处决名 1 天禁用: 补员(drawName)避开, 避免同名"复活"观感 */
@@ -1184,7 +1304,7 @@ export function killPerson (f, p, txt, t = Date.now()) {
   if (isSect && p.pos === 'dizi') {
     const n = drawName(f)
     if (n) {
-      addPerson(f, n, sid, 'dizi', 1)
+      if (!addPerson(f, n, sid, 'dizi', 1)) { returnName(f, n); return }
       logEvent(f, 'join', `【入宗】${n} 刚刚踏入修仙界，拜入 ${sectName(f, sid)} 为弟子`, t)
     }
   }
@@ -1240,11 +1360,11 @@ export function isInSectMine (f, name) {
 
 /* ---------- 事件生成(千奇百怪, 0~4起/小时) ---------- */
 function pickAlive (f, except = null) {
-  const arr = Object.values(f.roster).filter(p => p.alive && !p.realmBusy && p.name !== except && !isInSectMine(f, p.name))
+  const arr = Object.values(f.roster).filter(p => npcCanAct(f, p) && p.name !== except)
   return arr.length ? pick(arr) : null
 }
 function pickBy (f, pred) {
-  const arr = Object.values(f.roster).filter(p => p.alive && !p.realmBusy && !isInSectMine(f, p.name) && pred(p))
+  const arr = Object.values(f.roster).filter(p => npcCanAct(f, p) && pred(p))
   return arr.length ? pick(arr) : null
 }
 function otherSect (f, id) {
@@ -1253,7 +1373,8 @@ function otherSect (f, id) {
 }
 /** 受害者加权挑选(修仙世界: 软柿子+肥羊): 散修无宗门庇护×3(杀了白杀), 身家越厚越易被盯上(财不外露), 背包越鼓越招祸 */
 function pickVictim (f, except = null) {
-  const cand = [...scatters(f), ...Object.values(f.roster).filter(p => p.alive && !p.realmBusy && p.status === 'sect' && p.name !== except && !isInSectMine(f, p.name))].filter(p => p.name !== except)
+  const actor = f.roster[except]
+  const cand = Object.values(f.roster).filter(p => npcCanBeTarget(f, p, actor))
   if (!cand.length) return null
   const w = cand.map(p => {
     let w0 = p.status === 'sect' && p.sect ? 1 : 3
@@ -1267,25 +1388,22 @@ function pickVictim (f, except = null) {
   for (const x of w) { r -= x.w0; if (r <= 0) return x.p }
   return w[0].p
 }
-/** 是否下杀手: 散修易被灭口(无靠山); 宗门弟子除非穷凶极恶(嗜杀/魔道)否则只抢不杀(杀=结仇) */
-function shouldKill (f, k, v) {
-  const evil = k.path === '魔道' || k.trait === '嗜杀'
-  if (v && v.status === 'sect' && v.sect) return evil && Math.random() < 0.4
-  return Math.random() < (evil ? 0.5 : 0.3)
-}
 /** 击杀宗门弟子 = 与对方全宗结仇(同门/好友记入双方仇人名单, 驱动复仇/仇杀/和解) */
 function createKillGrudge (f, k, v) {
-  if (!k || !v || v.status !== 'sect' || !v.sect) return
-  if (!k.relations) k.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], kin: [] }
-  if (!v.relations) v.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], kin: [] }
-  const mates = sectAlive(f, v.sect).map(p => p.name).filter(n => n !== v.name)
-  const kin = [...new Set([...mates, ...(v.relations.friends || []), ...(v.relations.confidants || []), ...(v.relations.kin || [])])]
-  for (const n of kin) {
+  if (!k || !v) return
+  const r = v.relations || {}
+  const close = new Set([r.master, r.spouse, ...(r.disciples || []), ...(r.friends || []), ...(r.confidants || []), ...(r.siblings || []), ...(r.kin || [])].filter(Boolean))
+  for (const n of close) {
     const p = f.roster[n]
-    if (!p || !p.alive) continue
-    if (!p.relations) p.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], kin: [] }
+    if (!p?.alive || p.name === k.name) continue
+    p.relations ||= {}; p.relations.enemies ||= []
     if (!p.relations.enemies.includes(k.name)) p.relations.enemies.push(k.name)
-    if (!k.relations.enemies.includes(p.name)) k.relations.enemies.push(p.name)
+    ;(p.enemyLives ||= {})[k.name] = k.lifeAt ?? k.joinAt ?? 0
+    ;(p.bloodEnemies ||= {})[k.name] = k.lifeAt ?? k.joinAt ?? 0
+  }
+  if (v.sect && f.sects[v.sect] && k.sect && k.sect !== v.sect) {
+    const grudges = f.sects[v.sect].grudges ||= {}
+    grudges[k.sect] = Math.min(100, (grudges[k.sect] || 0) + 10)
   }
 }
 /** 杀人(带结仇): 先结仇再击杀; 杀孽业障累积(因果缠身, 杀宗门弟子罪孽更重) */
@@ -1293,6 +1411,10 @@ function killWithGrudge (f, k, v, txt, t) {
   createKillGrudge(f, k, v)
   k.kills = (k.kills || 0) + 1
   k.sin = (k.sin || 0) + (v && v.status === 'sect' && v.sect ? 2 : 1)
+  /* 杀人越货类击杀: 若调用方还没搜刮, 先把背包/身上装备/灵石抢给凶手 */
+  if (v && v.bag && ((Number(v.money) || 0) > 0 || Object.keys(v.bag.items || {}).length || Object.values(v.bag.equipped || {}).some(Boolean))) {
+    try { robSpoils(f, k, v) } catch (err) { }
+  }
   killPerson(f, v, txt, t)
 }
 /** 关系池(驱动行为的词条): 挚友/知己/手足/亲族/道侣/师父/徒弟/师兄弟 + 可选同门; 返回在世的名字列表(不含自己) */
@@ -1341,43 +1463,58 @@ function genFight (f, t) {
   const place = pick(['山门前', '演武场', '秘境入口', '集市', '论道台'])
   return { type: 'fight', ...evWho([a, b]), txt: `【切磋】${a.name} 与 ${b.name} 于${place}切磋，${win.name} 技高一筹` }
 }
-/* 2.仇杀(嗜杀/好斗/魔修; 优先仇人, 其次异宗) */
-function genMurder (f, t) {
-  const k = pickBy(f, p => p.trait === '嗜杀' || p.trait === '好斗')
+/** 日常冲突的公共执行入口：胜负成立后才处理战利品或死亡。 */
+export function npcConflict (f, actors, target, t, { label = '冲突', lethal = false, vendetta = false, loot = true } = {}) {
+  const k = actors[0]
+  const result = resolveNpcEncounter(f, actors, target, personPower, Date.now(), { lethal, vendetta })
+  if (!result.ok) return { ...result, event: result.reason === 'outmatched' ? { type: 'flavor', ...evWho([...actors, target]), txt: `【避战】${k.name} 见 ${target.name} 实力占优，放弃出手` } : null }
+  if (!result.won) return { ...result, event: { type: 'fight', ...evWho([...actors, target]), txt: `【${label}】${k.name} 与 ${target.name} 交手失利，负伤退走` } }
+  const rel = relLabelOf(f, k, target.name)
+  const familiar = rel !== '故人' && !(k.relations?.enemies || []).includes(target.name)
+  let spoils = []
+  if (loot) {
+    if (familiar) {
+      const gold = Math.min(Number(target.money) || 0, rand([10, 100]))
+      if (gold > 0) { target.money -= gold; k.money = (k.money || 0) + gold; spoils = [`${gold}灵石`] }
+    } else spoils = robSpoils(f, k, target)
+  }
+  if (result.kill && !familiar) {
+    killWithGrudge(f, k, target, `【${label}】${actors.map(p => p.name).join('、')} 击败并杀死 ${target.name}${spoils.length ? `，夺得${spoils.join('、')}` : ''}`, t)
+    return { ...result, killed: true, event: null }
+  }
+  if (!familiar) {
+    target.relations ||= {}; target.relations.enemies ||= []
+    if (!target.relations.enemies.includes(k.name)) target.relations.enemies.push(k.name)
+    ;(target.enemyLives ||= {})[k.name] = k.lifeAt ?? k.joinAt ?? 0
+  }
+  return { ...result, killed: false, event: { type: loot ? 'rob' : 'fight', ...evWho([...actors, target]), txt: `【${label}】${actors.map(p => p.name).join('、')} 击败 ${target.name}${spoils.length ? `，取走${spoils.join('、')}` : ''}，${target.name} 负伤逃脱` } }
+}
+
+/* 仇杀：死仇优先，异地先旅行；攻击明显不敌者之前会退避。 */
+export function genMurder (f, t) {
+  const k = pickBy(f, p => npcCanThreaten(f, p) && (p.trait === '嗜杀' || p.trait === '好斗'))
   if (!k) return null
-  let v = null
-  const enemies = (k.relations && k.relations.enemies) || []
-  if (enemies.length) v = pickBy(f, p => p.alive && p.name !== k.name && enemies.includes(p.name))
-  if (!v) v = pickBy(f, p => p.alive && p.name !== k.name && (!p.sect || p.sect !== k.sect))
-  if (!v) v = pickAlive(f, k.name)
+  const names = (k.relations?.enemies || []).filter(n => f.roster[n]?.alive && (k.enemyLives?.[n] === undefined || k.enemyLives[n] === (f.roster[n].lifeAt ?? f.roster[n].joinAt ?? 0)))
+  let v = pickBy(f, p => names.includes(p.name) && npcCanBeTarget(f, p, k))
+  if (!v && names.length) {
+    const remote = names.map(n => f.roster[n]).find(p => npcCanAct(f, p) && (p.loc || DEFAULT_REGION) !== (k.loc || DEFAULT_REGION) && personPower(k) >= personPower(p) * 0.9)
+    if (remote && fakeTravelTo(f, k, remote.loc || DEFAULT_REGION, Date.now(), '寻仇')) return { type: 'flavor', ...evWho([k, remote]), txt: `【寻仇】${k.name} 启程追寻 ${remote.name} 的踪迹` }
+  }
+  if (!v) v = pickBy(f, p => npcCanBeTarget(f, p, k) && (!p.sect || p.sect !== k.sect))
   if (!v) return null
-  k.kills = (k.kills || 0) + 1
-  killPerson(f, v, `【仇杀】${k.name} 出手狠辣，${v.name} 命丧其手`, t)
-  return null
+  return npcConflict(f, [k], v, t, { label: '仇杀', lethal: true, vendetta: names.includes(v.name) }).event
 }
 /* 3.杀人越货→叛徒(散修或投他宗) */
 export function genRobKill (f, t) {
-  const k = pickBy(f, p => p.trait === '嗜杀' || p.path === '魔道')
+  const k = pickBy(f, p => npcCanThreaten(f, p) && (p.trait === '嗜杀' || p.path === '魔道'))
   if (!k) return null
-  let v = null
-  /* 有一定概率对好友下黑手(好友也可能背叛) */
-  const friends = ((k.relations && k.relations.friends) || []).concat((k.relations && k.relations.confidants) || []).filter(n => f.roster[n] && f.roster[n].alive)
-  if (friends.length && Math.random() < 0.25) v = f.roster[pick(friends)]
-  if (!v) v = pickVictim(f, k.name)
+  const v = pickVictim(f, k.name)
   if (!v) return null
   const wasSect = k.status === 'sect' && k.sect
   const oldSect = k.sect
   const oldSectName = wasSect ? sectName(f, oldSect) : ''
-  /* 境界/战力不敌目标时，杀人越货失败，不能越级强杀 */
-  if (personPower(k) < personPower(v)) {
-    const whoK = wasSect ? oldSectName : '散修'
-    const whoV = v.status === 'sect' && v.sect ? sectName(f, v.sect) : '散修'
-    return { type: 'fight', ...evWho([k, v]), txt: `【杀人越货】${whoK} ${k.name} 试图劫杀 ${whoV} ${v.name}，却因境界/战力不足被击退` }
-  }
-  /* 杀人越货: 先把对方灵石/装备(含穿身)/未修炼的功法书全抢到自己背包 */
-  const loot = robSpoils(f, k, v)
-  const lootTxt = loot.length ? `，劫得 ${loot.join('、')}` : ''
-  killWithGrudge(f, k, v, `【杀人越货】${k.name} 劫掠并杀害了 ${v.name}${lootTxt}`, t)
+  const result = npcConflict(f, [k], v, t, { label: '杀人越货', lethal: true })
+  if (!result.killed) return result.event
   if (!wasSect) return null
   /* 管理层: 宗主杀人越货永不叛逃(宗门即己身); 太上/副宗平时不叛, 仅宗门严重衰落/忠诚极低(离心)时才有极低概率弃宗(凡事不绝对) */
   if (k.pos === 'zongzhu') return null
@@ -1391,10 +1528,7 @@ export function genRobKill (f, t) {
     return { type: 'betray', ...evMeta(k), txt: `【叛逃】${k.name} 杀人越货后叛出${oldSectName}，沦为散修` }
   }
   const target = otherSect(f, oldSect)
-  if (target && f.sectMap[target] && f.sectMap[target].zongzhu) {
-    k.sect = target; k.pos = 'dizi'; k.status = 'sect'
-    k.level = clamp(k.level, POS.dizi.band[0], POS.dizi.band[1]) // 入宗修为收敛到弟子带
-    f.sectMap[target].dizi.push(k.name)
+  if (target && f.sectMap[target]?.zongzhu && admitSectNpc(f, k, target)) {
     return { type: 'betray', ...evMeta(k), txt: `【叛逃】${k.name} 杀人越货后叛出${oldSectName}，转投${sectName(f, target)}` }
   }
   k.status = 'scatter'; k.sect = null; k.pos = null
@@ -1408,12 +1542,8 @@ function genSuddenDeath (f, t) {
   killPerson(f, p, `【暴毙】${p.name} 突然暴毙${p.status === 'sect' ? `，${sectName(f, p.sect)}${posCn}之位悬空` : '，客死他乡'}`, t)
   return null
 }
-/** 宗门弟子上限: 20 + 演武场等级×10(伪玩家与玩家宗门一致, 升级演武场扩容) */
-export function sectCap (f, sid) {
-  const s = f.sects && f.sects[sid]
-  const yanwu = (s && s.facilities && s.facilities.yanwu) || 0
-  return SECT_TARGET + yanwu * 10
-}
+/** NPC门人容量: min(70, 20 + 演武场等级×10)(伪玩家与玩家宗门一致, 升级演武场扩容) */
+export function sectCap (f, sid) { return sectMemberCapacity(f, sid) }
 /** 宗门是否超员(在世成员数 > 上限): 超员后弟子更容易离宗/叛宗 */
 function isSectOver (f, id) {
   return !!id && sectAlive(f, id).length > sectCap(f, id)
@@ -1432,38 +1562,24 @@ function leaderRootless (f, p) {
   const loy = Number(p.loyalty) >= 0 ? (p.loyalty || 0) : 60
   return st >= 1.4 || loy < 25
 }
-/* 宗门超员结算: 每分钟按超员人数累积概率, 让弟子离宗/叛宗(超员越狠概率越高, 封顶85%); 优先挤走无同宗羁绊者 */
-function overCapSettle (f, now = Date.now()) {
+/** 旧档或设施降级超员时，优先疏散可自由行动的普通门人；不杀人、不清除资产、不强拆战场。 */
+export function overCapSettle (f, now = Date.now()) {
+  let changed = false
   for (const id of Object.keys(f.sects || {})) {
-    const s = f.sects[id]
-    if (!s) continue
-    const alive = sectAlive(f, id)
-    const over = alive.length - sectCap(f, id)
+    const members = sectAlive(f, id)
+    let over = sectOccupancy(f, id) - sectCap(f, id)
     if (over <= 0) continue
-    const p = Math.min(0.85, 0.15 * over)
-    if (Math.random() >= p) continue
-    /* 超员挤走只挤弟子/执事, 管理层(宗主/太上/副宗)不会被挤走 */
-    let cands = alive.filter(x => !x.servantOf && !isInSectMine(f, x.name) && x.pos !== 'zongzhu' && x.pos !== 'taishang' && x.pos !== 'fuzong' && !hasBondInSect(f, x))
-    if (!cands.length) cands = alive.filter(x => !x.servantOf && !isInSectMine(f, x.name) && x.pos !== 'zongzhu' && x.pos !== 'taishang' && x.pos !== 'fuzong')
-    if (!cands.length) continue
-    const p2 = cands[Math.floor(Math.random() * cands.length)]
-    const old = sectName(f, id)
-    removeFromSectMap(f, id, p2.name)
-    /* 性格恶劣/概率 → 叛宗(可能转投他宗); 否则离宗 */
-    const betray = p2.trait === '好斗' || p2.trait === '嗜杀' || Math.random() < 0.4
-    if (betray && Math.random() < 0.6) {
-      const target = otherSect(f, id)
-      if (target && f.sectMap[target] && f.sectMap[target].zongzhu) {
-        p2.sect = target; p2.pos = 'dizi'; p2.status = 'sect'
-        p2.level = clamp(p2.level, POS.dizi.band[0], POS.dizi.band[1])
-        f.sectMap[target].dizi.push(p2.name)
-        logEvent(f, 'betray', `【叛宗】${p2.name} 因${old}人满为患，叛出并转投${sectName(f, target)}`, now, evMeta(p2))
-        continue
-      }
+    const candidates = members.filter(p => npcCanAct(f, p) && !['zongzhu', 'taishang', 'fuzong'].includes(p.pos))
+      .sort((a, b) => Number(hasBondInSect(f, a)) - Number(hasBondInSect(f, b)) || (a.loyalty || 0) - (b.loyalty || 0) || (b.joinAt || 0) - (a.joinAt || 0))
+    for (const p of candidates) {
+      if (over <= 0) break
+      removeFromSectMap(f, id, p.name)
+      p.sect = null; p.pos = null; p.status = 'scatter'
+      logEvent(f, 'leave', `【离宗】${sectName(f, id)} 门人超出容量，${p.name} 离宗另寻去处`, now, { who: [p.name], sect: id })
+      over--; changed = true
     }
-    p2.status = 'scatter'; p2.sect = null; p2.pos = null
-    logEvent(f, betray ? 'betray' : 'leave', betray ? `【叛宗】${p2.name} 因${old}人满为患，叛出宗门沦为散修` : `【离宗】${p2.name} 因${old}人满为患，收拾行囊离开`, now, evMeta(p2))
   }
+  return changed
 }
 /* 5.叛逃(离宗→散修/转宗; 有同宗羁绊者叛逃概率大降) */
 function genBetray (f, t) {
@@ -1487,10 +1603,7 @@ function genBetray (f, t) {
     return { type: 'betray', ...evMeta(p), txt: `【叛逃】${p.name} 与宗门不和，叛出${old}，沦为散修` }
   }
   const target = otherSect(f, sid)
-  if (target && f.sectMap[target].zongzhu) {
-    p.sect = target; p.pos = 'dizi'; p.status = 'sect'
-    p.level = clamp(p.level, POS.dizi.band[0], POS.dizi.band[1]) // 入宗修为收敛到弟子带
-    f.sectMap[target].dizi.push(p.name)
+  if (target && f.sectMap[target]?.zongzhu && admitSectNpc(f, p, target)) {
     return { type: 'betray', ...evMeta(p), txt: `【叛逃】${p.name} 叛出${old}，转投${sectName(f, target)}` }
   }
   p.status = 'scatter'; p.sect = null; p.pos = null
@@ -1509,7 +1622,7 @@ function genLeave (f, t) {
   const old = sectName(f, p.sect)
   removeFromSectMap(f, p.sect, p.name)
   p.status = 'scatter'; p.sect = null; p.pos = null
-  return { type: 'leave', ...evMeta(p), txt: `【离宗】${p.name} 在${old}待得不开心，收拾行囊离开了` }
+  return { type: 'leave', ...evMeta(p), txt: `【离宗】${p.name} 离开${old}，转为散修` }
 }
 /* 7.散修入宗 */
 function genScatterJoin (f, t) {
@@ -1530,7 +1643,7 @@ function genScatterJoin (f, t) {
 }
 /* 新弟子归属感: 入宗<48h 的新弟子更容易与同门结为师兄弟/挚友/道侣, 增强归属感(降低离宗/被挖) */
 function genWelcome (f, t) {
-  const fresh = Object.values(f.roster).filter(p => p.alive && !p.realmBusy && !p.servantOf && !isInSectMine(f, p.name) && p.status === 'sect' && p.sect && (t - (p.joinAt || t)) < 48 * 3600000 && p.pos === 'dizi')
+  const fresh = Object.values(f.roster).filter(p => p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !p.servantOf && !isInSectMine(f, p.name) && p.status === 'sect' && p.sect && (t - (p.joinAt || t)) < 48 * 3600000 && p.pos === 'dizi')
   if (!fresh.length) return null
   const a = pick(fresh)
   const mates = sectAlive(f, a.sect).filter(p => p.name !== a.name)
@@ -1566,35 +1679,22 @@ function genWelcome (f, t) {
 }
 /* 灭门复仇: 幸存者寻仇(劫道/打劫/激战/击杀仇人; 仇人皆亡或放下恩怨则释然) */
 function genVendetta (f, t) {
-  const av = pickBy(f, p => p.alive && p.vendetta)
+  const av = pickBy(f, p => p.vendetta && npcCanThreaten(f, p))
   if (!av) return null
-  const v = av.vendetta || {}
-  const enemies = ((av.relations && av.relations.enemies) || []).filter(n => n !== av.name && f.roster[n] && f.roster[n].alive)
+  const enemies = (av.relations?.enemies || []).map(n => f.roster[n]).filter(p => p?.alive && (av.enemyLives?.[p.name] === undefined || av.enemyLives[p.name] === (p.lifeAt ?? p.joinAt ?? 0)))
+  const target = enemies.find(p => npcCanBeTarget(f, p, av))
+  if (target) {
+    const result = npcConflict(f, [av], target, t, { label: '寻仇', lethal: true, vendetta: true })
+    if (result.killed) av.vendetta = null
+    return result.event
+  }
   if (enemies.length) {
-    const target = f.roster[pick(enemies)]
-    const whoA = av.status === 'sect' && av.sect ? sectName(f, av.sect) : '散修'
-    const act = Math.random()
-    if (act < 0.35) {
-      /* 劫道打劫 */
-      const loot = robSpoils(f, av, target)
-      const lootTxt = loot.length ? `，劫走 ${loot.join('、')}` : ''
-      return { type: 'fight', ...evWho([av, target]), txt: `【寻仇】${whoA} ${av.name} 为${v.sectName || '故宗'}覆灭之仇劫道${target.name}${lootTxt}` }
-    }
-    if (act < 0.6) {
-      /* 手刃仇人, 大仇得报 */
-      av.kills = (av.kills || 0) + 1
-      killWithGrudge(f, av, target, `【寻仇】${whoA} ${av.name} 手刃${v.sectName || '故宗'}之仇人 ${target.name}，大仇得报`, t)
-      av.vendetta = null
-      return null
-    }
-    return { type: 'fight', ...evWho([av, target]), txt: `【寻仇】${whoA} ${av.name} 为${v.sectName || '故宗'}覆灭之仇，与 ${target.name} 激战一场` }
+    const remote = enemies.find(p => npcCanAct(f, p) && personPower(av) >= personPower(p) * 0.9 && (p.loc || DEFAULT_REGION) !== (av.loc || DEFAULT_REGION))
+    if (remote) fakeTravelTo(f, av, remote.loc || DEFAULT_REGION, Date.now(), '故宗复仇')
+    return null
   }
-  /* 仇人皆亡/无仇人: 一半发奋重建, 一半放下恩怨 */
-  if (Math.random() < 0.5) {
-    av.vendetta = null
-    return { type: 'flavor', ...evMeta(av), txt: `【释然】${av.name} 淡看${v.sectName || '故宗'}覆灭之仇，放下恩怨重新修行` }
-  }
-  return null
+  av.vendetta = null
+  return { type: 'flavor', ...evMeta(av), txt: `【释然】${av.name} 的旧仇已散，重新踏上修行之路` }
 }
 /* 散修开宗立派(无地盘的散修也能建宗): 开宗者就任宗主, 拉兄弟好友/旧同门/投缘散修一起入伙; 新宗暂无地盘 */
 function genScatterFoundSect (f, t) {
@@ -1626,21 +1726,17 @@ function genScatterFoundSect (f, t) {
   const r = p.relations || {}
   const kin = [].concat(r.friends || [], r.confidants || [], r.siblings || [], r.kin || [],
     r.master ? [r.master] : [], r.disciples || [])
-  const mates = new Set(kin.filter(n => f.roster[n] && f.roster[n].alive && f.roster[n].status === 'scatter'))
+  const mates = new Set(kin.filter(n => f.roster[n] && npcCanAct(f, f.roster[n]) && f.roster[n].status === 'scatter' && (f.roster[n].loc || DEFAULT_REGION) === (p.loc || DEFAULT_REGION)))
   const joinTxt = []
   for (const nm of mates) {
     const q = f.roster[nm]
-    q.sect = id; q.pos = 'dizi'; q.status = 'sect'
-    q.level = clamp(q.level, POS.dizi.band[0], POS.dizi.band[1])
-    f.sectMap[id].dizi.push(q.name)
+    if (!admitSectNpc(f, q, id)) continue
     joinTxt.push(q.name)
   }
   /* 再拉若干投缘散修凑足门庭 */
   const extra = scatters(f).filter(x => x.name !== p.name && !mates.has(x.name)).slice(0, rand([1, 3]))
   for (const q of extra) {
-    q.sect = id; q.pos = 'dizi'; q.status = 'sect'
-    q.level = clamp(q.level, POS.dizi.band[0], POS.dizi.band[1])
-    f.sectMap[id].dizi.push(q.name)
+    if (!admitSectNpc(f, q, id)) continue
     joinTxt.push(q.name)
   }
   return { type: 'rebuild', ...evMeta(p), who: [p.name, ...joinTxt],
@@ -1648,7 +1744,7 @@ function genScatterFoundSect (f, t) {
 }
 /* 8.收养遗孤(新弟子入宗) */
 function genAdopt (f, t) {
-  const ids = Object.keys(f.sects).filter(id => f.sectMap[id] && f.sectMap[id].zongzhu && sectAlive(f, id).length < sectCap(f, id))
+  const ids = Object.keys(f.sects).filter(id => f.sectMap[id] && f.sectMap[id].zongzhu && canAdmitSectNpc(f, id))
   if (!ids.length) return null
   const target = pick(ids)
   const n = drawName(f)
@@ -1744,7 +1840,7 @@ function genDisciple (f, t) {
 function genSibling (f, t) {
   const a = pickAlive(f)
   if (!a) return null
-  const cands = Object.values(f.roster).filter(p => p.alive && !p.realmBusy && p.name !== a.name && Math.abs((p.level || 0) - (a.level || 0)) <= 8)
+  const cands = Object.values(f.roster).filter(p => p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && p.name !== a.name && Math.abs((p.level || 0) - (a.level || 0)) <= 8)
   if (!cands.length) return null
   const b = pick(cands)
   const ra = a.relations || (a.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], siblings: [], kin: [] })
@@ -1852,7 +1948,7 @@ function genBeast (f, t) {
 }
 /* 18.夺宝(修仙世界: 天材地宝现世群雄逐鹿, 强者得宝, 弱者或伤或亡) */
 function genTreasure (f, t) {
-  const cand = Object.values(f.roster).filter(p => p.alive && !p.realmBusy)
+  const cand = Object.values(f.roster).filter(p => p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name))
   if (cand.length < 2) return null
   const n = Math.min(4, 2 + Math.floor(Math.random() * 2)) // 2~3人争抢
   const players = []
@@ -1994,7 +2090,7 @@ function genAuction (f, t) {
 
 /* 27.复仇(关系人死亡后为其复仇, 真实关系链驱动) */
 function genRevenge (f, t) {
-  const alive = Object.values(f.roster).filter(p => p.alive && !p.realmBusy)
+  const alive = Object.values(f.roster).filter(p => p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name))
   const avenger = alive.find(p => {
     const r = p.relations || {}
     const xd = (r.master && f.roster[r.master] && (f.roster[r.master].relations || {}).disciples) ? f.roster[r.master].relations.disciples.filter(n => n !== p.name) : []
@@ -2114,8 +2210,8 @@ function genShop (f, t) {
 }
 /* 31.洗劫藏宝阁(伪玩家: 与玩家一样分20档难度——贪者富贵险中求选高难度, 怂者保平安选低难度;
  * 成败按个人战力 vs 该档守卫判定; 被抓真押入藏宝阁天牢0~120分钟, 可在#天下天牢查看) */
-const VAULT_LOOT = ['修为丹', '破障丹', '聚宝丹', '星霜草', '望舒花', '月魄石', '流光玉', '青锋剑', '功法残卷', '灵石袋']
-const VAULT_HIGH_LOOT = ['惊鸿丹', '玉甲丹', '凝露丹', '慧心丹', '摄魂丹', '紫霞功', '红莲神功', '赤霄剑', '星璇石', '望舒花']
+const VAULT_LOOT = ['修为丹', '破障丹', '聚宝丹', '星霜草', '望舒花', '月魄石', '流光玉', '流霜剑', '功法残卷', '灵石袋']
+const VAULT_HIGH_LOOT = ['惊鸿丹', '玉甲丹', '凝露丹', '慧心丹', '摄魂丹', '紫霞功', '红莲神功', '流金剑', '星璇石', '望舒花']
 /** 贪怂倾向(0~1): 贪=魔道/嗜杀/好斗/贪玩 → 高难度; 怂=平和/善良/懒散 → 低难度 */
 function vaultTend (p) {
   let t = 0.5
@@ -2215,111 +2311,13 @@ function genGift (f, t) {
   return { type: 'gift', ...evWho([a, b]), txt: `【赠礼】${whoA} ${a.name} 将 ${gold} 灵石赠予${giftLabel} ${whoB} ${b.name}` }
 }
 /* 34.打劫(修仙世界真实: 劫修洗劫一空, 经常杀人灭口; 撞见熟人——同门/道侣/师徒/知己/挚友/手足/亲族/师兄弟——才手下留情) */
-export function genRob (f, t) {
-  const k = pickBy(f, p => p.path === '魔道' || p.trait === '嗜杀' || p.trait === '好斗')
+export function genRob (f, t) { return genNpcRaid(f, t, '打劫') }
+export function genAmbush (f, t) { return genNpcRaid(f, t, '劫道') }
+function genNpcRaid (f, t, label) {
+  const k = pickBy(f, p => npcCanThreaten(f, p) && (p.path === '魔道' || p.trait === '嗜杀' || p.trait === '好斗'))
   if (!k) return null
   const v = pickVictim(f, k.name)
-  if (!v) return null
-  const whoK = k.status === 'sect' && k.sect ? sectName(f, k.sect) : '散修'
-  const whoV = v.status === 'sect' && v.sect ? sectName(f, v.sect) : '散修'
-  /* 撞见熟人 → 手下留情(只小讨或放过, 绝不灭口) */
-  const relLabel = relLabelOf(f, k, v.name)
-  if (relLabel !== '故人') {
-    const gold = Math.min((v.money || 0), rand([10, 100]))
-    if (gold > 0) {
-      v.money -= gold
-      k.money = (k.money || 0) + gold
-      return { type: 'rob', ...evWho([k, v]), txt: `【打劫】${whoK} ${k.name} 撞见${relLabel}${v.name}，碍于旧情只讨了 ${gold} 灵石便放行` }
-    }
-    return { type: 'flavor', ...evWho([k, v]), txt: `【打劫】${whoK} ${k.name} 本想劫道，认出${relLabel}${v.name}，讪讪罢手离去` }
-  }
-  /* 无关系: 洗劫一空(灵石+背包+穿身装备全抢) */
-  const loot = robSpoils(f, k, v)
-  const lootTxt = loot.length ? `，劫走 ${loot.join('、')}` : ''
-  /* 灭口率 = 劫修性格 × 受害者靠山(修仙世界: 散修无依无靠最好欺负杀了白杀, 宗门弟子有宗门护着"打狗看主人", 有强靠山更忌惮) */
-  const evil = k.path === '魔道' || k.trait === '嗜杀'
-  let killRate = evil ? 0.8 : 0.45
-  const vHasSect = v.status === 'sect' && v.sect && f.sects[v.sect]
-  if (!vHasSect) killRate = Math.min(0.95, killRate + 0.15) // 散修: 杀了白杀
-  else killRate *= 0.4 // 宗门弟子: 怕宗门报复
-  const rv = v.relations || {}
-  const strong = [rv.master, rv.spouse].filter(Boolean).some(n => { const np = f.roster[n]; return np && np.alive && (np.level || 0) >= (v.level || 0) + 10 })
-  if (strong) killRate *= 0.5 // 有强靠山(高境界师父/道侣): 更忌惮
-  const kill = Math.random() < killRate
-  if (kill) {
-    killWithGrudge(f, k, v, `【灭口】${whoK} ${k.name} 洗劫了 ${whoV} ${v.name}${lootTxt}，随即杀人灭口！`, t)
-    return null
-  }
-  /* 活口记仇: 被洗劫的会寻仇; 宗门弟子被劫 → 同门(好斗/嗜杀/有羁绊者)也记仇, 宗门庇护 */
-  if (!v.relations.enemies.includes(k.name)) v.relations.enemies.push(k.name)
-  if (vHasSect) {
-    for (const m of sectAlive(f, v.sect)) {
-      if (m.name === v.name) continue
-      const isBonded = relLabelOf(f, m, v.name) !== '故人'
-      if (m.trait === '好斗' || m.trait === '嗜杀' || m.path === '魔道' || isBonded) {
-        if (!m.relations.enemies.includes(k.name)) m.relations.enemies.push(k.name)
-      }
-    }
-  }
-  return { type: 'rob', ...evWho([k, v]), txt: `【打劫】${whoK} ${k.name} 将 ${whoV} ${v.name} 洗劫一空${lootTxt}，结下仇怨` }
-}
-/* 63.劫道(骑砍2式+修仙世界真实: 恶人埋伏劫道, 按战力判定——打不过被击退/反杀; 得手即洗劫一空, 经常杀人灭口; 撞见熟人——同门/道侣/师徒/知己/挚友/手足/亲族/师兄弟——才手下留情) */
-export function genAmbush (f, t) {
-  const k = pickBy(f, p => p.alive && (p.path === '魔道' || p.trait === '嗜杀' || p.trait === '好斗'))
-  if (!k) return null
-  const v = pickVictim(f, k.name)
-  if (!v) return null
-  const whoK = k.status === 'sect' && k.sect ? sectName(f, k.sect) : '散修'
-  const whoV = v.status === 'sect' && v.sect ? sectName(f, v.sect) : '散修'
-  const road = pick(['官道', '荒岭古道', '密林小径', '峡谷要道', '渡口'])
-  /* 按战力判定: 劫匪不敌路人则被击退/反杀(骑砍2式; 实力越悬殊越易被反杀, 境界压制) */
-  if (personPower(k) < personPower(v) * 0.9) {
-    const gapPct = Math.max(0, Math.min(1, 1 - personPower(k) / (personPower(v) * 0.9)))
-    if (Math.random() < 0.2 + gapPct * 0.3) {
-      killPerson(f, k, `【劫道】${whoK} ${k.name} 于${road}劫道不成，反被 ${whoV} ${v.name} 当场斩杀！`, t)
-      return null
-    }
-    return { type: 'fight', ...evWho([k, v]), txt: `【劫道】${whoK} ${k.name} 于${road}欲劫 ${whoV} ${v.name}，反被击退` }
-  }
-  /* 撞见熟人 → 手下留情(只小讨或放过, 绝不灭口) */
-  const relLabel = relLabelOf(f, k, v.name)
-  if (relLabel !== '故人') {
-    const gold = Math.min((v.money || 0), rand([10, 100]))
-    if (gold > 0) {
-      v.money -= gold
-      k.money = (k.money || 0) + gold
-      return { type: 'rob', ...evWho([k, v]), txt: `【劫道】${whoK} ${k.name} 于${road}截住${relLabel}${v.name}，认出旧识只讨了 ${gold} 灵石` }
-    }
-    return { type: 'flavor', ...evWho([k, v]), txt: `【劫道】${whoK} ${k.name} 于${road}截住${relLabel}${v.name}，认出旧识，拱手放行` }
-  }
-  /* 无关系: 洗劫一空(灵石+背包+穿身装备全抢) + 灭口率按劫修性格×受害者靠山 */
-  const loot = robSpoils(f, k, v)
-  const lootTxt = loot.length ? `，劫走 ${loot.join('、')}` : ''
-  const evil = k.path === '魔道' || k.trait === '嗜杀'
-  let killRate = evil ? 0.8 : 0.45
-  const vHasSect = v.status === 'sect' && v.sect && f.sects[v.sect]
-  if (!vHasSect) killRate = Math.min(0.95, killRate + 0.15) // 散修: 杀了白杀
-  else killRate *= 0.4 // 宗门弟子: 怕宗门报复
-  const rv = v.relations || {}
-  const strong = [rv.master, rv.spouse].filter(Boolean).some(n => { const np = f.roster[n]; return np && np.alive && (np.level || 0) >= (v.level || 0) + 10 })
-  if (strong) killRate *= 0.5 // 有强靠山: 更忌惮
-  const kill = Math.random() < killRate
-  if (kill) {
-    killWithGrudge(f, k, v, `【劫道】${whoK} ${k.name} 于${road}劫杀 ${whoV} ${v.name}${lootTxt}，灭口！`, t)
-    return null
-  }
-  /* 活口记仇: 被洗劫的会寻仇; 宗门弟子被劫 → 同门记仇, 宗门庇护 */
-  if (!v.relations.enemies.includes(k.name)) v.relations.enemies.push(k.name)
-  if (vHasSect) {
-    for (const m of sectAlive(f, v.sect)) {
-      if (m.name === v.name) continue
-      const isBonded = relLabelOf(f, m, v.name) !== '故人'
-      if (m.trait === '好斗' || m.trait === '嗜杀' || m.path === '魔道' || isBonded) {
-        if (!m.relations.enemies.includes(k.name)) m.relations.enemies.push(k.name)
-      }
-    }
-  }
-  return { type: 'rob', ...evWho([k, v]), txt: `【劫道】${whoK} ${k.name} 于${road}截住 ${whoV} ${v.name}，洗劫一空${lootTxt}，结下仇怨` }
+  return v ? npcConflict(f, [k], v, t, { label, lethal: true }).event : null
 }
 /* 35.挂机(玩家化: 挂机攒灵石/灵力) */
 function genIdle (f, t) {
@@ -2392,8 +2390,8 @@ function genPractice (f, t) {
   fakeTakeItem(p.bag, gongfa)
   if (!p.learnedGongfa) p.learnedGongfa = []
   if (!p.learnedGongfa.includes(gongfa)) p.learnedGongfa.push(gongfa)
-  /* 学会最好的功法 → 运转它(战力最大化) */
-  if (!p.activeGongfa || gongfaScore(gongfa) > gongfaScore(p.activeGongfa)) p.activeGongfa = gongfa
+  /* 学会最好的战斗功法 → 运转它(战力最大化); 傀儡术等无战斗加成不占运转位 */
+  if (gongfaScore(gongfa) > 0 && (!p.activeGongfa || gongfaScore(gongfa) > gongfaScore(p.activeGongfa))) p.activeGongfa = gongfa
   return { type: 'flavor', ...evMeta(p), txt: `【修习】${who} ${p.name} 闭关参悟《${gongfa}》，习得此功法` }
 }
 /* 秘境掉落(药材/矿物, 只进伪玩家背包) */
@@ -2410,7 +2408,7 @@ function genSecret (f, t) {
 }
 /* 41b.好友结伴探索秘境(同门/好友/之交好友同行, 各有所获) */
 function genSecretWith (f, t) {
-  const a = pickBy(f, p => p.alive && !p.realmBusy && p.status === 'sect' && p.sect && sectAlive(f, p.sect).length > 1)
+  const a = pickBy(f, p => p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && p.status === 'sect' && p.sect && sectAlive(f, p.sect).length > 1)
   if (!a) return null
   const relPool = relPoolOf(f, a, true)
   if (!relPool.length) return null
@@ -2427,37 +2425,14 @@ function genSecretWith (f, t) {
 }
 /* 41c.好友结伴劫修(2打1): 两个好友/之交好友联手劫落单者 */
 function genTeamRob (f, t) {
-  const leader = pickBy(f, p => p.alive && (p.path === '魔道' || p.trait === '嗜杀' || p.trait === '好斗'))
+  const leader = pickBy(f, p => npcCanThreaten(f, p) && (p.path === '魔道' || p.trait === '嗜杀' || p.trait === '好斗'))
   if (!leader) return null
-  const mates = relPoolOf(f, leader, false).filter(n => n !== leader.name)
+  const mates = relPoolOf(f, leader, false).map(n => f.roster[n]).filter(p => npcCanThreaten(f, p) && (p.loc || DEFAULT_REGION) === (leader.loc || DEFAULT_REGION))
   if (!mates.length) return null
-  const mateName = pick(mates)
-  const mate = f.roster[mateName]
+  const mate = pick(mates)
   const v = pickVictim(f, leader.name)
-  if (!v || v.name === mateName) return null
-  const whoL = leader.status === 'sect' && leader.sect ? sectName(f, leader.sect) : '散修'
-  const whoM = mate.status === 'sect' && mate.sect ? sectName(f, mate.sect) : '散修'
-  const whoV = v.status === 'sect' && v.sect ? sectName(f, v.sect) : '散修'
-  if (shouldKill(f, leader, v)) {
-    const loot = robSpoils(f, leader, v)
-    const lootTxt = loot.length ? `，劫得 ${loot.join('、')}` : ''
-    killWithGrudge(f, leader, v, `【劫修】${whoL} ${leader.name} 与好友 ${whoM} ${mateName} 联手劫杀落单的 ${whoV} ${v.name}${lootTxt}！`, t)
-    return null
-  }
-  const gold = Math.min((v.money || 0), rand([100, 1500]))
-  if (gold > 0) {
-    v.money -= gold
-    const half = Math.floor(gold / 2)
-    leader.money = (leader.money || 0) + half
-    mate.money = (mate.money || 0) + (gold - half)
-    return { type: 'rob', ...evWho([leader, mate, v]), txt: `【劫修】${whoL} ${leader.name} 与好友 ${whoM} ${mateName} 联手围住 ${whoV} ${v.name}，抢走 ${gold} 灵石` }
-  }
-  const items = v.bag && v.bag.items ? Object.keys(v.bag.items) : []
-  if (!items.length) return null
-  const item = pick(items)
-  if (!leader.bag) leader.bag = { items: {}, equipped: {} }
-  if (!fakeTransferEntry(v.bag, leader.bag, item)) return null
-  return { type: 'rob', ...evWho([leader, mate, v]), txt: `【劫修】${whoL} ${leader.name} 与好友 ${whoM} ${mateName} 联手围住 ${whoV} ${v.name}，抢走【${item}】` }
+  if (!v || v.name === mate.name) return null
+  return npcConflict(f, [leader, mate], v, t, { label: '劫修', lethal: true }).event
 }
 /* 41d.结为知己(同门情深/一见如故 → 之交好友) */
 function genBond (f, t) {
@@ -2700,21 +2675,52 @@ function genLoot (f, t) {
   return { type: 'rob', ...evWho([k, v]), txt: `【夺宝】${whoK} ${k.name} 强夺了 ${whoV} ${v.name} 的【${item}】` }
 }
 /* 59.交易(玩家化: 伪玩家之间互易, 钱换物或以物易物; 同步进天下大事+江湖交易) */
+/** 本群伪玩家总灵石(市场货币指数基准) */
+export function fakeTotalMoney (f) {
+  return Object.values(f && f.roster ? f.roster : {}).reduce((sum, p) => p && p.alive ? sum + (Number(p.money) || 0) : sum, 0)
+}
+/** 灵石多→物价高(购买力低), 灵石少→物价低(购买力高) */
+export function fakeMarketIndex (f) {
+  const total = fakeTotalMoney(f)
+  return Math.max(0.6, Math.min(1.8, total / 5000000))
+}
+/** 某物品在伪玩家总库存中的数量: 越多越便宜 */
+export function fakeItemSupply (f, name) {
+  let n = 0
+  for (const p of Object.values(f && f.roster ? f.roster : {})) {
+    if (!p || !p.alive || !p.bag || !p.bag.items) continue
+    n += itemCount(p.bag.items[name])
+  }
+  return n
+}
+/** 伪玩家市场成交价: 基础价 × 灵石指数 × 供需指数 */
+export function fakeTradePrice (f, name, basePrice) {
+  const base = Math.max(1, Number(basePrice) || 50)
+  const supply = fakeItemSupply(f, name)
+  const supplyFactor = Math.max(0.6, Math.min(1.8, 8 / (6 + supply)))
+  return Math.max(20, Math.round(base * 0.8 * fakeMarketIndex(f) * supplyFactor))
+}
 function genTrade (f, t) {
-  const a = pickAlive(f)
-  if (!a) return null
-  const b = pickAlive(f, a.name)
+  const b = pickAlive(f)
   if (!b) return null
-  const whoA = a.status === 'sect' && a.sect ? sectName(f, a.sect) : '散修'
   const whoB = b.status === 'sect' && b.sect ? sectName(f, b.sect) : '散修'
-  /* 钱换物: A 花钱向 B 买一件背包物品(市价8折) */
+  /* 钱换物: 先找卖家物品，再找真正缺这件东西、且买得起的买家 */
   if (Math.random() < 0.5) {
     const bItems = b.bag && b.bag.items ? Object.keys(b.bag.items) : []
     if (!bItems.length) return null
     const item = pick(bItems)
-    const price = GONGFA_TPL[item] ? gongfaPrice(item) : (ITEM_TPL[item] ? (ITEM_PRICE[item] || 50) : 50)
-    const cost = Math.max(20, Math.floor(price * 0.8))
-    if ((a.money || 0) < cost) return null
+    const price = fakeBasePrice(item)
+    const cost = fakeTradePrice(f, item, price)
+    const buyers = Object.values(f.roster || {}).filter(p =>
+      p && p.alive && p.name !== b.name && (Number(p.money) || 0) >= cost &&
+      itemCount(p.bag && p.bag.items ? p.bag.items[item] : 0) <= 1
+    )
+    const a = pick(buyers)
+    if (!a) return null
+    const whoA = a.status === 'sect' && a.sect ? sectName(f, a.sect) : '散修'
+    if (!a.bag) a.bag = { items: {}, equipped: {} }
+    /* 先交货再扣钱: 交货失败双方资产都不变 */
+    if (!fakeTransferEntry(b.bag, a.bag, item)) return null
     a.money -= cost
     /* 买家花费不变; 卖家按所在大区税率缴税(税计入该大区繁荣度) */
     const w = getWorld(f.gid)
@@ -2724,21 +2730,23 @@ function genTrade (f, t) {
     b.money = (b.money || 0) + (cost - tax)
     addTax(w, bl, tax)
     saveWorld(w)
-    if (!a.bag) a.bag = { items: {}, equipped: {} }
-    if (!fakeTransferEntry(b.bag, a.bag, item)) return null
     const txt = `【交易】${whoA} ${a.name} 花 ${cost} 灵石向 ${whoB} ${b.name} 购得 ${item} ×1（${regionNameOf(bl)}税率${rate}%，卖家缴税${tax}灵石）`
     logTrade(f, txt)
     return { type: 'trade', ...evWho([a, b]), txt }
   }
-  /* 以物易物: A 拿自己一件物品换 B 一件物品 */
+  /* 以物易物: 随机两人各取一件物品交换 */
+  const a = pickAlive(f, b.name)
+  if (!a) return null
+  const whoA = a.status === 'sect' && a.sect ? sectName(f, a.sect) : '散修'
   const aItems = a.bag && a.bag.items ? Object.keys(a.bag.items) : []
   const bItems = b.bag && b.bag.items ? Object.keys(b.bag.items) : []
   if (!aItems.length || !bItems.length) return null
   const aItem = pick(aItems)
   const bItem = pick(bItems)
   const aEntry = fakeTakeEntry(a.bag, aItem)
+  if (!aEntry) return null
   const bEntry = fakeTakeEntry(b.bag, bItem)
-  if (!aEntry || !bEntry) return null
+  if (!bEntry) { fakeAddItem(a.bag, aEntry.name, 1, aEntry.attr); return null }
   fakeAddItem(a.bag, bEntry.name, 1, bEntry.attr)
   fakeAddItem(b.bag, aEntry.name, 1, aEntry.attr)
   const txt = `【交易】${whoA} ${a.name} 用 ${aItem} 与 ${whoB} ${b.name} 换得 ${bItem}`
@@ -2842,14 +2850,101 @@ export function fakeCombatPill (f, p) {
     return true
   } catch (err) { return false }
 }
+/* 机缘库: 无人继承的遗产会进入本群机缘库; 库越大越容易被伪玩家遇到, 库小则稀有 */
+export function genFate (f, t) {
+  const pool = fatePoolOf(f)
+  const itemCounts = (pool.items || []).reduce((s, x) => s + Math.max(0, Number(x.count) || 0), 0)
+  const stones = Math.max(0, Number(pool.stones) || 0)
+  const size = itemCounts + Math.floor(stones / 500)
+  if (size <= 0) return null
+  const chance = Math.min(0.4, 0.02 + Math.log10(1 + size) * 0.1)
+  if (Math.random() > chance) return null
+  const p = pickAlive(f)
+  if (!p) return null
+  const got = []
+  /* 每次机缘抽1~5件; 灵石作为其中一件虚拟物品参与抽取, 抽到时拿走当前灵石池的1%~20% */
+  let draws = 1 + Math.floor(Math.random() * 5)
+  while (draws-- > 0) {
+    const hasItems = pool.items && pool.items.length > 0
+    const hasStones = (Number(pool.stones) || 0) > 0
+    if (!hasItems && !hasStones) break
+    const pickStones = hasStones && (!hasItems || Math.random() < 0.25)
+    if (pickStones) {
+      const before = Math.max(1, Number(pool.stones) || 0)
+      const pct = 0.01 + Math.random() * 0.19
+      const take = Math.min(before, Math.max(1, Math.round(before * pct)))
+      p.money = (Number(p.money) || 0) + take
+      pool.stones = Math.max(0, before - take)
+      got.push(`灵石×${take}`)
+      continue
+    }
+    const idx = Math.floor(Math.random() * pool.items.length)
+    const entry = pool.items[idx]
+    const name = entry.name
+    const attr = entry.attr || null
+    if (!name) { pool.items.splice(idx, 1); continue }
+    fakeAddItem(p.bag, name, 1, attr, true)
+    entry.count = (Number(entry.count) || 1) - 1
+    if (entry.count <= 0) pool.items.splice(idx, 1)
+    got.push(`${itemIcon(name)}${name}×1`)
+  }
+  if (!got.length) return null
+  return { type: 'fate', txt: `【机缘】${p.name} 偶遇机缘库，得${got.join('、')}`, who: [p.name] }
+}
+
 /* 60.穿戴(伪玩家: 把背包里最好的装备穿上, 获得战力加成) */
-/** 功法好坏评分: 品质为主, 同品质比战力相关效果(攻击/防御/生命加成) */
-function gongfaScore (name) {
+/** 功法战斗评分: 只按实际战斗加成, 品质/生活效果不作为主动运转依据。
+ *  傀儡术等 fx={} 的绑定功法评分为 0, 只能用于傀儡打造, 永远不会成为 activeGongfa。 */
+export function gongfaScore (name) {
   const t = GONGFA_TPL[name]
   if (!t) return 0
   const fx = t.fx || {}
-  const powerFx = (fx.atk || 0) + (fx.def || 0) + (fx.hp || 0)
-  return (t.quality || 0) * 100000 + Math.round(powerFx * 1000)
+  const combat = (Number(fx.atk) || 0) * 100 +
+    (Number(fx.def) || 0) * 80 +
+    (Number(fx.hp) || 0) * 60 +
+    (Number(fx.crit) || 0) * 100 +
+    (Number(fx.cdmg) || 0) * 100
+  if (combat <= 0) return 0
+  return combat + (Number(t.quality) || 0) * 0.01
+}
+/** 自动学背包里当前最强的战斗功法; 傀儡术/纯生活功法不占用运转位 */
+export function fakeLearnBestGongfa (f, p, now = Date.now()) {
+  if (!p || !p.bag || !p.bag.items) return false
+  if (!Array.isArray(p.learnedGongfa)) p.learnedGongfa = []
+  const books = Object.keys(p.bag.items)
+    .filter(n => GONGFA_TPL[n] && itemCount(p.bag.items[n]) > 0 && gongfaScore(n) > 0)
+    .sort((a, b) => gongfaScore(b) - gongfaScore(a))
+  const best = books[0]
+  if (!best) return false
+  if (gongfaScore(best) <= gongfaScore(p.activeGongfa)) return false
+  if (!p.learnedGongfa.includes(best)) p.learnedGongfa.push(best)
+  fakeTakeItem(p.bag, best, 1)
+  p.activeGongfa = best
+  logEvent(f, 'flavor', `【修习】${p.name} 自动参悟《${best}》，运转战力最高功法`, now, { who: [p.name], onlyPerson: true })
+  return true
+}
+/** 清理垃圾功法: 已学会的重复书、非绑定且低于当前 active 的战斗/生活功法, 半价卖给系统。
+ *  绑定傀儡术/更好的战斗功法不卖。 */
+export function fakeSellJunkGongfa (f, p, now = Date.now()) {
+  if (!p || !p.bag || !p.bag.items) return false
+  const activeScore = gongfaScore(p.activeGongfa)
+  let sold = 0
+  for (const name of Object.keys(p.bag.items)) {
+    if (!GONGFA_TPL[name] || isBound(name)) continue
+    const count = itemCount(p.bag.items[name])
+    if (count <= 0) continue
+    const score = gongfaScore(name)
+    const learned = Array.isArray(p.learnedGongfa) && p.learnedGongfa.includes(name)
+    /* 重复已学 / 战斗评分为0 / 不如当前 active 的功法 → 垃圾 */
+    const junk = learned || score <= 0 || score < activeScore
+    if (!junk) continue
+    fakeTakeItem(p.bag, name, count)
+    const gain = Math.max(10, Math.floor(gongfaPrice(name) / 2)) * count
+    p.money = (Number(p.money) || 0) + gain
+    sold += count
+    logEvent(f, 'flavor', `【变卖】${p.name} 将《${name}》×${count} 变卖，得 ${gain} 灵石`, now, { who: [p.name], onlyPerson: true })
+  }
+  return sold > 0
 }
 function genEquip (f, t) {
   const p = pickBy(f, x => x.alive && x.bag && x.bag.items && Object.keys(x.bag.items).some(n => EQUIP_TPL[n]))
@@ -2860,10 +2955,20 @@ function genEquip (f, t) {
   return { type: 'flavor', ...evMeta(p), txt: `【穿戴】${who} ${p.name} 换上【${worn}】，实力大增` }
 }
 /* 61.运转功法(伪玩家: 运转已学里最好的功法, 战力加成最高) */
-function runBestGongfa (f, p) {
-  if (!p.learnedGongfa || !p.learnedGongfa.length) return ''
-  const best = p.learnedGongfa.slice().sort((a, b) => gongfaScore(b) - gongfaScore(a))[0]
-  if (!best || best === p.activeGongfa) return '' // 已运转最好的, 不重复
+export function runBestGongfa (f, p) {
+  if (!p.learnedGongfa || !p.learnedGongfa.length) {
+    if (p.activeGongfa && gongfaScore(p.activeGongfa) <= 0) p.activeGongfa = ''
+    return ''
+  }
+  const best = p.learnedGongfa
+    .filter(n => gongfaScore(n) > 0)
+    .sort((a, b) => gongfaScore(b) - gongfaScore(a))[0]
+  if (!best) {
+    /* 没有战斗功法时不再把傀儡术/生活功法挂在运转位 */
+    if (p.activeGongfa && gongfaScore(p.activeGongfa) <= 0) p.activeGongfa = ''
+    return ''
+  }
+  if (best === p.activeGongfa) return '' // 已运转最好的, 不重复
   p.activeGongfa = best
   return best
 }
@@ -2894,7 +2999,7 @@ export const EVENT_GENS = [
   /* 修炼生活(炼丹/采买/洗劫藏宝阁/远行/赠礼/挂机/低保/上交/双修/互动/修习/秘境/变卖/夺宝/交易) */
   genCraft, genShop, genVaultRob, genTravel, genGift,
   genIdle, genPoor, genSubmit, genShuangxiu, genIntimate, genPractice,
-  genSecret, genSell, genLoot, genTrade,
+  genSecret, genSell, genLoot, genFate,
   /* 装备功法(穿戴/运转) */
   genEquip, genRunGongfa,
   /* 修仙世界运行逻辑: 强者欺压(境界压制) */
@@ -2942,7 +3047,7 @@ export function raidJailSettle (f, now = Date.now()) {
   return changed
 }
 export function fakeVaultSupply (f, p, now = Date.now()) {
-  if (!p || p.status !== 'sect' || !p.sect || !p.bag) return false
+  if (!p || warActorOwner(f, 'fake', p.name) || p.status !== 'sect' || !p.sect || !p.bag) return false
   const s = f.sects && f.sects[p.sect]
   const vault = s && s.vault
   const contribution = Math.max(0, Number(p.contribution) || 0)
@@ -2985,7 +3090,8 @@ export function fakeVaultSupply (f, p, now = Date.now()) {
     if (cost > 0 && p.contribution >= cost) {
       vault.equips[name]--
       if (vault.equips[name] <= 0) delete vault.equips[name]
-      const changed = fakeAddItem(p.bag, name, 1)
+      const lootAttr = takeVaultEquipAttrs(vault, name, 1)[0]?.attr
+      const changed = fakeAddItem(p.bag, name, 1, lootAttr)
       p.contribution -= cost
       if (changed.length) p.activities = { ...(p.activities || {}), lastEquip2: now + rand([10, 30]) * 60000 }
       logEvent(f, 'flavor', `【兑换】${sectName(f, p.sect)} ${p.name} 以${cost}贡献兑换宗门宝库装备${itemIcon(name)}【${name}】`, now, { onlyPerson: true, ...evMeta(p) })
@@ -2997,7 +3103,8 @@ export function fakeVaultSupply (f, p, now = Date.now()) {
 
 async function perPersonActs (f, now = Date.now()) {
   for (const p of Object.values(f.roster)) {
-    if (!p.alive || p.realmBusy) continue
+    if (!p.alive || p.realmBusy || warActorOwner(f, 'fake', p.name)) continue
+    if ((Number(p.fakeLostUntil) || 0) > now) continue
     /* 仙帝丹: 有就立刻吃, 不受吃丹冷却/被俘/坐牢影响 */
     try {
       const emperorEv = fakeEatEmperorPill(f, p, now)
@@ -3036,6 +3143,15 @@ async function perPersonActs (f, now = Date.now()) {
             const who = p.status === 'sect' && p.sect ? sectName(f, p.sect) : '散修'
             logEvent(f, 'flavor', `【穿戴】${who} ${p.name} 换上 ${worn}，实力大增`, now, { onlyPerson: true, ...evMeta(p) })
           }
+        } catch (err) { }
+      }
+      /* 功法维护(60分钟): 先学背包最强战斗功法, 再运转, 最后半价卖掉重复/低于 active 的垃圾功法 */
+      if (now >= (acts.lastGongfaMaint || 0)) {
+        acts.lastGongfaMaint = now + 60 * 60000
+        try {
+          fakeLearnBestGongfa(f, p, now)
+          runBestGongfa(f, p)
+          fakeSellJunkGongfa(f, p, now)
         } catch (err) { }
       }
       /* 运转功法: 冷却到(10~30分钟)自动运转已学中最好的功法(战力最大化; 用户要求意愿改大, 原30~90) */
@@ -3112,6 +3228,582 @@ async function perPersonActs (f, now = Date.now()) {
   }
 }
 export async function runPersonActs (f, now = Date.now()) { return perPersonActs(f, now) }
+
+/** 伪玩家专属稀有物品池(与玩家稀有条线隔离; 伪玩家自己的奇遇/秘境产出) */
+export const FAKE_RARE_POOL = [
+  { name: '云裳仙蕊', weight: 20 },
+  { name: '造梦神玉', weight: 20 },
+  { name: '一阶妖丹', weight: 5 },
+  { name: '万阵核心', weight: 3 },
+  { name: '天衍阵纹', weight: 4 },
+  { name: '乾坤阵晶', weight: 4 },
+  { name: '太虚阵砂', weight: 4 },
+  { name: '九幽阵髓', weight: 4 },
+  { name: '魂石', weight: 25 },
+  { name: '无主幽魂', weight: 3 },
+  { name: '摄魂铁', weight: 4 },
+  { name: '万魂帝晶', weight: 2 },
+  { name: '红武器', weight: 4 }
+]
+/** 伪玩家专属稀有奇遇: 每4小时最多一次, 不占玩家稀有刷新 */
+export function fakeRareTick (f, now = Date.now()) {
+  if (!f.fakeRareAt) f.fakeRareAt = now + rand([3, 5]) * 3600000
+  if (now < f.fakeRareAt) return
+  f.fakeRareAt = now + rand([3, 5]) * 3600000
+  const cand = Object.values(f.roster || {}).filter(p => p && p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !isFakeCaptive(f, p.name))
+  if (!cand.length) return
+  const p = pick(cand)
+  const total = FAKE_RARE_POOL.reduce((sum, x) => sum + x.weight, 0)
+  let roll = Math.random() * total
+  let got = FAKE_RARE_POOL[FAKE_RARE_POOL.length - 1]
+  for (const x of FAKE_RARE_POOL) { roll -= x.weight; if (roll < 0) { got = x; break } }
+  let gotName = got.name
+  if (gotName === '红武器') {
+    const reds = Object.keys(EQUIP_TPL).filter(n => EQUIP_TPL[n].quality === 6 && EQUIP_TPL[n].type === 'weapon')
+    gotName = reds.length ? pick(reds) : '霓裳剑'
+  }
+  if (!p.bag) p.bag = { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} }
+  fakeAddItem(p.bag, gotName, 1)
+  logEvent(f, 'rare', `✨ 伪玩家专属奇遇：${p.name} 偶得【${gotName}】`, now, { who: [p.name], major: true })
+}
+
+/** 伪玩家法宝目标: 缺什么材料、去哪个大区、市场求购 */
+const FAKE_ARTIFACT_GOALS = {
+  '定仙游': { mats: { 神游蛊: 1, 玄阴玉: 5, 镇魂晶: 5, 血煞髓: 5 }, regions: { 神游蛊: 'south', 玄阴玉: 'west', 镇魂晶: 'west', 血煞髓: 'west' } },
+  '万魂幡': { mats: { 万魂幡残卷: 5, 阴魂砂: 20, 游魂骨: 20, 成长性特殊彩武: 1 }, regions: { 万魂幡残卷: 'west', 阴魂砂: 'west', 游魂骨: 'west' } },
+  '傀儡': { mats: PUPPET_INITIAL_COST.materials, money: PUPPET_INITIAL_COST.money, regions: { 无主幽魂: 'west', 摄魂铁: 'west', 万魂帝晶: 'west' } }
+}
+/** 法宝目标材料不主动甩卖, 只能由缺料的人来定向买; 防止同一批材料在人群里反复倒手 */
+const FAKE_ARTIFACT_MATS = new Set(Object.values(FAKE_ARTIFACT_GOALS).flatMap(g => Object.keys(g.mats)).concat('云裳仙蕊', '红武器', '魂石'))
+export function fakeBasePrice (name) {
+  if (/妖丹$/.test(name)) return 5000
+  if (name === '万阵核心') return 30000
+  if (name === '成长性特殊彩武') return 25000
+  if (GONGFA_TPL[name]) return gongfaPrice(name)
+  if (EQUIP_TPL[name]) {
+    const p = equipPrice(name)
+    if (p > 0) return p
+    return [0, 20, 50, 120, 300, 800, 2000, 6000][Number(EQUIP_TPL[name].quality) || 1] || 20
+  }
+  if (ITEM_TPL[name]) return ITEM_PRICE[name] || 100
+  if (MATERIAL_TPL[name]) return [0, 20, 50, 120, 300, 800, 2000, 6000][Number(MATERIAL_TPL[name].quality) || 1] || 20
+  if (name === '成长性特殊彩武') return 2000
+  return 50
+}
+function fakeGoalOf (p) {
+  if (!p.bag) p.bag = { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} }
+  if (!p.bag.artifacts) p.bag.artifacts = {}
+  const a = p.bag.artifacts
+  if (a.dingxianyou) return a.wanhun ? (Array.isArray(a.puppets) && a.puppets.length ? null : '傀儡') : '万魂幡'
+  if (a.wanhun) return '定仙游'
+  /* 目标一旦锁定就做完, 不因为中途捡到神游/材料就改目标, 避免同一批材料在人群里反复倒手 */
+  if (p.fakeGoal === '万魂幡') return '万魂幡'
+  if (p.fakeGoal === '定仙游') return '定仙游'
+  if (p.fakeGoal === '傀儡') return '傀儡'
+  if (itemCount(p.bag.items['神游蛊']) > 0) return '定仙游'
+  return '万魂幡'
+}
+function fakeMissing (p, goal) {
+  const cfg = FAKE_ARTIFACT_GOALS[goal]
+  if (!cfg) return {}
+  const miss = {}
+  for (const [name, count] of Object.entries(cfg.mats)) {
+    const have = itemCount(p.bag && p.bag.items ? p.bag.items[name] : 0)
+    if (have < count) miss[name] = count - have
+  }
+  if (cfg.money && (Number(p.money) || 0) < cfg.money) miss['灵石'] = cfg.money - (Number(p.money) || 0)
+  return miss
+}
+/** 某人为了自己的法宝目标，仍然需要多少件该材料(用于阻止互相倒卖同一件刚需材料) */
+function fakeNeedCount (f, p, name) {
+  /* 魂石是进万魂窟的保命消耗品: 每人至少留1颗, 不允许把最后一颗卖给别人 */
+  if (name === '魂石') return 1
+  const goal = fakeGoalOf(p)
+  if (!goal) return 0
+  /* 关键: 要保留的是“目标总需求”, 不是“当前缺口”。否则凑够5残卷的人会立刻被当成卖家把材料卖回去, 形成循环。 */
+  const cfg = FAKE_ARTIFACT_GOALS[goal]
+  return Number(cfg && cfg.mats && cfg.mats[name]) || 0
+}
+function fakeTransferDeal (f, seller, buyer, item, cost, wc = null, count = 1) {
+  count = Math.max(1, Math.floor(Number(count) || 1))
+  const have = itemCount(seller && seller.bag && seller.bag.items ? seller.bag.items[item] : 0)
+  if (!seller || !buyer || have < count) return false
+  /* 魂石至少留1颗, 任何交易都不能把最后一颗掏走 */
+  if (item === '魂石' && have - count < 1) count = Math.max(0, have - 1)
+  if (count <= 0) return false
+  const total = Math.max(1, Math.round(Number(cost) || 1))
+  if ((Number(buyer.money) || 0) < total) return false
+  /* 先交货再扣钱: 交货失败时买卖双方都不变 */
+  if (!buyer.bag) buyer.bag = { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} }
+  let moved = 0
+  for (let i = 0; i < count; i++) {
+    if (!fakeTransferEntry(seller.bag, buyer.bag, item)) break
+    moved++
+  }
+  if (!moved) return false
+  const w = wc ? wc.w : getWorld(f.gid)
+  const loc = seller.loc || DEFAULT_REGION
+  const rate = taxFor(w, loc, seller.sect ? sectName(f, seller.sect) : null)
+  const paid = Math.max(1, Math.round(total * moved / count))
+  const tax = Math.max(1, Math.round(paid * rate / 100))
+  buyer.money -= paid
+  seller.money = (Number(seller.money) || 0) + paid - tax
+  addTax(w, loc, tax)
+  if (wc) wc.dirty = true
+  else saveWorld(w)
+  logTrade(f, `【${item}】${buyer.name} 花 ${paid} 灵石向 ${seller.name} 购得 ${item}×${moved}（${regionNameOf(loc)}税率${rate}%）`)
+  return true
+}
+/** 伪玩家专属鬼市: 只给伪玩家补法宝瓶颈材料, 价格按普通伪玩家收入压低, 不冲击玩家市场 */
+const FAKE_MART_PRICES = {
+  魂石: 100,
+  万魂幡残卷: 500,
+  阴魂砂: 20,
+  游魂骨: 20,
+  云裳仙蕊: 400,
+  神游蛊: 1500,
+  玄阴玉: 250,
+  镇魂晶: 400,
+  血煞髓: 800,
+  万魂帝晶: 500,
+  一阶妖丹: 3000,
+  万阵核心: 3000,
+  天衍阵纹: 500,
+  乾坤阵晶: 500,
+  太虚阵砂: 500,
+  九幽阵髓: 500,
+  无主幽魂: 300,
+  摄魂铁: 300,
+  造梦神玉: 500
+}
+function fakeRedWeaponName () {
+  const reds = Object.keys(EQUIP_TPL).filter(n => EQUIP_TPL[n].quality === 6 && EQUIP_TPL[n].type === 'weapon')
+  return reds.length ? pick(reds) : '霓裳剑'
+}
+function fakeMartPrice (name) {
+  if (FAKE_MART_PRICES[name] != null) return Number(FAKE_MART_PRICES[name])
+  if (EQUIP_TPL[name] && EQUIP_TPL[name].quality === 6 && EQUIP_TPL[name].type === 'weapon') return 800
+  return 0
+}
+/** 鬼市库存键: 红武器按类别共享库存 */
+function fakeMartStockKey (name) {
+  return EQUIP_TPL[name] && EQUIP_TPL[name].quality === 6 && EQUIP_TPL[name].type === 'weapon' ? '红武器' : name
+}
+/** 鬼市基础库存: 参考丹阁, 按本群在世伪玩家数少量加成, 每2~4小时补一次 */
+const FAKE_MART_BASE_STOCK = {
+  魂石: 24,
+  万魂幡残卷: 3,
+  阴魂砂: 20,
+  游魂骨: 20,
+  云裳仙蕊: 6,
+  红武器: 4,
+  神游蛊: 1,
+  玄阴玉: 4,
+  镇魂晶: 4,
+  血煞髓: 3,
+  万魂帝晶: 2,
+  一阶妖丹: 2,
+  万阵核心: 1,
+  天衍阵纹: 3,
+  乾坤阵晶: 3,
+  太虚阵砂: 3,
+  九幽阵髓: 3,
+  无主幽魂: 6,
+  摄魂铁: 8,
+  造梦神玉: 8
+}
+export function fakeGhostStock (f, now = Date.now()) {
+  if (!f.fakeGhostStock || typeof f.fakeGhostStock !== 'object') f.fakeGhostStock = { nextAt: 0, stock: {} }
+  const shop = f.fakeGhostStock
+  if (Number(shop.nextAt) > now && shop.stock && typeof shop.stock === 'object') return shop
+  const alive = Object.values(f.roster || {}).filter(p => p && p.alive).length
+  const bonus = Math.floor(alive / 50)
+  const stock = {}
+  for (const [name, base] of Object.entries(FAKE_MART_BASE_STOCK)) {
+    const n = Number(base) + (name === '魂石' ? Math.floor(alive / 10) : bonus)
+    if (n > 0) stock[name] = n
+  }
+  shop.stock = stock
+  shop.nextAt = now + rand([2, 4]) * 3600000
+  return shop
+}
+export function fakeMartBuy (f, p, name, now, reason = '') {
+  const price = fakeMartPrice(name)
+  if (!price || (Number(p.money) || 0) < price) return false
+  if ((Number(p.fakeMartAt) || 0) > now) return false
+  const shop = fakeGhostStock(f, now)
+  const key = fakeMartStockKey(name)
+  if (!(Number(shop.stock[key]) > 0)) return false
+  shop.stock[key] = Number(shop.stock[key]) - 1
+  if (shop.stock[key] <= 0) delete shop.stock[key]
+  p.money -= price
+  p.fakeMartAt = now + 10 * 60000
+  fakeAddItem(p.bag, name, 1)
+  logTrade(f, `【鬼市·西域】${p.name} ${reason ? `为${reason}，` : ''}花 ${price} 灵石购得 ${itemIcon(name)}${name}×1（库存${shop.stock[key] || 0}，${Math.ceil((shop.nextAt - now) / 3600000)}小时后补货）`)
+  return true
+}
+
+/* ---------- 伪玩家魔窟商人: 每人独立12格货单, 7小时刷新, 与玩家同规则 ---------- */
+const FAKE_MERCHANT_MATS = ['阴魂砂', '鬼火草', '摄魂铁', '玄阴玉', '镇魂晶', '血煞髓', '云裳仙蕊']
+function fakeMerchantSlot (reward = '魂石') {
+  const type = pick(['money', 'material', 'item', 'gongfa'])
+  if (type === 'money') return { name: '灵石', kind: 'money', count: rand([800000, 1800000]), reward, used: false }
+  if (type === 'material') return { name: pick(FAKE_MERCHANT_MATS), kind: 'material', count: rand([1, 8]), reward, used: false }
+  if (type === 'item') return { name: pick(['修为丹', '破障丹', '聚宝丹', '玉甲丹']), kind: 'item', count: rand([1, 5]), reward, used: false }
+  return { name: pick(Object.keys(GONGFA_TPL).filter(n => GONGFA_TPL[n].quality <= 5)), kind: 'gongfa', count: 1, reward, used: false }
+}
+export function fakeMerchantShop (f, p, now = Date.now()) {
+  if (!f.fakeMerchantShops) f.fakeMerchantShops = {}
+  const key = String(p.name)
+  let shop = f.fakeMerchantShops[key]
+  if (shop && Number(shop.refreshAt) > now) return shop
+  shop = { refreshAt: now + 7 * 3600000, demands: [] }
+  for (let i = 0; i < 10; i++) shop.demands.push(fakeMerchantSlot('魂石'))
+  shop.demands.push(fakeMerchantSlot('还魂丹'), fakeMerchantSlot('还魂丹'))
+  f.fakeMerchantShops[key] = shop
+  return shop
+}
+function fakeMerchantCanPay (p, slot) {
+  if (!slot || slot.used) return false
+  if (slot.kind === 'money') return (Number(p.money) || 0) >= slot.count
+  return itemCount(p.bag && p.bag.items ? p.bag.items[slot.name] : 0) >= slot.count
+}
+/** 清理过期/无用的魔窟商人货单, 防止每个伪玩家12格货单无限堆积 */
+export function pruneFakeMerchantShops (f, now = Date.now()) {
+  if (!f || !f.fakeMerchantShops) return 0
+  let removed = 0
+  for (const [name, shop] of Object.entries(f.fakeMerchantShops)) {
+    if (!shop || !Array.isArray(shop.demands) || Number(shop.refreshAt) <= now) {
+      delete f.fakeMerchantShops[name]
+      removed++
+    }
+  }
+  return removed
+}
+function fakeMerchantExchange (f, p, slot, now = Date.now()) {
+  if (!fakeMerchantCanPay(p, slot)) return false
+  if (slot.kind === 'money') p.money -= slot.count
+  else if (!fakeTakeItem(p.bag, slot.name, slot.count)) return false
+  slot.used = true
+  fakeAddItem(p.bag, slot.reward || '魂石', 1)
+  logTrade(f, `【魔窟商人·西域】${p.name} 用 ${itemIcon(slot.name)}${slot.name}×${slot.count} 换得 ${itemIcon(slot.reward || '魂石')}${slot.reward || '魂石'}×1`)
+  return true
+}
+/** 货单里有自己能付的格就换; 付不起但缺口材料在伪玩家市场便宜, 先买再换 */
+function fakeMerchantTryExchange (f, p, shop, now, alive, wc = null) {
+  for (const slot of (shop.demands || [])) {
+    if (slot.used || slot.reward !== '魂石') continue
+    if (fakeMerchantCanPay(p, slot)) {
+      if (fakeMerchantExchange(f, p, slot, now)) return true
+      continue
+    }
+    if (slot.kind === 'money') continue
+    const price = fakeTradePrice(f, slot.name, fakeBasePrice(slot.name))
+    const total = price * Math.max(1, Number(slot.count) || 1)
+    if ((Number(p.money) || 0) < total) continue
+    const seller = pick(alive.filter(q => q.name !== p.name && itemCount(q.bag && q.bag.items ? q.bag.items[slot.name] : 0) >= slot.count))
+    if (!seller) continue
+    let bought = 0
+    for (let i = 0; i < slot.count; i++) {
+      if (itemCount(p.bag && p.bag.items ? p.bag.items[slot.name] : 0) >= slot.count) break
+      if ((Number(p.money) || 0) < price) break
+      if (!fakeTransferDeal(f, seller, p, slot.name, price, wc)) break
+      bought++
+    }
+    if (bought && fakeMerchantCanPay(p, slot) && fakeMerchantExchange(f, p, slot, now)) return true
+  }
+  return false
+}
+
+/* ---------- 伪玩家跨区: 与玩家同规则(传送/强行跨越/封海/在途) ---------- */
+export function fakeTravelTick (f, now = Date.now()) {
+  for (const p of Object.values(f.roster || {})) {
+    const tr = p && p.fakeTravel
+    if (!tr || now < (Number(tr.endAt) || 0)) continue
+    delete p.fakeTravel
+    const ok = Math.random() < 0.8
+    if (ok) {
+      p.loc = tr.to
+      logEvent(f, 'travel', `【跨区】${p.name} 强行跨越界壁，抵达${regionNameOf(tr.to)}`, now, { who: [p.name], onlyPerson: true })
+    } else {
+      const drop = rand([0, FORCE_DROP_MAX])
+      if (drop > 0) p.level = Math.max(1, (Number(p.level) || 1) - drop)
+      logEvent(f, 'travel', `【跨区】${p.name} 强行跨越失败，跌落${drop}个境界，仍留在${regionNameOf(tr.from)}`, now, { who: [p.name], onlyPerson: true })
+    }
+  }
+}
+/** 伪玩家跨区: 有定仙游免费瞬移; 有灵石走传送阵; 否则强行跨越5分钟80% */
+export function fakeTravelTo (f, p, to, now = Date.now(), reason = '') {
+  if (!p || !to || (p.loc || DEFAULT_REGION) === to || p.fakeTravel) return false
+  const from = p.loc || DEFAULT_REGION
+  const w = getWorld(f.gid)
+  const free = !!(p.bag && p.bag.artifacts && p.bag.artifacts.dingxianyou)
+  const seal = sealBlocksTravel(w, p.name, from, to, { allowDingxianyou: free })
+  if (seal) return false
+  if (free || (Number(p.money) || 0) >= TELEPORT_COST) {
+    if (!free) {
+      p.money -= TELEPORT_COST
+      addTax(w, from, TELEPORT_COST)
+      saveWorld(w)
+    }
+    p.loc = to
+    logEvent(f, 'travel', `【传送】${p.name} ${reason ? `为${reason}，` : ''}抵达${regionNameOf(to)}`, now, { who: [p.name], onlyPerson: true })
+    return true
+  }
+  p.fakeTravel = { from, to, endAt: now + FORCE_MIN * 60000, reason }
+  logEvent(f, 'travel', `【跨国】${p.name} ${reason ? `为${reason}，` : ''}强行跨越前往${regionNameOf(to)}（约${FORCE_MIN}分钟）`, now, { who: [p.name], onlyPerson: true })
+  return true
+}
+
+/** 交易倾向: 只有真缺东西/真缺钱的人才会去交易, 不是全员定时买卖 */
+function fakeTradeDesire (p, miss = {}) {
+  let d = 0.12
+  if (Object.keys(miss).length) d += 0.55
+  if ((Number(p.money) || 0) < 5000) d += 0.35
+  if (itemCount(p.bag && p.bag.items ? p.bag.items['修为丹'] : 0) < 1) d += 0.2
+  if (itemCount(p.bag && p.bag.items ? p.bag.items['魂石'] : 0) < 1) d += 0.3
+  if (p.trait === '贪玩' || p.act === '贪玩') d += 0.1
+  if (p.trait === '苦修' || p.act === '苦修') d -= 0.1
+  return Math.max(0, Math.min(1, d))
+}
+/** 缺什么就买什么、缺钱就卖多余；缺材料在别的大区就赶路过去 */
+export function fakeGoalTick (f, gid, now = Date.now()) {
+  const alive = Object.values(f.roster || {}).filter(p => p && p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !p.fakeTravel && !isFakeCaptive(f, p.name) && !isInSectJail(f, p.name) && !isInRaidJail(f, p.name) && !isInSectMine(f, p.name))
+  let wc = null
+  const worldCache = () => wc || (wc = { w: getWorld(gid), dirty: false })
+  for (const p of alive) {
+    if (now < (p.fakeGoalAt || 0)) continue
+    if (Array.isArray(f.fakeCaves) && f.fakeCaves.some(party => (party.names || []).includes(p.name))) continue
+    p.fakeGoalAt = now + (3 + Math.floor(Math.random() * 4)) * 60000
+    const goal = fakeGoalOf(p)
+    const cfg = goal ? FAKE_ARTIFACT_GOALS[goal] : null
+    const miss = goal ? fakeMissing(p, goal) : {}
+    const desire = fakeTradeDesire(p, miss)
+    /* 每个人有自己的交易倾向阈值; 倾向不高就不出手 */
+    if (p.fakeTradeThreshold == null) p.fakeTradeThreshold = 0.4 + Math.random() * 0.35
+    if (desire < p.fakeTradeThreshold) continue
+    p.fakeGoal = goal
+    const moneyLow = (Number(p.money) || 0) < 5000
+    const noStone = itemCount(p.bag && p.bag.items ? p.bag.items['魂石'] : 0) < 1
+    let wanted = noStone ? '魂石' : Object.keys(miss).find(n => n !== '灵石')
+    if (!wanted && !moneyLow) {
+      if (itemCount(p.bag && p.bag.items ? p.bag.items['修为丹'] : 0) < 1) wanted = '修为丹'
+      else if (itemCount(p.bag && p.bag.items ? p.bag.items['破障丹'] : 0) < 1 && (p.exp || 0) >= fakeSubThreshold(p.level + 1) * 0.7) wanted = '破障丹'
+    }
+    /* 万魂幡的彩武要自己铸: 先补6云裳+红武器, 再让 fakeArtifactTick 铸成特殊彩武 */
+    if (wanted === '成长性特殊彩武') {
+      if (itemCount(p.bag && p.bag.items ? p.bag.items['云裳仙蕊'] : 0) < 6) wanted = '云裳仙蕊'
+      else {
+        const red = Object.keys(p.bag && p.bag.items ? p.bag.items : {}).find(n => EQUIP_TPL[n] && EQUIP_TPL[n].quality === 6 && EQUIP_TPL[n].type === 'weapon' && itemCount(p.bag.items[n]) > 0)
+        if (!red) wanted = fakeRedWeaponName()
+      }
+    }
+    /* 1. 缺钱: 卖非目标材料/多余物品给有钱的伪玩家 */
+    if (moneyLow || miss['灵石']) {
+      const goalMats = cfg?.mats || {}
+      const reserved = new Set([...Object.keys(goalMats), ...FAKE_ARTIFACT_MATS])
+      for (const n of Object.keys(p.bag && p.bag.items ? p.bag.items : {})) {
+        if (EQUIP_TPL[n] && EQUIP_TPL[n].quality === 6 && EQUIP_TPL[n].type === 'weapon') reserved.add(n)
+      }
+      const surplus = Object.keys(p.bag && p.bag.items ? p.bag.items : {}).filter(n => !reserved.has(n) && itemCount(p.bag.items[n]) > 0)
+      if (surplus.length) {
+        const item = pick(surplus)
+        const price = fakeTradePrice(f, item, fakeBasePrice(item))
+        const buyer = pick(alive.filter(q => q.name !== p.name && (Number(q.money) || 0) >= price && itemCount(q.bag && q.bag.items ? q.bag.items[item] : 0) <= 1))
+        if (buyer && fakeTransferDeal(f, p, buyer, item, price, worldCache())) continue
+      }
+    }
+    /* 2. 缺材料/缺药: 向有货的人定向求购; 法宝材料价格用鬼市上限, 避免买不起 */
+    if (wanted) {
+      const martPrice = fakeMartPrice(wanted)
+      const marketPrice = fakeTradePrice(f, wanted, fakeBasePrice(wanted))
+      const price = martPrice ? Math.min(marketPrice, martPrice) : marketPrice
+      const seller = pick(alive.filter(q => q.name !== p.name && itemCount(q.bag && q.bag.items ? q.bag.items[wanted] : 0) > fakeNeedCount(f, q, wanted)))
+      if (seller) {
+        const sellerHave = itemCount(seller.bag && seller.bag.items ? seller.bag.items[wanted] : 0)
+        const sellerNeed = fakeNeedCount(f, seller, wanted)
+        const missingCount = Math.max(1, Number(miss[wanted]) || 1)
+        const take = Math.min(missingCount, Math.max(0, sellerHave - sellerNeed))
+        /* 只接受一次补齐缺口的大单; 不接受1件1件来回倒, 避免材料在人群里空转 */
+        if (take >= missingCount && fakeTransferDeal(f, seller, p, wanted, price * take, worldCache(), take)) continue
+      }
+      /* 伪玩家专属鬼市: 只在西域, 没有卖家时按便宜价补瓶颈材料, 不是白给 */
+      if (martPrice && (p.loc || DEFAULT_REGION) === 'west' && fakeMartBuy(f, p, wanted, now, goal || wanted)) continue
+      /* 魔窟商人: 西域内用每人自己的12格货单兑换; 缺口材料便宜时先买再换 */
+      if (wanted === '魂石' && (p.loc || DEFAULT_REGION) === 'west') {
+        const shop = fakeMerchantShop(f, p, now)
+        if (fakeMerchantTryExchange(f, p, shop, now, alive, worldCache())) continue
+      }
+      /* 3. 没有卖家: 按玩家规则赶路过去, 不能再瞬移 */
+      const region = cfg?.regions?.[wanted] || (wanted === '魂石' ? 'west' : null)
+      if (region && (p.loc || DEFAULT_REGION) !== region) {
+        if (fakeTravelTo(f, p, region, now, goal || wanted)) continue
+      }
+    }
+  }
+  if (wc && wc.dirty) saveWorld(wc.w)
+}
+/** 伪玩家神游蛊独立现世(与玩家神游蛊互不抢占); 每18~30小时一只 */
+export function fakeShenyouTick (f, now = Date.now()) {
+  if (!f.fakeShenyouAt) f.fakeShenyouAt = now + rand([18, 30]) * 3600000
+  if (now < f.fakeShenyouAt) return
+  const cand = Object.values(f.roster || {}).filter(p => p && p.alive && (p.loc || DEFAULT_REGION) === 'south' && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !p.fakeTravel && !isFakeCaptive(f, p.name))
+  f.fakeShenyouAt = now + rand([18, 30]) * 3600000
+  if (!cand.length) return
+  const p = pick(cand)
+  if (!p.bag) p.bag = { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} }
+  fakeAddItem(p.bag, '神游蛊', 1)
+  logEvent(f, 'shenyou', `🦋 南疆异象再起，伪玩家 ${p.name} 独自捕获【神游蛊】`, now, { who: [p.name], major: true })
+}
+/** 伪玩家按玩家同配方打造定仙游; 万魂幡/傀儡因特殊彩武/妖丹暂不自动做 */
+export function fakeArtifactTick (f, now = Date.now()) {
+  for (const p of Object.values(f.roster || {})) {
+    if (!p || !p.alive || p.realmBusy || p.fakeTravel || warActorOwner(f, 'fake', p.name)) continue
+    if (!p.bag) p.bag = { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} }
+    if (!p.bag.artifacts) p.bag.artifacts = {}
+    /* 伪玩家自己铸造特殊彩武: 6云裳仙蕊 + 1件红武器, 与玩家配方一致 */
+    if (!p.bag.items['成长性特殊彩武'] && itemCount(p.bag.items['云裳仙蕊']) >= 6) {
+      const red = Object.keys(p.bag.items).find(n => EQUIP_TPL[n] && EQUIP_TPL[n].quality === 6 && EQUIP_TPL[n].type === 'weapon' && itemCount(p.bag.items[n]) > 0)
+      if (red) {
+        fakeTakeItem(p.bag, '云裳仙蕊', 6)
+        fakeTakeItem(p.bag, red, 1)
+        fakeAddItem(p.bag, '成长性特殊彩武', 1)
+        logEvent(f, 'artifact', `🌈 伪玩家 ${p.name} 以6云裳仙蕊与${red}炼成【成长性特殊彩武】！`, now, { who: [p.name], major: true })
+      }
+    }
+    if (!p.bag.artifacts.dingxianyou) {
+      const need = { 神游蛊: 1, 玄阴玉: 5, 镇魂晶: 5, 血煞髓: 5 }
+      if (Object.entries(need).every(([n, c]) => itemCount(p.bag.items[n]) >= c)) {
+        for (const [n, c] of Object.entries(need)) fakeTakeItem(p.bag, n, c)
+        p.bag.artifacts.dingxianyou = { owned: true, equipped: true }
+        logEvent(f, 'artifact', `🦋 伪玩家 ${p.name} 集齐材料，按玩家同配方打造出【定仙游】！`, now, { who: [p.name], major: true })
+      }
+    }
+    if (!p.bag.artifacts.wanhun) {
+      const need = { 万魂幡残卷: 5, 阴魂砂: 20, 游魂骨: 20, 成长性特殊彩武: 1 }
+      if (Object.entries(need).every(([n, c]) => itemCount(p.bag.items[n]) >= c)) {
+        for (const [n, c] of Object.entries(need)) fakeTakeItem(p.bag, n, c)
+        p.bag.artifacts.wanhun = {
+          name: '万魂幡', rank: 1, attack: 100 + Math.floor(Math.random() * 401),
+          equipped: true, deployed: true, souls: 0, totalSouls: 0, lastDecayAt: now,
+          mainSoul: { level: Math.min(30, Number(p.level) || 1), souls: 0, lastDecayAt: now },
+          deputySouls: []
+        }
+        logEvent(f, 'artifact', `🏴 伪玩家 ${p.name} 以万魂幡残卷与特殊彩武炼成【万魂幡】！`, now, { who: [p.name], major: true })
+      }
+    }
+    /* 傀儡: 与玩家一阶配方/50万灵石一致 */
+    if (!Array.isArray(p.bag.artifacts.puppets) || !p.bag.artifacts.puppets.length) {
+      const cost = PUPPET_INITIAL_COST
+      const hasMats = Object.entries(cost.materials).every(([n, c]) => itemCount(p.bag.items[n]) >= c)
+      if (hasMats && (Number(p.money) || 0) >= cost.money) {
+        for (const [n, c] of Object.entries(cost.materials)) fakeTakeItem(p.bag, n, c)
+        p.money -= cost.money
+        p.bag.artifacts.puppets = [{
+          name: '傀儡', rank: 1, power: 400 + Math.floor(Math.random() * 401),
+          equipped: true, deployed: true, nextChargeAt: now + 30 * 60000,
+          passive: pick(PUPPET_PASSIVE_KEYS)
+        }]
+        logEvent(f, 'artifact', `⚪ 伪玩家 ${p.name} 按玩家同配方炼成【一阶傀儡】！`, now, { who: [p.name], major: true })
+      }
+    }
+    /* 傀儡续费: 与玩家祭出同价(1万灵石/30分钟), 付不起自动收回 */
+    for (const puppet of (p.bag.artifacts.puppets || [])) {
+      if (!puppet || !puppet.deployed) continue
+      if ((Number(puppet.nextChargeAt) || 0) > now) continue
+      if ((Number(p.money) || 0) >= 10000) {
+        p.money -= 10000
+        puppet.nextChargeAt = now + 30 * 60000
+      } else {
+        puppet.deployed = false
+        logEvent(f, 'artifact', `⚪ ${p.name} 灵石不足，傀儡自动收回`, now, { who: [p.name], onlyPerson: true })
+      }
+    }
+  }
+}
+function fakeCaveOk (f, p, now) {
+  return !!(p && p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !p.fakeTravel && (p.loc || DEFAULT_REGION) === 'west' &&
+    !isFakeCaptive(f, p.name) && !isInSectJail(f, p.name) && !isInRaidJail(f, p.name) &&
+    !isInSectMine(f, p.name) && (Number(p.fakeLostUntil) || 0) <= now &&
+    itemCount(p.bag && p.bag.items ? p.bag.items['魂石'] : 0) > 0)
+}
+/** 伪玩家万魂窟推进: 结伴进窟、遇敌、失魂、队友救援, 与玩家掉落表同源 */
+export function fakeCaveTick (f, gid, now = Date.now()) {
+  if (!Array.isArray(f.fakeCaves)) f.fakeCaves = []
+  const activeNames = new Set()
+  for (const party of f.fakeCaves) for (const n of party.names) activeNames.add(n)
+  /* 起队: 西域内 2~3 人结伴; 每人必须有魂石, 没有就不进(不在窟外冒险) */
+  if (f.fakeCaves.length < 3 && Math.random() < 0.02) {
+    const pool = Object.values(f.roster || {}).filter(p => fakeCaveOk(f, p, now) && !activeNames.has(p.name))
+    if (pool.length >= 2) {
+      shuffle(pool)
+      const names = pool.slice(0, Math.min(pool.length, 2 + Math.floor(Math.random() * 2))).map(p => p.name)
+      for (const n of names) { const p = f.roster[n]; if (!p) continue; fakeTakeItem(p.bag, '魂石', 1) }
+      f.fakeCaves.push({ names, startedAt: now, nextAt: now + 3 * 60000, stoneAt: now + 10 * 60000, loot: {} })
+      logEvent(f, 'cave', `【万魂窟】${names.join('、')} 备好魂石，结伴进入万魂窟`, now, { who: names, major: true })
+    }
+  }
+  /* 推进已有队伍 */
+  for (const party of f.fakeCaves.slice()) {
+    if (now < (party.nextAt || 0)) continue
+    party.nextAt = now + (2 + Math.floor(Math.random() * 2)) * 60000
+    const elapsedMin = Math.max(1, Math.floor((now - (party.startedAt || now)) / 60000))
+    if (now - (party.startedAt || now) > 45 * 60000) {
+      f.fakeCaves = f.fakeCaves.filter(x => x !== party)
+      continue
+    }
+    /* 魂石按玩家规则每10分钟续1颗; 没魂石自动退出, 不留在窟里 */
+    if (now >= (party.stoneAt || 0)) {
+      for (const name of party.names.slice()) {
+        const p = f.roster[name]
+        if (!p) { party.names = party.names.filter(n => n !== name); continue }
+        if (itemCount(p.bag && p.bag.items ? p.bag.items['魂石'] : 0) > 0) {
+          fakeTakeItem(p.bag, '魂石', 1)
+        } else {
+          party.names = party.names.filter(n => n !== name)
+          logEvent(f, 'cave', `【万魂窟】${name} 魂石耗尽，自动退出万魂窟`, now, { who: [name], major: true })
+        }
+      }
+      party.stoneAt = now + 10 * 60000
+      if (!party.names.length) {
+        f.fakeCaves = f.fakeCaves.filter(x => x !== party)
+        continue
+      }
+    }
+    const active = party.names.filter(n => f.roster[n] && f.roster[n].alive)
+    if (!active.length) {
+      f.fakeCaves = f.fakeCaves.filter(x => x !== party)
+      continue
+    }
+    for (const name of active.slice()) {
+      const p = f.roster[name]
+      if (!p || (Number(p.fakeLostUntil) || 0) > now) continue
+      const my = Math.max(1, personPower(p))
+      const enemy = Math.max(100, Math.round(my * (0.55 + Math.random() * 0.9)))
+      const winRate = Math.max(0.1, Math.min(0.9, my / (my + enemy)))
+      if (Math.random() < winRate) {
+        const loot = rollCaveLoot(elapsedMin)
+        if (!p.bag) p.bag = { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} }
+        if (!party.loot) party.loot = {}
+        for (const [item, count] of Object.entries(loot)) { fakeAddItem(p.bag, item, count); party.loot[item] = (party.loot[item] || 0) + count }
+        logEvent(f, 'cave', `【万魂窟】${name} 斩杀阴魂，获得${Object.entries(loot).map(([n, c]) => `${itemIcon(n)}${n}×${c}`).join('、')}`, now, { who: [name], onlyPerson: true })
+      } else {
+        /* 失魂: 队友可救援; 被救出仍失魂10小时, 与玩家救援规则一致 */
+        const rescuer = active.find(n => n !== name && f.roster[n] && (Number(f.roster[n].fakeLostUntil) || 0) <= now && Math.random() < 0.75)
+        if (rescuer) {
+          p.fakeLostUntil = now + 10 * 3600000
+          party.names = party.names.filter(n => n !== name)
+          logEvent(f, 'cave', `【万魂窟】${name} 战败失魂，${rescuer} 将其救出；${name} 仍失魂10小时`, now, { who: [name, rescuer], major: true })
+        } else {
+          p.fakeLostUntil = now + 10 * 3600000
+          party.names = party.names.filter(n => n !== name)
+          logEvent(f, 'cave', `【万魂窟】${name} 战败失魂，队友未能救出，被困窟中`, now, { who: [name], major: true })
+        }
+      }
+    }
+    if (!party.names.length) f.fakeCaves = f.fakeCaves.filter(x => x !== party)
+  }
+}
 /* 宗门炼丹丹方(与玩家配方台 mix.js RECIPES 一致; 只用药材; 修为丹/破障丹无丹方不炼, 只能战利品/丹阁采购获得) */
 const SECT_RECIPES = {
   '惊鸿丹': [['望舒花', 1], ['星霜草', 2]],
@@ -3227,7 +3919,7 @@ export function learnSectGongfa (f, now = Date.now()) {
     }
     const members = sectAlive(f, sid)
     for (const p of members) {
-      if (!p || !p.alive) continue
+      if (!p || !p.alive || warActorOwner(f, 'fake', p.name)) continue
       if (!Array.isArray(p.learnedGongfa)) p.learnedGongfa = []
       const learned = new Set(p.learnedGongfa)
       const gongfa = Object.keys(vault.gongfas).filter(name =>
@@ -3237,7 +3929,7 @@ export function learnSectGongfa (f, now = Date.now()) {
       vault.gongfas[gongfa]--
       if (vault.gongfas[gongfa] <= 0) delete vault.gongfas[gongfa]
       p.learnedGongfa.push(gongfa)
-      if (!p.activeGongfa || gongfaScore(gongfa) > gongfaScore(p.activeGongfa)) p.activeGongfa = gongfa
+      if (gongfaScore(gongfa) > 0 && (!p.activeGongfa || gongfaScore(gongfa) > gongfaScore(p.activeGongfa))) p.activeGongfa = gongfa
       logEvent(f, 'flavor', `【修习】${sectName(f, sid)} ${p.name} 从宗门宝库取出${itemIcon(gongfa)}《${gongfa}》参悟，习得此功法`, now, { onlyPerson: true, ...evMeta(p) })
       changed = true
     }
@@ -3249,7 +3941,7 @@ export function learnSectGongfa (f, now = Date.now()) {
 function pickPromo (f, id, fromPos, toPos) {
   const minLevel = POS[toPos].band[0] // 达到目标职位修为下限(实力至上, 不看资历)
   const cand = Object.values(f.roster).filter(p =>
-    p.alive && !p.realmBusy && p.sect === id && p.status === 'sect' && p.pos === fromPos &&
+    npcCanAct(f, p) && p.sect === id && p.status === 'sect' && p.pos === fromPos &&
     p.level >= minLevel)
   cand.sort((a, b) => b.level - a.level || a.joinAt - b.joinAt)
   return cand[0] || null
@@ -3268,7 +3960,7 @@ function promotePerson (f, id, p, toPos) {
 function promoteSettle (f) {
   for (const id of Object.keys(f.sects)) {
     const sm = f.sectMap[id]
-    if (!sm) continue
+    if (!sm || f.sects[id]?.wipeAt) continue
     /* 玩家主导的宗门(玩家宗主坐镇): 伪玩家职位链由玩家管理, 跳过伪玩家晋升/夺权 */
     if (f.sects[id] && f.sects[id].owner) continue
     /* 太上长老(凌驾宗主): 宗主修为达太上带下限 → 禅让退位为太上, 副宗主继任 */
@@ -3282,7 +3974,7 @@ function promoteSettle (f) {
       }
       /* 太上空缺: 宗内修为≥太上下限的非宗主成员晋升(隐世老祖) */
       const c = Object.values(f.roster).filter(p =>
-        p.alive && !p.realmBusy && p.sect === id && p.status === 'sect' && p.pos !== 'zongzhu' &&
+        npcCanAct(f, p) && p.sect === id && p.status === 'sect' && p.pos !== 'zongzhu' &&
         p.pos !== 'taishang' && p.level >= POS.taishang.band[0])
         .sort((a, b) => b.level - a.level || a.joinAt - b.joinAt)[0]
       if (c) { promotePerson(f, id, c, 'taishang'); continue }
@@ -3322,11 +4014,11 @@ function powerStruggleSettle (f) {
   for (const id of Object.keys(f.sects)) {
     const sm = f.sectMap[id]
     if (!sm) continue
-    if (f.sects[id] && f.sects[id].owner) continue
+    if (f.sects[id] && (f.sects[id].owner || f.sects[id].wipeAt)) continue
     if (sm.zongzhu && f.roster[sm.zongzhu] && f.roster[sm.zongzhu].alive) {
       const zz = f.roster[sm.zongzhu]
       const challenger = sectAlive(f, id)
-        .filter(p => p.pos !== 'zongzhu' && p.level > zz.level + 3)
+        .filter(p => npcCanAct(f, p) && p.pos !== 'zongzhu' && p.level > zz.level + 3)
         .sort((a, b) => b.level - a.level)[0]
       if (challenger && Math.random() < 0.4) {
         const whoT = sectName(f, id)
@@ -3358,7 +4050,7 @@ function powerStruggleSettle (f) {
 /* ---------- 修为每日稳定(玩家体系: 每日灵力沉淀, 不直接改修为) ---------- */
 function realmSettle (f) {
   for (const p of Object.values(f.roster)) {
-    if (!p.alive || p.realmBusy) continue
+    if (!p.alive || p.realmBusy || warActorOwner(f, 'fake', p.name)) continue
     addExp(p, rand([10, 30]))
   }
 }
@@ -3368,7 +4060,7 @@ function recruitSettle (f) {
   const now = Date.now()
   for (const id of Object.keys(f.sects)) {
     const s = f.sects[id]
-    if (!s.recruit || !s.recruit.next || now < s.recruit.next) continue
+    if (s.wipeAt || !s.recruit || !s.recruit.next || now < s.recruit.next) continue
     const sm = f.sectMap[id]
     if (!sm) continue
     /* 宗门无宗主但太上长老尚在 → 太上扶持新宗主(不至于灭门); 玩家宗门不触发 */
@@ -3403,16 +4095,16 @@ function recruitSettle (f) {
 export function fakeJoinSect (f, name, sid) {
   const s = f.sects[sid]
   if (!s || s.wipeAt) return null
-  if (sectAlive(f, sid).length >= sectCap(f, sid)) return null
+  if (!canAdmitSectNpc(f, sid, name)) return null
   const np = f.roster[name]
   if (np && np.alive && np.sect) return null // 已有宗门
   if (np && np.servantOf) return null // 已是玩家仆从(收服), 不可再入宗
   if (np && np.alive && np.status === 'scatter') {
-    np.sect = sid; np.pos = 'dizi'; np.status = 'sect'
+    if (!admitSectNpc(f, np, sid)) return null
     /* 保留修为: 高手入宗仍是高手(不再压到弟子带1~12, 避免宗门被新招低修弟子拉低; 修为高会被AI宗主重用) */
     if (f.sectMap[sid] && !f.sectMap[sid].dizi.includes(name)) f.sectMap[sid].dizi.push(name)
   } else {
-    addPerson(f, name, sid, 'dizi', 1)
+    if (!addPerson(f, name, sid, 'dizi', 1)) return null
   }
   return { type: 'join', who: [name], sect: sid, txt: `【入宗】${name} 拜入 ${s.name} 为弟子` }
 }
@@ -3467,7 +4159,7 @@ function bondCountInSect (f, p) {
 /** 忠诚度每日调整: 入宗越久越忠诚 + 同宗羁绊 + 宗门兴衰; 散修趋中 */
 function loyaltySettle (f, now = Date.now()) {
   for (const p of Object.values(f.roster)) {
-    if (!p.alive || p.realmBusy) continue
+    if (!p.alive || p.realmBusy || warActorOwner(f, 'fake', p.name)) continue
     let loy = Number(p.loyalty)
     if (!(loy >= 0)) loy = initLoyalty(p)
     let d = 0
@@ -3545,7 +4237,7 @@ export function pickSectFor (f, name) {
   const cand = Object.keys(f.sects).filter(id2 => {
     const s2 = f.sects[id2]
     if (!s2 || s2.wipeAt) return false
-    if (sectAlive(f, id2).length >= sectCap(f, id2)) return false
+    if (!canAdmitSectNpc(f, id2)) return false
     if (enemies.size && sectAlive(f, id2).some(x => enemies.has(x.name))) return false // 宗门里有仇人, 不想进
     /* 灭门仇家玩家在宗内 → 不愿入 */
     if (p && p.vendetta && p.vendetta.culprit && p.vendetta.culprit.length) {
@@ -3572,106 +4264,11 @@ function drawSectName (f) {
   } catch (err) { return null }
 }
 export function rebuildSettle (f) {
-  const now = Date.now()
-  for (const id of Object.keys(f.sects)) {
-    const s = f.sects[id]
-    const sm = f.sectMap[id]
-    if (!sm) continue
-    /* 玩家坐镇(玩家宗主或玩家太上长老) → 宗门不会灭门 */
-    const ownerUid = s.owner || null
-    const hasPlayerTai = Object.values(f.players || {}).some(x => x && x.sect === id && x.pos === 'taishang')
-    if (ownerUid || hasPlayerTai) {
-      if (s.wipeAt) { s.wipeAt = 0; s.rebuildAt = 0 }
-      continue
-    }
-    const alive = sectAlive(f, id)
-    /* 核心管理层(宗主/副宗/太上)是否还有人: 全死则灭宗, 除非宗门内有玩家接管 */
-    const hasCore = !!(sm.zongzhu && f.roster[sm.zongzhu] && f.roster[sm.zongzhu].alive) ||
-      (sm.fuzong || []).some(n => f.roster[n] && f.roster[n].alive) ||
-      (sm.taishang || []).some(n => f.roster[n] && f.roster[n].alive)
-    if (hasCore) {
-      if (s.wipeAt) { s.wipeAt = 0; s.rebuildAt = 0 }
-      continue
-    }
-    /* 核心管理层尽灭: 只有核心职位玩家(宗主/副宗/太上)晋升继任宗主, 宗门不灭; 非核心玩家(执事/弟子) → 随宗灭门 */
-    const playersIn = Object.entries(f.players || {}).filter(([, pp]) => pp && pp.sect === id)
-    const coreP = playersIn.filter(([, pp]) => pp.pos === 'zongzhu' || pp.pos === 'fuzong' || pp.pos === 'taishang')
-    if (coreP.length) {
-      coreP.sort((a, b) => (a[1].joinAt || 0) - (b[1].joinAt || 0))
-      const [uid2, pp] = coreP[0]
-      pp.pos = 'zongzhu'
-      s.owner = String(uid2)
-      s.wipeAt = 0; s.rebuildAt = 0
-      logEvent(f, 'promote', `【继任】🌙 玩家 ${pp.name} 于宗门危难之际继任【${s.name}】宗主，宗门不灭！`)
-      continue
-    }
-    /* 无玩家接管 → 灭门(树倒猢狲散): 剩余弟子离开宗门流落江湖, 宗门名存实亡 → 换皮重建 */
-    if (!s.wipeAt) {
-      s.wipeAt = now
-      s.rebuildAt = now + rand(REBUILD_MIN) * 60000
-      /* 灭门: 占领小区无主化(产出/护城阵不再流入灭门宗门) */
-      for (const [area, owner] of Object.entries(f.areas || {})) {
-        if (owner === id) { delete f.areas[area]; if (f.areaDef) delete f.areaDef[area] }
-      }
-      /* 灭门复仇: 散尽前给幸存弟子记仇(好斗/嗜杀/魔修/与宗主管理层有羁绊者) */
-      createVendetta(f, id, [], 'fate', now)
-      for (const p of alive) {
-        removeFromSectMap(f, id, p.name)
-        p.status = 'scatter'
-        p.sect = null
-        p.pos = null
-        logEvent(f, 'leave', `【散尽】${s.name} 树倒猢狲散，弟子 ${p.name} 黯然离开宗门，流落江湖`)
-      }
-      /* 玩家成员(仅执事及以下)随宗门覆灭被踢出转散修 */
-      for (const [uid2, pp] of Object.entries(f.players || {})) {
-        if (pp && pp.sect === id) {
-          delete f.players[uid2]
-          logEvent(f, 'player', `【散尽】玩家 ${pp.name} 随宗门覆灭被逐出，沦为散修`, now)
-        }
-      }
-      logEvent(f, 'wipe', `【灭门】${s.name} 管理层尽数陨落，宗门名存实亡……`)
-    } else if (s.rebuildAt && s.rebuildAt - now > REBUILD_MIN[1] * 60000) {
-      /* 旧档/超长延迟修正: 灭门宗门若重建剩余超过新上限(旧代码 6~24h 遗留的 rebuildAt), 缩短到 5~30 分钟内重生 */
-      s.rebuildAt = now + rand(REBUILD_MIN) * 60000
-    } else if (s.rebuildAt && now >= s.rebuildAt) {
-      /* 远遁的原宗主看情况重建: 在世且仍为散修(未另投宗门)时按意愿重建(保留原名与原修为);
-       *  否则宗门名额让给其他散修(换皮开宗: 新名+新宗主) */
-      const ex = s.masterExile
-      const exP = ex && f.roster[ex.name]
-      if (exP && exP.alive && !exP.sect && Math.random() < 0.5) {
-        exP.sect = id
-        exP.pos = 'zongzhu'
-        exP.status = 'sect'
-        exP.joinAt = now
-        if (!f.sectMap[id]) f.sectMap[id] = { zongzhu: null, fuzong: [], taishang: [], zhishi: [], dizi: [] }
-        f.sectMap[id].zongzhu = ex.name
-        s.recruit = { next: now + rand([0, 4]) * 3600000 }
-        logEvent(f, 'rebuild', `【重建】远遁的宗主 ${ex.name} 重出江湖，于废墟之上重建【${s.name}】`)
-        s.wipeAt = 0; s.rebuildAt = 0; s.masterExile = null
-      } else {
-        const newName = drawSectName(f)
-        if (newName) {
-          s.name = newName // 每群独立: 只改本群宗门名, 不再动world.json
-          /* 重建不继承旧宗门的关系(敌对/结盟全清); 设施与地盘由同id天然继承 */
-          s.enemies = []
-          s.allies = []
-          const zz = drawName(f)
-          if (zz) {
-            /* 重建宗主从低境界起步, 靠修炼/突破自然成长(不凭空给高境界) */
-            addPerson(f, zz, id, 'zongzhu', rand(SECT_START_BAND.zongzhu))
-            s.recruit = { next: now + rand([0, 4]) * 3600000 }
-            logEvent(f, 'rebuild', `【重建】散修 ${zz} 于废墟之上开宗立派，重立${newName}`)
-          } else {
-            s.recruit = { next: now + 3600000 }
-            logEvent(f, 'rebuild', `【重建】${newName} 于废墟之上重新开宗立派`)
-          }
-          s.wipeAt = 0; s.rebuildAt = 0; s.masterExile = null
-        } else {
-          s.rebuildAt = now + 24 * 3600000
-        }
-      }
-    }
-  }
+  return settleSectSuccession(f, Date.now(), {
+    powerOf: personPower,
+    removeFromSect: (sid, name) => removeFromSectMap(f, sid, name),
+    log: (type, txt, at, opts) => logEvent(f, type, txt, at, opts)
+  })
 }
 
 /* ---------- 每日结算 ---------- */
@@ -3700,7 +4297,7 @@ function topupOne (f, now) {
   const open = Object.keys(f.sects).filter(id => {
     const s = f.sects[id]
     const sm = f.sectMap[id]
-    return s && !(s.wipeAt > 0) && sm && sm.zongzhu && sectAlive(f, id).length < sectCap(f, id)
+    return s && !(s.wipeAt > 0) && sm && sm.zongzhu && canAdmitSectNpc(f, id)
   })
   if (!open.length) {
     /* 所有宗门都满员/无在世宗门: 同样入世为散修 */
@@ -3739,93 +4336,77 @@ function logTrade (f, txt) {
   f.trades.push({ t: Date.now(), txt })
   if (f.trades.length > 500) f.trades = f.trades.slice(-500)
 }
-/** 单个伪玩家尝试买 1 件(随机挑三阁/在售品, 买得起的才买; 扣库存+灵石+入背包, 并计入活跃) */
-/* 攒钱目标(消费驱动, 按自身需求+性格+财富):
- *  - 有部位空着 → 先补装备(缺什么补什么)
- *  - 快突破且无破障丹 → 买破障丹(突破刚需)
- *  - 未学任何功法 → 买功法书
- *  - 已穿装备品质不高 → 想换更好装备
- *  - 攻击型想买武器, 求道型想买功法/丹药, 越富目标越高级(白200/绿1000/蓝4000/紫12000/金30000) */
+/* 购物冷却到期后重评真实需求；仍用现有 wish 字段，不迁移存档。
+ * 武器 → 首本有效战斗功法 → 突破急需 → 空槽 → 性格/财富驱动升级。
+ * 缺货/买不起时只买有实际提升的替代品，不为凑目标反复买无用装备。 */
+const FAKE_EQUIP_SLOTS = ['weapon', 'helmet', 'chest', 'pants', 'shoes', 'ring']
 function fakeWish (f, p) {
-  const money = p.money || 0
-  const trait = p.trait || ''
-  const act = p.act || ''
-  const bag = p.bag || {}
-  const equipped = bag.equipped || {}
-  const items = bag.items || {}
-  const SLOTS = ['weapon', 'helmet', 'chest', 'pants', 'shoes', 'ring']
-  /* 1. 空着的部位 → 先补装备(缺什么补什么) */
-  const emptySlots = SLOTS.filter(s => !equipped[s] && !Object.keys(items).some(n => EQUIP_TPL[n] && (SLOT_MAP[EQUIP_TPL[n].type] || 'weapon') === s && itemCount(items[n]) > 0))
-  if (emptySlots.length) {
-    const part = emptySlots[Math.floor(Math.random() * emptySlots.length)]
-    const tiers = money < 1000 ? [1, 2] : (money < 3000 ? [2, 3] : (money < 8000 ? [3, 4] : [4, 5]))
-    const tier = tiers[Math.floor(Math.random() * tiers.length)]
-    const price = [0, 200, 1000, 4000, 12000, 30000][tier]
-    return { type: 'weapon', part, tier, price, at: Date.now() }
-  }
-  /* 2. 快突破且无破障丹 → 买破障丹(突破刚需, 攒着等突破用) */
-  const need = fakeSubThreshold(p.level + 1)
-  const nearBreak = (p.exp || 0) >= need * 0.7
-  if (nearBreak && itemCount(items['破障丹']) <= 0) {
-    const price = ITEM_PRICE['破障丹'] || 1000
-    if (money >= price) return { type: 'pill', tier: 2, price, at: Date.now() }
-  }
-  /* 3. 未学任何功法 → 买功法书(学最强功法) */
-  if (!p.learnedGongfa || !p.learnedGongfa.length) {
-    const tier = money < 3000 ? 2 : (money < 8000 ? 3 : 4)
-    const price = [0, 200, 1000, 4000, 12000, 30000][tier]
-    return { type: 'gongfa', tier, price, at: Date.now() }
-  }
-  /* 4. 性格驱动目标 */
-  let type
-  if (trait === '好斗' || trait === '嗜杀' || p.path === '魔道' || act === '贪玩') type = 'weapon'
-  else if (act === '苦修') type = 'pill'
-  else if (act === '勤勉' || trait === '善良') type = 'gongfa'
-  else type = Math.random() < 0.5 ? 'weapon' : 'gongfa'
-  /* 财富档位: 越富目标越高级 */
+  const money = Number(p.money) || 0
+  const equipped = p.bag?.equipped || {}
+  const items = p.bag?.items || {}
   const tiers = money < 1000 ? [1, 2] : (money < 3000 ? [2, 3] : (money < 8000 ? [3, 4] : [4, 5]))
   const tier = tiers[Math.floor(Math.random() * tiers.length)]
-  const price = [0, 200, 1000, 4000, 12000, 30000][tier]
-  return { type, tier, price, at: Date.now() }
+  const wish = (type, part, targetTier = tier) => ({
+    type, ...(part ? { part } : {}), tier: targetTier,
+    price: [0, 200, 1000, 4000, 12000, 30000][targetTier], at: Date.now()
+  })
+  if (!equipped.weapon) return wish('weapon', 'weapon')
+  if (gongfaScore(p.activeGongfa) <= 0) return wish('gongfa')
+  if ((p.exp || 0) >= fakeSubThreshold(p.level + 1) * 0.7 && itemCount(items['破障丹']) <= 0) return wish('pill', null, 2)
+  const emptySlots = FAKE_EQUIP_SLOTS.filter(slot => !equipped[slot])
+  if (emptySlots.length) return wish('weapon', emptySlots[Math.floor(Math.random() * emptySlots.length)])
+  let type
+  if (p.trait === '好斗' || p.trait === '嗜杀' || p.path === '魔道' || p.act === '贪玩') type = 'weapon'
+  else if (p.act === '苦修') type = 'pill'
+  else if (p.act === '勤勉' || p.trait === '善良') type = 'gongfa'
+  else type = Math.random() < 0.5 ? 'weapon' : 'gongfa'
+  return wish(type)
 }
-/** 买攒钱目标物品(从商店实际库存挑对应档位武器/功法/丹药, 同档无货降档, 再无货任意买一件在售); 返回是否买到 */
+
+/** 器阁仅售固定属性白~紫装；对比当前真实属性，不购买同档无提升或降级装备。 */
+function usefulFakeEquip (p, name) {
+  const tpl = EQUIP_TPL[name]
+  if (!tpl || equipPrice(name) <= 0) return false
+  const slot = tpl.type
+  const curName = p.bag?.equipped?.[slot]
+  if (!curName) return true
+  if (isRainbowRef(curName)) return false
+  const cur = EQUIP_TPL[curName]
+  if (!cur || tpl.quality < cur.quality) return false
+  const recorded = p.bag?.equippedAttr?.[slot]
+  const attr = recorded && Object.keys(recorded).length ? recorded : cur
+  return attrPower(tpl) > attrPower(attr)
+}
+
+/** 从当前大区真实库存选择买得起且有用的物品，按实际售价付款。 */
 async function buyWishItem (f, gid, p, w) {
   const rg = p.loc || 'center'
-  let shop = null
-  let kind = null
-  if (w.type === 'weapon') { shop = 'qige'; kind = 'weapon' }
-  else if (w.type === 'gongfa') { shop = 'cangbaoge'; kind = 'gongfa' }
-  else { shop = 'dange'; kind = 'pill' }
+  const kind = w.type === 'weapon' ? 'weapon' : (w.type === 'gongfa' ? 'gongfa' : 'pill')
+  const shop = kind === 'weapon' ? 'qige' : (kind === 'gongfa' ? 'cangbaoge' : 'dange')
   try {
     const stock = await getStock(gid, shop, rg)
-    const names = Object.keys(stock)
-    if (!names.length) return false
-    /* 补装备: 只挑目标部位(空部位)的装备 */
-    let scope = names
-    if (kind === 'weapon' && w.part) {
-      const part = SLOT_MAP[w.part] || w.part
-      scope = names.filter(n => EQUIP_TPL[n] && (SLOT_MAP[EQUIP_TPL[n].type] || 'weapon') === part)
-      if (!scope.length) scope = names // 该部位无货: 退回任意武器
+    const priceOf = name => kind === 'weapon' ? equipPrice(name) : (kind === 'gongfa' ? gongfaPrice(name) : (ITEM_PRICE[name] || 0))
+    let scope = Object.keys(stock).filter(name => Number(stock[name]) > 0 && priceOf(name) > 0 && priceOf(name) <= (Number(p.money) || 0))
+    if (kind === 'weapon') {
+      scope = scope.filter(name => usefulFakeEquip(p, name))
+      if (w.part) {
+        const matching = scope.filter(name => EQUIP_TPL[name].type === w.part)
+        // 缺武器先保留武器优先级，让调用方尝试基础功法；其它空槽只能替换成另一个空槽。
+        scope = matching.length ? matching : (w.part === 'weapon' && !p.bag?.equipped?.weapon ? [] : scope.filter(name => !p.bag?.equipped?.[EQUIP_TPL[name].type]))
+      }
+    } else if (kind === 'gongfa') {
+      const learned = new Set(p.learnedGongfa || [])
+      scope = scope.filter(name => !learned.has(name) && gongfaScore(name) > gongfaScore(p.activeGongfa))
+    } else {
+      scope = scope.filter(name => name === (w.tier === 2 ? '破障丹' : '修为丹'))
     }
-    const qOf = (n) => {
-      if (kind === 'pill') return (n === '破障丹' ? 2 : 1)
-      const t = EQUIP_TPL[n] || GONGFA_TPL[n]
-      return t ? (t.quality || 0) : 0
-    }
-    let pool = scope.filter(n => qOf(n) === w.tier)
-    let t = w.tier
-    while (!pool.length && t > 1) { t--; pool = scope.filter(n => qOf(n) === t) }
-    if (!pool.length) pool = scope // 目标档位无货: 任意买一件在售(总比空手强)
-    /* 同档位内挑评分最高的(知道好坏): 武器按装备评分/功法按功法评分/丹药破障丹>修为丹 */
-    const scoreOf = (n) => {
-      if (kind === 'pill') return n === '破障丹' ? 2 : (n === '修为丹' ? 1 : 0)
-      const tpl = EQUIP_TPL[n] || GONGFA_TPL[n]
-      return tpl ? (kind === 'weapon' ? equipScore(n) : gongfaScore(n)) : 0
-    }
-    pool.sort((a, b) => scoreOf(b) - scoreOf(a))
-    const name = pool[0] // 买评分最高的, 不随机
-    const price = w.type === 'pill' ? (ITEM_PRICE[name] || 500) : (w.type === 'weapon' ? equipPrice(name) : gongfaPrice(name))
-    if ((p.money || 0) < price) return false
+    const qOf = name => kind === 'pill' ? (name === '破障丹' ? 2 : 1) : (EQUIP_TPL[name] || GONGFA_TPL[name]).quality
+    const pool = scope.filter(name => qOf(name) <= w.tier)
+    const scoreOf = name => kind === 'weapon' ? attrPower(EQUIP_TPL[name]) : (kind === 'gongfa' ? gongfaScore(name) : 1)
+    pool.sort((a, b) => qOf(b) - qOf(a) || scoreOf(b) - scoreOf(a) || priceOf(a) - priceOf(b))
+    const name = pool[0]
+    if (!name) return false
+    const price = priceOf(name)
     const res = await buyStock(gid, shop, name, 1, rg)
     if (!res || !res.ok || (res.count || 0) < 1) return false
     p.money -= price
@@ -3835,6 +4416,7 @@ async function buyWishItem (f, gid, p, w) {
     if (kind === 'weapon' && changed.length) {
       p.activities = { ...(p.activities || {}), lastEquip2: Date.now() + rand([10, 30]) * 60000 }
     }
+    if (kind === 'gongfa') { fakeLearnBestGongfa(f, p); runBestGongfa(f, p) }
     /* 三阁销售扣税: 伪玩家付款不变, 销售收入按所在大区税率计入该区繁荣度 */
     const tw = getWorld(f.gid)
     const trate = taxFor(tw, rg, p.sect ? sectName(f, p.sect) : null)
@@ -3848,34 +4430,24 @@ async function buyWishItem (f, gid, p, w) {
     return true
   } catch (err) { return false }
 }
-/** 单个伪玩家消费(攒钱目标驱动, 购买不限制):
- *  - 有攒钱目标 → 攒够就买高级货(武器/功法/丹药), 买完重新定目标
- *  - 攒钱中不乱花钱, 仅突破急需时补破障丹(刚需)
- *  - 不再"有钱就花"导致永远攒不住钱 */
+/** 每次到购物冷却重评目标；购买失败可尝试基础功法/其它空槽，不锁死在旧愿望金额上。 */
 async function tryFakeBuy (f, gid, p, now) {
-  const rg = p.loc || 'center'
   try {
-    if (!p.wish) p.wish = fakeWish(f, p)
-    const money = p.money || 0
-    /* 攒够目标 → 买! */
-    if (money >= p.wish.price) {
-      const ok = await buyWishItem(f, gid, p, p.wish)
-      if (ok) p.wish = null // 买完重新定目标
-      return ok
-    }
-    /* 攒钱中: 突破急需破障丹(背包无且灵力达标)才应急买; 平时不乱花 */
-    const needPill = p.bag && p.bag.items && itemCount(p.bag.items['破障丹']) <= 0 && (p.exp || 0) >= fakeSubThreshold(p.level + 1)
-    if (needPill && money >= (ITEM_PRICE['破障丹'] || 1000)) {
-      const res = await buyStock(gid, 'dange', '破障丹', 1, rg)
-      if (res && res.ok && (res.count || 0) >= 1) {
-        p.money -= (ITEM_PRICE['破障丹'] || 1000)
-        if (!p.bag) p.bag = { items: {}, equipped: {} }
-        fakeAddItem(p.bag, '破障丹', 1)
-        const who = p.status === 'sect' && p.sect ? sectName(f, p.sect) : '散修'
-        try { logTrade(f, `【丹阁·${regionNameOf(rg)}】${who} ${p.name} 购得 ${itemIcon('破障丹')}破障丹 ×1（-${ITEM_PRICE['破障丹'] || 1000}灵石）`) } catch (err) { }
-        try { await recordActive(gid, 'fake:' + p.name, rg) } catch (err) { }
-        return true
-      }
+    // 先使用已有物品，避免已有装备/书籍却重复花钱。
+    fakeAutoEquip(p)
+    runBestGongfa(f, p)
+    fakeLearnBestGongfa(f, p, now)
+    runBestGongfa(f, p)
+    p.wish = fakeWish(f, p)
+    const wishes = [p.wish]
+    // 备用目标按商店可售档筛选，仍受实际余额限制，避免误用丹药档位限制装备。
+    if (gongfaScore(p.activeGongfa) <= 0 && p.wish.type !== 'gongfa') wishes.push({ ...p.wish, type: 'gongfa', part: undefined, tier: 5 })
+    const empty = FAKE_EQUIP_SLOTS.find(slot => !p.bag?.equipped?.[slot] && slot !== p.wish.part)
+    if (empty) wishes.push({ ...p.wish, type: 'weapon', part: empty, tier: 4 })
+    const needPill = itemCount(p.bag?.items?.['破障丹']) <= 0 && (p.exp || 0) >= fakeSubThreshold(p.level + 1)
+    if (needPill && !(p.wish.type === 'pill' && p.wish.tier === 2)) wishes.push({ type: 'pill', tier: 2 })
+    for (const wish of wishes) {
+      if (await buyWishItem(f, gid, p, wish)) { p.wish = null; return true }
     }
     return false
   } catch (err) { return false }
@@ -3907,6 +4479,12 @@ async function tradeTick (f, gid, now) {
     if (!p || !p.alive || p.realmBusy || isInSectMine(f, p.name)) continue
     if (!p.activities) p.activities = {}
     if (now < (p.activities.nextShop || 0)) continue
+    /* 三阁购买也按个人倾向: 不是每人每1~3分钟都去买 */
+    const desire = fakeTradeDesire(p, {})
+    if (Math.random() > 0.2 + desire * 0.6) {
+      p.activities.nextShop = now + rand([5, 15]) * 60000
+      continue
+    }
     const bought = await tryFakeBuy(f, gid, p, now)
     p.activities.nextShop = now + (1 + Math.floor(Math.random() * 3)) * 60000 // 1~3分钟后(原5~15分钟, 用户要求去限制; 无冷却会刷屏)
     if (bought) changed = true
@@ -3922,7 +4500,7 @@ function fakePetDelay () {
   return (FAKE_PET_NEXT_MIN + Math.floor(Math.random() * (FAKE_PET_NEXT_MAX - FAKE_PET_NEXT_MIN + 1))) * 60000
 }
 function fakePetOwner (f, p) {
-  return !!(p && p.name && p.alive && !p.realmBusy && !isFakeCaptive(f, p.name) && !isInSectJail(f, p.name) && !isInRaidJail(f, p.name) && !isInSectMine(f, p.name))
+  return !!(p && p.name && p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !isFakeCaptive(f, p.name) && !isInSectJail(f, p.name) && !isInRaidJail(f, p.name) && !isInSectMine(f, p.name))
 }
 function fakePetName (pet) {
   return pet.customName || speciesMeta(pet.speciesId)?.species.name || pet.speciesId
@@ -4101,20 +4679,29 @@ async function fakeTickUnlocked (gid) {
       f.lastHistoryCleanup = now
       if (report.changed) console.log(`[天下大事]历史索引清理: ${gid} 删除${report.removed}项, 过期状态${report.expired}项`)
     }
+    overCapSettle(f, now)
     try { fakePetTick(f, gid, now) } catch (err) { console.log('[灵兽]伪玩家推进异常:', err && err.stack) }
     /* 宗门战争唯一由 sectTick 推进；旧版 f.attacks 已迁移并不再结算。 */
     try {
       const ss = await import('./sect_system.js')
       await ss.sectTick(f, gid, now)
     } catch (err) { console.log('[宗门系统]推进异常:', err && err.stack) }
-    /* 每分钟: 灭门检查(核心管理层全死→灭门/玩家继任; 不必等每日结算) */
+    /* 每分钟: 总部完好的空缺继任；确无门人时自然消亡 */
     try { rebuildSettle(f) } catch (err) { console.log('[宗门系统]灭门检查异常:', err && err.stack) }
-    /* 每分钟: 宗门超员→弟子离宗/叛宗概率大增 */
+    /* 每分钟: 容量变化后疏散可自由行动的超额门人 */
     try { overCapSettle(f, now) } catch (err) { console.log('[宗门系统]超员结算异常:', err && err.stack) }
     /* 每分钟: 藏宝阁天牢结算(洗劫藏宝阁被抓的伪玩家刑满释放, 记【出狱】) */
     try { raidJailSettle(f, now) } catch (err) { console.log('[天下大事]藏宝阁天牢结算异常:', err && err.stack) }
     /* 每分钟: 每人核心行为(冷却到按性格概率执行: 修炼/吃丹/突破/摆摊), 重启后立即可见 */
     await perPersonActs(f, now)
+    try { pruneFakeMerchantShops(f, now) } catch (err) { console.log('[魔窟商人]货单清理异常:', err && err.stack) }
+    try { fakeTravelTick(f, now) } catch (err) { console.log('[跨区]伪玩家推进异常:', err && err.stack) }
+    try { fakeCaveTick(f, gid, now) } catch (err) { console.log('[万魂窟]伪玩家推进异常:', err && err.stack) }
+    try { fakeShenyouTick(f, now) } catch (err) { console.log('[神游蛊]伪玩家推进异常:', err && err.stack) }
+    try { fakeRareTick(f, now) } catch (err) { console.log('[稀有]伪玩家推进异常:', err && err.stack) }
+    try { fakeGoalTick(f, gid, now) } catch (err) { console.log('[目标]伪玩家推进异常:', err && err.stack) }
+    try { fakeArtifactTick(f, now) } catch (err) { console.log('[法宝]伪玩家推进异常:', err && err.stack) }
+    /* 交易只在 fakeGoalTick 里按个人需求/倾向触发, 不再做全群随机撮合 */
     /* 宗门新版 sectTick 已负责唯一的材料炼丹/炼器和药园产出；旧 sectResourceFlow 会重复消耗材料并绕过统一穿戴，停用。 */
     /* 每30分钟: 旧版宗门资源自用流转已移除 */
     /* 每小时: 伪玩家宗主任命(修为达标即提拔补职位空缺——当天达标当天升, 不用等每日结算) */
