@@ -9,12 +9,14 @@ import { aiDiplomacy } from './diplomacy.js'
 import { resolveSectAttacks, spawnAiSectAttacks } from './war.js'
 import { settleSectJails, repairSettledCaptives, liberateDestroyedCaptor, unmarkPlayerCaptive } from './captive.js'
 import { notifyJoinReqs } from './hr.js'
+import { settleSectContributions } from './contribution.js'
 
 export async function sectTick (f, gid, now = Date.now()) {
   let changed = normalizeDiplomacy(f, now)
   try { if (await finishSectDissolutions(f, gid, now, { liberate: liberateDestroyedCaptor, unmark: unmarkPlayerCaptive, forget: forgetSectDiplomacy })) changed = true } catch (err) { console.log('[宗门系统]自然消亡清理异常:', err?.stack) }
   try { if (await resolveSectAttacks(f, gid, now)) changed = true } catch (err) { console.log('[宗门系统]攻打推进异常:', err && err.stack) }
   try { if (await repairSettledCaptives(f, gid)) changed = true } catch (err) { console.log('[宗门系统]历史俘虏修复异常:', err && err.stack) }
+  try { if ((await settleSectContributions(f, gid, now)).changed) changed = true } catch (err) { console.log('[宗门系统]日常贡献异常:', err?.stack) }
   if (healPlayers(f)) changed = true
   try { settleSectJails(f, gid, now) } catch (err) { }
   /* 每半小时: 税收分成 + 小区产出 + 自动炼丹 + 伪玩家补齐宗门 */

@@ -7,6 +7,7 @@
 import fs from 'fs'
 import { saveOrDefer } from './deferred_save.js'
 import { Plugin_Name, Save_Path } from './plugin.js'
+import { guardWinRate } from './fight.js'
 import {
   LEAN_BIAS, ARCH_BIAS, ARCH_NAME, PET_QUALITY, qualityNameOf, petRegionNameOf,
   bloodlineOf, speciesMeta, speciesPoolOf, allSpecies
@@ -748,12 +749,9 @@ export function parentPowerFor (maxAttr, quality) {
   return Math.round(fullPower * PET_CFG.parentPowerBase * (1 + PET_CFG.parentMateBonus))
 }
 
-/** 玩家战力 vs 守护父母战力 → 胜率(与决斗同源: 战力÷100折算小境界当量, 按战斗力意义系数线性映射) */
+/** 灵兽守护战与其它野外守卫使用同一套绝对战力胜率。 */
 export function parentWinRate (playerPower, parentPower) {
-  /* POWER_PER_LEVEL=100 与 fight.js 一致(每小境界100战力); Magnification=8 与决斗默认战斗力意义系数一致 */
-  const gap = ((playerPower || 0) - (parentPower || 1)) / 100
-  const win = 50 + 8 * gap
-  return Math.max(5, Math.min(100, win)) // 统一绝对战力胜率 clamp 5~100
+  return guardWinRate(playerPower, parentPower)
 }
 
 /**
@@ -803,7 +801,7 @@ export function resolveEncounter (state, uid, choice, now = Date.now(), playerPo
     success = Math.random() < (PET_CFG.captureRate.cub[enc.quality - 1] || 0.7)
   } else if (enc.mode === 'parent') {
     const win = parentWinRate(playerPower, enc.parentPower)
-    if (win <= 10) {
+    if (win <= 0) {
       failText = `你抬眼一望，那守护双亲的战力（约 ${enc.parentPower}）远在你之上（${playerPower}），强行出手无异于以卵击石，只得悻悻作罢……`
     } else {
       success = Math.random() * 100 < win

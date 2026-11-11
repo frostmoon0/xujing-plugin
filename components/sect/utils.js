@@ -1,3 +1,6 @@
+import { VAULT_PILL_PRICES } from './vault_rules.js'
+import { isTaichuEnabled } from '../taichu_equipment.js'
+import { INJURY_PCT, INJURY_RECOVER, injuryState } from '../injury.js'
 /* 由 sect_system.js 拆分自动生成: utils.js */
 import { Plugin_Name } from '../plugin.js'
 import { POS, sectVitality, sectCulture, sectName, sectIdByName } from '../fake_data.js'
@@ -23,31 +26,22 @@ export const CFG = {
   TAX_SHARE: 0.5,             // 税收进宝库比例
   FAKE_OUT_SHARE: 0.3,        // 伪玩家产出进宝库比例(未单独区分, 随TAX_SHARE)
   /* 设施 */
-  FACILITIES: {
+  get FACILITIES () { return {
     yanwu: { cn: '演武场', stone: 50000, mats: { '月魄石': 1, '星霜草': 1 }, fx: { desc: '修炼+8%/级 突破+2%/级 攻打战力+2%/级' } },
     hushan: { cn: '护山阵', stone: 80000, mats: { '流光玉': 1, '星璇石': 1 }, fx: { desc: '被攻打时守方战力+8%/级' } },
     lingmai: { cn: '灵脉', stone: 70000, mats: { '织云石': 1, '望舒花': 1 }, fx: { desc: '小区产出灵石+10%/级' } },
-    yaoyuan: { cn: '药园', stone: 80000, mats: { '月华芝': 1, '星霜草': 1 }, fx: { desc: '每小时产出修为丹/破障丹(1级5+3→5级50+30)' } }
-  },
+    yaoyuan: { cn: '药园', stone: 80000, mats: { '月华芝': 1, '星霜草': 1 }, fx: { desc: '每小时产出修为丹/破障丹(1级5+3→5级50+30)' } },
+    ...(isTaichuEnabled() ? { tiangong: TIANGONG_FACILITY } : {})
+  } },
   AREA_DEF_RATIO: 0.6,        // 护城阵 = 护山阵 60% 消耗
   AREA_DEF_BONUS: 6,          // 护城阵守方战力 +6%/级
   HUSHAN_BONUS: 8,            // 护山阵守方战力 +8%/级
-  /* 兑换(贡献, 消耗已砍至原5%; 灵石除外——维持20:1防止上供套利) */
+  /* 真人与伪玩家统一贡献兑换价；灵石维持20贡献换100。 */
   EXCHANGE: {
     stone: { cn: '灵石', cost: 20, unit: 100 },
-    '修为丹': { cost: 1, unit: 1 },
-    '破障丹': { cost: 2, unit: 1 },
-    '聚宝丹': { cost: 10, unit: 1 },
-    '惊鸿丹': { cost: 10, unit: 1 },
-    '灵犀丹': { cost: 10, unit: 1 },
-    '行运丹': { cost: 10, unit: 1 },
-    '同心丹': { cost: 10, unit: 1 },
-    '玉甲丹': { cost: 10, unit: 1 },
-    '凝露丹': { cost: 10, unit: 1 },
-    '慧心丹': { cost: 10, unit: 1 },
-    '摄魂丹': { cost: 10, unit: 1 },
+    ...Object.fromEntries(Object.entries(VAULT_PILL_PRICES).map(([name, cost]) => [name, { cost, unit: 1 }]))
   },
-  /* 宝库装备贡献价: 普通弟子上供数小时至数天可负担；唯一数值源在 equip_data.js */
+  /* 宝库装备贡献价：数值源在 vault_rules.js，装备和宗门共用。 */
   VAULT_EQUIP_CONTRIB,
   /* 宝库售丹: 市场价(与丹阁一致) × 折扣; 弟子购丹灵石直接进宝库, 不交税 */
   VAULT_PILL_PRICE: { '修为丹': 500, '破障丹': 1000, '聚宝丹': 800 },
@@ -81,8 +75,8 @@ export const CFG = {
   /* 迁宗(宗门总部搬迁)费用: 从宗门宝库扣 */
   MOVE_COST: 200000, MOVE_CD: 86400000,
   /* 重伤(战力扣减/恢复分钟) */
-  INJURY_PCT: [0, 20, 40, 60],
-  INJURY_RECOVER: [0, 30, 120, 480],
+  INJURY_PCT,
+  INJURY_RECOVER,
   /* 小区产出 */
   AREA_OUT_STONES: [800, 1500], AREA_OUT_MATS: [2, 4], // 材料单次产出 6~12 件(2026-08-17 上调: 原 3~9, 金紫太少)
   REFINE_MATS: 3, REFINE_KEEP: 2, REFINE_STOP: 100
@@ -208,27 +202,16 @@ export async function playerPower (f, gid, uid) {
     const level = Number((battle[uid] || {}).level) || 0
     const bag = getBag(uid, gid)
     const buff = await getBuffs(uid, gid)
-    let pw = calcCombatPower(level, bag, buff, gid, uid).power
-    /* 伤势扣减: 宗门玩家存 f.players[uid].injury, 散修(无宗门档案)存 f.injuries[uid] — 两者都要生效 */
-    const pp = f.players && f.players[String(uid)]
-    const injSrc = (pp && pp.injury) || (f.injuries && f.injuries[String(uid)]) || null
-    if (injSrc && injSrc.level) {
-      const inj = injuryInfo({ injury: injSrc }, Date.now())
-      if (inj.level > 0) pw = Math.max(0, Math.round(pw * (1 - inj.pct / 100)))
-    }
-    return pw
+    const injury = f.players?.[String(uid)]?.injury || f.injuries?.[String(uid)] || null
+    return calcCombatPower(level, bag, buff, gid, uid, injury).power
   } catch (err) { return 0 }
 }
 
 /** 伤势信息: {level(有效等级), pct(扣减%), remainMin, totalMin} */
 export function injuryInfo (p, now = Date.now()) {
-  if (!p || !p.injury || !p.injury.level) return { level: 0, pct: 0, remainMin: 0, totalMin: 0 }
-  const lv = p.injury.level
-  const total = CFG.INJURY_RECOVER[lv] * 60000
-  const el = now - p.injury.at
-  if (el >= total) { p.injury = null; return { level: 0, pct: 0, remainMin: 0, totalMin: 0 } }
-  const eff = Math.max(1, Math.ceil(lv * (1 - el / total)))
-  return { level: eff, pct: CFG.INJURY_PCT[eff], remainMin: Math.ceil((total - el) / 60000), totalMin: CFG.INJURY_RECOVER[lv] }
+  const info = injuryState(p?.injury, now)
+  if (p?.injury && !info.level) p.injury = null
+  return info
 }
 
 export function applyInjury (f, uid, level, at = Date.now(), gid = 'global', receipt = null) {
@@ -302,6 +285,23 @@ export function vaultAdd (s, stones, mats, pills, equips) {
 /* ---------- 设施 ---------- */
 /** 伪玩家宗门建造/升级/维护/护城阵费用倍数 = 玩家全价 × 0.3(曾为 ×0.1 打1折, 2026-08-17 翻3倍上调) */
 export const FAKE_FAC_MULT = 0.3
+
+/** 太初服务不享受伪玩家旧设施折扣，玩家和伪玩家同价。 */
+export const TIANGONG_FACILITY = Object.freeze({
+  cn: '天工坊', stone: 200000,
+  mats: { '凤羽玉': 20, '造梦神玉': 5, '乾坤阵晶': 5 },
+  fx: { desc: '太初装备打造、修理与修补包制作（最高5级）' }
+})
+
+export function activeFacilityKeys () { return Object.keys(CFG.FACILITIES) }
+
+/** 已有设施在关闭玩法后保留存档，暂停效果和收费。 */
+export function taichuWorkshopLevel (f, member, now = Date.now()) {
+  if (!isTaichuEnabled()) return 0
+  const sect = f?.sects?.[member?.sect]
+  if (!sect || (sect.wipeAt && sect.wipeAt <= now) || member?.status === 'scatter') return 0
+  return Math.max(0, Math.min(5, Math.floor(Number(sect.facilities?.tiangong) || 0)))
+}
 
 export function facilityCost (fac, newLevel) {
   const t = CFG.FACILITIES[fac]

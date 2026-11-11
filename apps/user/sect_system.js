@@ -1,3 +1,5 @@
+import { dutyEarnedToday, vaultPriceText } from '../../components/sect/vault_rules.js'
+import { vaultReserve, vaultAvailable } from '../../components/sect/treasury.js'
 import { sectMemberCapacity, sectOccupancy } from '../../components/sect/capacity.js'
 /* ============================================================
  * 玩家宗门系统 · 指令层 (第二步~第七步)
@@ -19,6 +21,7 @@ import {
   allySect, breakAlly, allyAssist, recruitFakeToSect, poachFakeFromSect, pendingCaptivesForSect
 } from '../../components/sect_system.js'
 import { readCfg, isEnabled } from '../../components/sect/config.js'
+import { isTaichuEnabled } from '../../components/taichu_equipment.js'
 import { fmtTime, replyLines, getPlayer, posCn, sameRegion, relTxt } from '../../components/sect/helpers.js'
 import { currentInteract } from '../../components/interact.js'
 
@@ -333,8 +336,7 @@ export class sect_system extends plugin {
       const f = getFake(gid)
       const p = getPlayer(f, e.user_id)
       if (!p) { e.reply('你不是宗门成员'); return true }
-      if (p.pos === 'zongzhu' || p.pos === 'fuzong' || p.pos === 'taishang') { e.reply(`👑 你是${posCn(p.pos)}，无需贡献点——可 #取用宝库 直接拿宗门金库的灵石/材料/丹药`); return true }
-      e.reply(`🎖️ 你在【${sectName(f, p.sect)}】的贡献：${p.contribution || 0}\n（#上供 得贡献，贡献可 #宗门兑换 宝库物品）`)
+      e.reply(`🎖️ 你在【${sectName(f, p.sect)}】的贡献：${p.contribution || 0}\n今日基础贡献：${dutyEarnedToday(p)}/12（活跃每小时1点）\n#上供 每100灵石得1贡献，上供另计；#宗门兑换 使用贡献。`)
       return true
     } catch (err) {
       logger.error('[宗门系统]贡献异常:' + (err && err.stack))
@@ -368,7 +370,7 @@ export class sect_system extends plugin {
       const text = String(e.msg || '').replace(/^[#＃]?\s*取用宝库/, '').trim()
       const parsed = parseVaultTake(text)
       if (!parsed) {
-        e.reply('用法：#取用宝库 [灵石|物品名] [数量]（宗主/副宗/太上可自由取用）\n数量可用 全部 取光；支持 灵石5万 / 5万灵石 / 灵石×5000 / 5000个灵石 等写法')
+        e.reply('用法：#取用宝库 [灵石|物品名] [数量]（宗主/副宗/太上可取用富余资源）\n数量可用 全部 取光；支持 灵石5万 / 5万灵石 / 灵石×5000 / 5000个灵石 等写法')
         return true
       }
       const r = await takeFromVault(f, gid, e.user_id, parsed.name, parsed.all ? 'all' : parsed.count)
@@ -395,7 +397,7 @@ export class sect_system extends plugin {
       const m = String(e.msg || '').match(/宗门兑换\s*(\S*)\s*(\d*)/)
       const name = (m && m[1]) || ''
       const count = Number((m && m[2]) || 1)
-      if (!name) { e.reply('用法：#宗门兑换 [物品] [数量]（灵石/修为丹/破障丹/聚宝丹/材料/宝库装备全名）\n灵石100=20贡献｜普通材料(紫/金)=5｜红材料=800｜彩材料=2000｜修为丹=1｜破障丹=2｜其他丹药=10｜装备=按品质20/40/80/120/180/260/360贡献'); return true }
+      if (!name) { e.reply('用法：#宗门兑换 [物品] [数量]（灵石/修为丹/破障丹/聚宝丹/材料/宝库装备全名）\n灵石100=20贡献｜普通材料(紫/金)=5｜红材料=800｜彩材料=2000｜修为丹=1｜破障丹=2｜增益丹=3｜装备=按品质2/4/6/8/12/20/36贡献'); return true }
       const r = await exchange(gid, uid, name, count)
       e.reply(r.msg)
       return true
@@ -430,7 +432,7 @@ export class sect_system extends plugin {
       const lines = [
         `宗门：${sectName(f, sid)}（${regionNameOf(region)}）`,
         `我的身份：${posCn(p.pos)}`,
-        `贡献：${(p.pos === 'zongzhu' || p.pos === 'fuzong' || p.pos === 'taishang') ? '无需贡献（可直接 #取用宝库）' : `${p.contribution || 0}`}${injTxt}`,
+        `贡献：${p.contribution || 0}（今日基础${dutyEarnedToday(p)}/12）${injTxt}`,
         '',
         `宗主：${owner ? `🌙${owner.name}（玩家）` : (sm.zongzhu || '（空缺·副宗代掌）')}`,
         `宗门成员：${sectOccupancy(f, sid)}/${sectMemberCapacity(f, sid)} 人`,
@@ -460,6 +462,7 @@ export class sect_system extends plugin {
       const sr = sameRegion(e, f, p.sect)
       if (!sr.ok) { e.reply(sr.msg); return true }
       const v = getVault(f, p.sect)
+      const reserve = vaultReserve(f, p.sect)
       const matsTxt = Object.keys(v.mats || {}).length ? Object.entries(v.mats).map(([m, c]) => `${itemIcon(m)}${m}×${c}`).join('、') : '（无）'
       const pillsTxt = Object.keys(v.pills || {}).length ? Object.entries(v.pills).map(([m, c]) => `${itemIcon(m)}${m}×${c}`).join('、') : '（无）'
       const equipsTxt = Object.keys(v.equips || {}).length ? Object.entries(v.equips).map(([m, c]) => `${itemIcon(m)}${m}×${c}`).join('、') : '（无）'
@@ -471,7 +474,7 @@ export class sect_system extends plugin {
         : ''
       const lines = [
         `🏯 ${sectName(f, p.sect)} 宝库`,
-        `灵石：${v.stones || 0}`,
+        `灵石：${v.stones || 0}（可取用${vaultAvailable(v, reserve, '灵石')}，预留${reserve.stones}）`,
         ...(warHint ? [warHint] : []),
         `材料：${matsTxt}`,
         `丹药：${pillsTxt}`,
@@ -479,6 +482,9 @@ export class sect_system extends plugin {
         `功法：${gongfasTxt}`,
         '',
         '来源：上供/小区产出/药园/炼器/税收分成/战利品',
+        '预留用于建设、两小时维护及一次出征。',
+        `贡献价：${vaultPriceText()}`,
+        '基础贡献：正常活跃每小时1点，每天最多12点；上供所得另计。',
         '支出：设施建造升级/护城阵/攻打/兑换',
         '#上供 [灵石] 得贡献；#宗门兑换 或 #宗门购装备 [装备全名] 使用贡献'
       ]
@@ -509,7 +515,7 @@ export class sect_system extends plugin {
         const c = (lv < 5) ? requireCost(k, lv + 1) : null
         return `· ${t.cn}：${lv} 级${lv < 5 ? `（升级需 灵石${c.stones} + ${Object.entries(c.mats).map(([m, n]) => `${itemIcon(m)}${m}×${n}`).join(' ')}）` : '（已满级）'}\n  效果：${t.fx.desc}`
       })
-      lines.push('', '#升级设施 演武场/护山阵/灵脉/药园（宗主/副宗/太上）')
+      lines.push('', `#升级设施 演武场/护山阵/灵脉/药园${isTaichuEnabled() ? '/天工坊' : ''}（宗主/副宗/太上）`)
       await replyLines(e, `🏯 ${sectName(f, p.sect)} 设施`, lines)
       return true
     } catch (err) {
@@ -534,8 +540,9 @@ export class sect_system extends plugin {
       const m = String(e.msg || '').match(/升级设施\s*(\S*)/)
       const name = (m && m[1]) || ''
       const map = { 演武场: 'yanwu', 护山阵: 'hushan', 灵脉: 'lingmai', 药园: 'yaoyuan' }
+      if (isTaichuEnabled()) map.天工坊 = 'tiangong'
       const key = map[name]
-      if (!key) { e.reply('可升级：演武场 / 护山阵 / 灵脉 / 药园'); return true }
+      if (!key) { e.reply(`可升级：${Object.keys(map).join(' / ')}`); return true }
       const r = upgradeFacility(f, p.sect, key)
       if (r.ok) saveFake(f, gid)
       e.reply(r.msg)
@@ -1576,15 +1583,15 @@ export class sect_system extends plugin {
       const lines = arr.map((m, i) => {
         const p = f.roster[m.name]
         const lv = p ? (p.level || 1) : 1
-        const durMin = Math.max(1, Math.round((now - (m.at || now)) / 60000))
+        const durHours = Math.max(0, Math.floor((now - (m.at ?? p?.mineSince ?? now)) / 3600000))
         const outS = m.outStones || 0
         const outM = m.outMats || {}
         const outTxt = Object.keys(outM).length ? Object.entries(outM).map(([k, v]) => `${itemIcon(k)}${k}×${v}`).join('、') : '无'
-        return `${i + 1}. ${m.name}（境界${lv} · 已挖${durMin}分钟 · 产出灵石${outS} · 材料：${outTxt}${m.colorHit ? ` · 🌈彩×${m.colorHit}` : ''}）`
+        return `${i + 1}. ${m.name}（境界${lv} · 已挖${Math.floor(durHours / 24)}天${durHours % 24}小时 · 产出灵石${outS} · 材料：${outTxt}${m.colorHit ? ` · 🌈彩×${m.colorHit}` : ''}）`
       })
       const recent = (f.mineEvents || []).filter(x => x.sect === me.sect).slice(-20).reverse()
       const eventLines = recent.map(x => `· ${fmtTime(x.t)} ${x.txt || '矿山动态'}`)
-      await replyLines(e, `⛏️ ${sectName(f, me.sect)}·宗门矿山（战俘挖矿）`, [...lines, '', '━━━ 最近矿山动态 ━━━', ...(eventLines.length ? eventLines : ['（暂无动态）'])])
+      await replyLines(e, `⛏️ ${sectName(f, me.sect)}·宗门矿山（战俘挖矿）`, ['矿难风险随服役时间逐小时增加，境界越低越容易死；最迟服役满20天必死。', ...lines, '', '━━━ 最近矿山动态 ━━━', ...(eventLines.length ? eventLines : ['（暂无动态）'])])
       return true
     } catch (err) {
       logger.error('[宗门系统]矿山异常:' + (err && err.stack))
@@ -1613,7 +1620,7 @@ export class sect_system extends plugin {
       })
       const recent = (f.mineEvents || []).slice(-40).reverse()
       if (recent.length) lines.push('', '━━━ 最近矿山动态 ━━━', ...recent.map(x => `· ${fmtTime(x.t)} ${x.txt || '矿山动态'}`))
-      await replyLines(e, '⛏️ 天下矿山（宗门战俘挖矿）', lines)
+      await replyLines(e, '⛏️ 天下矿山（宗门战俘挖矿）', ['矿难风险随服役时间逐小时增加，境界越低越容易死；最迟服役满20天必死。', ...lines])
       return true
     } catch (err) {
       logger.error('[宗门系统]天下矿山异常:' + (err && err.stack))
@@ -1875,23 +1882,25 @@ export class sect_system extends plugin {
         '· 副宗主：贡献100 / 金丹(9级) / 入宗7天',
         '· 宗主：贡献200 / 元婴(13级) / 入宗15天（禅让/夺权继位）',
         '· 太上长老：贡献300 / 合体(25级)，2席玩家伪玩家共享',
-        '· 成为宗主/副宗/太上后无需贡献点：可 #取用宝库 直接拿宗门金库的灵石/材料/丹药',
+        '· 宗主/副宗/太上可 #取用宝库 取用富余资源；建设、维护与出征所需资源保留。上供仍获得贡献。',
         '· #任命 [执事/副宗主/太上长老] @xx（仅宗主）',
         '· #传位 @xx（宗主禅让）；#问退位 / #夺权（对伪玩家宗主）',
         '· 夺权需贡献≥300 且 战力≥宗主×1.2；若现任玩家宗主已不在群里，可直接 #夺权 继任（无任何条件）',
         '',
-        '【贡献 / 上供 / 兑换】（弟子/执事）',
-        '· #上供 [灵石]：每100灵石=1贡献（10分钟冷却，最低100）',
+        '【贡献 / 上供 / 兑换】（所有成员）',
+        '· #上供 [灵石]：每100灵石=1贡献（10分钟冷却，最低100）；所有职位均可上供，且不占基础贡献每日额度。',
+        '· 无偿从宝库取用的灵石再次上供视为归还，归还部分不重复计贡献。',
         '· #一键上供功法：将背包内红色及以下功法全部上供给宗门宝库，供伪玩家直接学习（彩色不受理）',
-        '· #我的贡献：看当前贡献',
+        '· #我的贡献：看当前贡献；真人与伪玩家正常活动每小时获得1点基础贡献，每天最多12点。',
+        '· 真人连续2小时无虚境指令时暂停累计；被俘、矿工、仆从、失魂及在途者不领，停机不补发。',
         '· #宗门兑换 [物品] [数量]：贡献换宝库灵石/丹药/材料/装备',
         '  灵石100=20贡献｜普通材料(紫/金)=5｜红材料=800｜彩材料=2000',
-        '  修为丹=1｜破障丹=2｜聚宝丹=40｜装备=按品质20~360贡献',
-        '· #宗门购装备 [装备全名] [数量]：普通弟子用贡献购买宝库炼出的装备（按品质20~360贡献）',
+        `  ${vaultPriceText()}`,
+        '· #宗门购装备 [装备全名] [数量]：贡献购买宝库装备，白/绿/蓝/紫/金/红/彩分别为2/4/6/8/12/20/36贡献。',
         '',
         '【宗主 / 副宗 / 太上 · 取用宝库 / 上供】',
-        '· 宗主/副宗/太上无需贡献点：可 #取用宝库 [灵石|物品名] [数量] 随时取用宗门金库的灵石/材料/丹药（名称可只输一半，数量支持 灵石5万/5万灵石/全部 等写法）',
-        '· 宗主/副宗/太上也可 #上供 给宗门宝库（灵石/材料皆可，无需贡献点，可自行支配）',
+        '· 宗主/副宗/太上可 #取用宝库 [灵石|物品名] [数量] 取用富余资源；保留建设、维护与出征储备。名称和数量支持模糊输入。',
+        '· 宗主/副宗/太上同样可积累和使用贡献，上供灵石照常获得贡献；上供材料、功法不计贡献。',
         '',
         '【宗门设施】（灵石+材料建造，建成永久，仅灭门消失）',
         '· 演武场：修炼+8%/级 突破成功率+2%/级 攻打战力+2%/级',
@@ -1939,6 +1948,7 @@ export class sect_system extends plugin {
         '',
         '【矿山】（战俘挖矿）',
         '· #处置俘虏 送矿山：押战俘去矿山挖矿（玩家不可送；每小时产灵石/矿物入宗门宝库，境界越高产越多）',
+        '· 矿难按服役时间和境界计算：每小时风险递增，境界越低越容易死，最迟满20天必死；仙帝重数越高越耐久，也不豁免上限',
         '· #宗门矿山：查看本宗矿山矿工与产出',
         '· #天下矿山：查看本群所有宗门矿山（含伪玩家宗门，AI 宗门也会把战俘押去挖矿）',
         '',
@@ -1971,9 +1981,9 @@ export class sect_system extends plugin {
         '加入/退出：#加入宗门 [名] / #退出宗门 / #逐出 @xx',
         '创建：#创建宗门 [名]（可加 中州/东海/西域/北境/南疆）',
         '查看：#我的宗门 / #宗门宝库 / #宗门设施 / #宗门成员 / #宗门职位 / #宗门关系 / #护城阵 / #天下小区',
-        '贡献/兑换：#上供 [灵石] / #我的贡献 / #宗门兑换 [物品] [数量]（弟子/执事/副宗）',
+        '贡献/兑换：#上供 [灵石] / #我的贡献 / #宗门兑换 [物品] [数量]（所有成员）',
         '功法上供：#一键上供功法（红色及以下功法全部入宝库，供宗门伪玩家直接学习；彩色功法不会上供）',
-        '取用宝库：#取用宝库 [物品] [数量]（宗主/副宗/太上随时自由取用，无需贡献点；名称/数量可模糊输入，如 灵石5万/全部；玩家主导宗门每名弟子每小时自动发放500灵石俸禄）',
+        '取用宝库：#取用宝库 [物品] [数量]（宗主/副宗/太上取用富余资源，保留建设、维护与出征储备；数量支持 灵石5万/全部；玩家主导宗门每名弟子每小时自动发放500灵石俸禄）',
         '购丹：#宗门购丹 [丹药] [数量]（丹阁价×80%，灵石入宝库不交税）',
         '入宗审批：#入宗申请（查看） / #同意入宗 [名] / #拒绝入宗 [名]（宗主）',
         '结盟：#结盟 [宗名]（宗主/副宗/太上） / #退盟 [宗名] / #盟友助战 [目标] [人数]（盟友驰援/驰援帮忙均可，打赢归贡献最高者）',

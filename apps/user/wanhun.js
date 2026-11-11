@@ -189,11 +189,16 @@ export class wanhun extends plugin {
       const stoneTxt = (party.names || []).map(n => {
         try {
           const p = getFake(gid).roster[n]
-          const c = p?.bag?.items?.['魂石']?.count || 0
-          return `${n}${c}颗`
+          if (p?.fakeCaveLost) return `${n}：失魂困窟，等待还魂丹或救援`
+          const c = Number(p?.bag?.items?.['魂石']?.count ?? p?.bag?.items?.['魂石']) || 0
+          const member = party.members?.[n]
+          const protect = Math.max(0, Math.ceil(((member?.protectionUntil || party.stoneAt || 0) - Date.now()) / 60000))
+          const planned = member ? `，预计${Math.max(0, Math.ceil(member.plannedMinutes - mins))}分钟内返回` : ''
+          return `${n}：保护${protect}分钟，备用魂石${c}颗${planned}`
         } catch (err) { return `${n}?颗` }
       }).join('/')
-      lines.push(`· ${names}：探索${mins}分钟｜下次遭遇约${next}分钟｜魂石 ${stoneTxt}`)
+      lines.push(`· ${names}：探索${mins}分钟`)
+      lines.push(`  ${stoneTxt}｜下次推进约${next}分钟`)
       lines.push(`  收获：${fmtLoot(party.loot)}`)
     }
     if (!players.length && !fakes.length) lines.push('当前万魂窟无人。')

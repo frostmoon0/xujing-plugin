@@ -8,7 +8,7 @@
 import fs from 'fs'
 import path from 'path'
 import { Save_Path } from './plugin.js'
-import { EQUIP_TPL, ITEM_TPL, MATERIAL_TPL, GONGFA_TPL, getBag, consumeItem, gongfaPrice, ARRAY_MATS, itemIcon } from './equip_data.js'
+import { EQUIP_TPL, ITEM_TPL, MATERIAL_TPL, GONGFA_TPL, getBag, saveBag, takeBagItems, gongfaPrice, ARRAY_MATS, itemIcon } from './equip_data.js'
 import { fightBestOf5, realmPower, guardWinRate } from './fight.js'
 
 /* ---------- 开放时间 ---------- */
@@ -363,7 +363,7 @@ export function penaltyCount (levelIdx) {
   const cap = Math.min(40, 8 + Math.round((levelIdx - 1) / 19 * 32))
   return 1 + Math.floor(Math.random() * cap)
 }
-/** 随机扣背包物品(排除穿身装备), 返回被扣列表[{name,count}] */
+/** 随机扣背包物品(排除穿身装备)，保留被扣装备的属性。 */
 export function deductRandomItems (uid, gid, count) {
   const bag = getBag(uid, gid)
   const equipped = bag.equipped || {}
@@ -377,12 +377,16 @@ export function deductRandomItems (uid, gid, count) {
     const name = pool[i]
     const have = (bag.items[name] && bag.items[name].count) || 0
     if (have <= 0) { pool.splice(i, 1); continue }
-    consumeItem(uid, name, 1, null, gid)
-    const ex = taken.find(x => x.name === name)
-    if (ex) ex.count++
-    else taken.push({ name, count: 1 })
+    const entries = takeBagItems(bag, name, 1)
+    if (!entries.length) { pool.splice(i, 1); continue }
+    for (const entry of entries) {
+      const ex = taken.find(x => x.name === name && JSON.stringify(x.attr) === JSON.stringify(entry.attr))
+      if (ex) ex.count += entry.count
+      else taken.push(entry)
+    }
     n--
   }
+  if (taken.length) saveBag(uid, bag, gid)
   return taken
 }
 

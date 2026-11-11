@@ -1,3 +1,4 @@
+import { wearPlayerTaichu, wearNpcTaichu } from '../taichu_combat.js'
 import { hasBloodFeud, defeatDeathRate } from './survival.js'
 import { assessSectDevelopment, commonTerritoryThreat, warIncludesSect } from './ai_strategy.js'
 import { hasTruce, normalizeDiplomacy, setDiplomacyRelation, forgetSectDiplomacy } from './diplomacy_state.js'
@@ -15,6 +16,16 @@ import { syncWorldSectMap } from './economy.js'
 import { shareCaptivesByOutput, winnerOfCoalition, aiAllyAssist, recordCoalition, recomputeCoalition, coalitionShares } from './diplomacy.js'
 import { liberateDestroyedCaptor, unmarkPlayerCaptive, disposeFakeCaptives, autoDisposePlayerCaptives, capturePlayerNow, rescueCaptivesOf } from './captive.js'
 import { Wanhun } from '../wanhun_data.js'
+import { npcCanParticipate } from '../npc_action.js'
+
+function wearWarParticipants (f, gid, atk) {
+  for (const actor of Object.values(atk.actors || {})) {
+    if (!(actor.rounds > 0)) continue
+    const receipt = `sect-war:${warReceipt(atk)}`
+    if (actor.kind === 'player') wearPlayerTaichu(gid, actor.id, receipt, 8)
+    else wearNpcTaichu(f.roster?.[actor.id], receipt, 8)
+  }
+}
 
 function checkpointWar (f, gid) {
   const ok = withImmediateSaveContext(() => saveFake(f, gid))
@@ -64,17 +75,9 @@ export function isSectWarParticipant (f, uid) {
       (Array.isArray(a.defPlayers) && a.defPlayers.includes(suid)))))
 }
 
-function fakeCaptiveInAnyPool (f, name) {
-  return (f.sectAttacks || []).some(a => {
-    const c = a.captives || {}
-    const pools = [c, c.byAtk, c.byDef, ...Object.values(c.byShare || {})]
-    return pools.some(pool => pool && (pool.fakes || []).includes(name))
-  })
-}
-
 function canFakeFight (f, name) {
   const p = f.roster && f.roster[name]
-  return !!(p && p.alive && !p.realmBusy && !p.fakeTravel && p.status !== 'mine' && !p.mineOf && !fakeCaptiveInAnyPool(f, name) && !isInSectJail(f, name) && !isInRaidJail(f, name) && !isInSectMine(f, name))
+  return npcCanParticipate(f, p)
 }
 
 function recordWanhunKill (atk, p, side = null) {
@@ -1146,6 +1149,7 @@ async function resolveRoundUnlocked (f, gid, atk, now) {
   await creditWarRound(f, atk, p => CFG.PERSON_BASE + personPower(p), async uid => CFG.PERSON_BASE + await playerPower(f, gid, uid), now)
   const pA = await computeAtkPower(f, gid, atk)
   const pD = await computeDefPower(f, gid, atk)
+  wearWarParticipants(f, gid, atk)
   const total = pA + pD
   const pWin = total > 0 ? pA / total : 0.5
   /* 战力悬殊碾压: 先至少交战3轮，再允许强方一轮击溃；避免AI宗门刚开战就立即结束 */
@@ -1461,6 +1465,7 @@ async function finishSectAttackUnlocked (f, gid, atk, win, now = Date.now()) {
   const targetTxt = warTargetTxt(f, atk)
   /* 有人守(拉锯/开战)才算真战斗; 弃守速战无伤亡 */
   const wasFought = !!atk.defended
+  if (wasFought) wearWarParticipants(f, gid, atk)
   /* 战力(须在易主前算, 否则护城阵/占领者会变) */
   let atkPower = 0
   let defPower = 0

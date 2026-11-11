@@ -384,6 +384,10 @@ export class pet extends plugin {
 
     /* 遇宠优先: 遇宠直接压栈打断当前交互(逛街/渡劫等), 数字回复优先处理遇宠; 处理完弹回下层 */
     if (enc && enc.expireAt > Date.now()) {
+      if (await guardActionLocked(e, undefined, { skipBattle: true })) {
+        await unlock(gid, uid, 'pet')
+        return true
+      }
       pending.delete(k)
       await forceLock(gid, uid, 'pet')
       if (n !== 1 && n !== 2) { e.reply('请回复 1 捕获 / 2 放走~'); return true }

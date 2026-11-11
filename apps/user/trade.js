@@ -7,7 +7,7 @@ import path from 'path'
 import puppeteer from '../../../../lib/puppeteer/puppeteer.js'
 import xujing_data from '../../components/xujing_data.js'
 import { Plugin_Name, Plugin_Path, Save_Path } from '../../components/plugin.js'
-import { getBag, saveBag, getItemAttr, autoEquipBest, addItemToBag, EQUIP_TPL, ITEM_TPL, MATERIAL_TPL, GONGFA_TPL, getItemGroups, consumeItem, addItem, fmtEquip, equipPrice, rollEquipAttr, itemIcon } from '../../components/equip_data.js'
+import { getBag, saveBag, getItemAttr, autoEquipBest, addItemToBag, takeBagItems, EQUIP_TPL, ITEM_TPL, MATERIAL_TPL, GONGFA_TPL, getItemGroups, consumeItem, addItem, fmtEquip, equipPrice, rollEquipAttr, itemIcon } from '../../components/equip_data.js'
 import { forceLock, isCurrent, unlock } from '../../components/interact.js'
 import { guardActionLocked } from '../../components/action_lock.js'
 import { resolvePuppetGift, resolveWanhunGift, transferArtifact } from '../../components/artifact_gift.js'
@@ -889,7 +889,16 @@ export class trade extends plugin {
     const parsed = this.parseGift(text)
     if (!parsed) { e.reply('没有识别到道具名，如：#伪玩家送 张三 修为丹 5'); return true }
     const { name, count } = parsed
-    const taken = this.takeItem(e.user_id, name, count, null, gid)
+    let taichuEntries = null
+    let taken
+    if (EQUIP_TPL[name]?.taichu) {
+      const bag = getBag(e.user_id, gid)
+      taichuEntries = takeBagItems(bag, name, count)
+      if (taichuEntries.reduce((n, entry) => n + entry.count, 0) === count) {
+        saveBag(e.user_id, bag, gid)
+        taken = { attr: null }
+      }
+    } else taken = this.takeItem(e.user_id, name, count, null, gid)
     if (!taken) {
       const have = (getBag(e.user_id, gid).items[name] && getBag(e.user_id, gid).items[name].count) || 0
       e.reply(`背包里 ${name} 只有 ${have} 个，不够送 ${count} 个~`)
@@ -899,7 +908,9 @@ export class trade extends plugin {
     if (!p.bag) p.bag = { items: {}, equipped: {} }
     if (!p.bag.items) p.bag.items = {}
     /* 使用统一背包写入，兼容伪玩家旧数字档与当前 { count } 格式，避免对象直接与数量相加变成 [object Object] */
-    addItemToBag(p.bag, name, count, null, false)
+    if (taichuEntries) {
+      for (const entry of taichuEntries) addItemToBag(p.bag, name, entry.count, entry.attr, false)
+    } else addItemToBag(p.bag, name, count, null, false)
     /* 仙帝丹: 伪玩家拿到后当场自动服用(低于仙帝10重); 已达标则留在包中 */
     let emperorTxt = ''
     if (name === '仙帝丹') {

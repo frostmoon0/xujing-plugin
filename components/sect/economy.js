@@ -1,11 +1,15 @@
-import { takeVaultEquipAttrs } from './war_loot.js'
+import { vaultReserve, vaultAvailable, facilityMaintenance } from './treasury.js'
+import { takeVaultEquipAttrs, depositWarLoot } from './war_loot.js'
+import { Save_Path } from '../plugin.js'
+import { donationCredit } from './vault_rules.js'
+import { REALM_MAX_LEVEL, XIANDI_BASE_LEVEL } from '../realm_cap.js'
 /* 由 sect_system.js 拆分自动生成: economy.js */
 import fs from 'fs'
-import { getFake, saveFake, sectName, sectIdByName, addPerson, drawName, sectAlive, sectCap, areaCount, killPerson, logEvent, SECT_START_BAND, FAKE_MAX } from '../fake_data.js'
+import { getFake, saveFake, sectName, sectIdByName, addPerson, drawName, sectAlive, fakeSubThreshold, sectCap, areaCount, killPerson, logEvent, SECT_START_BAND, FAKE_MAX } from '../fake_data.js'
 import { getWorld, saveWorld, regionNameOf, DEFAULT_REGION, getLoc, renameSect } from '../world_data.js'
 import xujing_data from '../xujing_data.js'
-import { addItem, getBag, saveBag, EQUIP_TPL, GONGFA_TPL, vaultEquipContrib, itemIcon, fmtItem } from '../equip_data.js'
-import { CFG, MAT_COMMON, MAT_RED, MAT_COLOR, MAT_POOL, getVault, rand, pick, clamp, playerMoney, areaDefLevel, facilityCost, posCnOf, FAKE_FAC_MULT, regionOfArea, sectRegion, SECT_FILE, isPlayerLead, inWarUpkeep, WAR_UPKEEP_MAT_MULT, WAR_UPKEEP_STONE_MULT, areaInRaidRest, AREA_RAID_REST_MS } from './utils.js'
+import { addItem, getBag, saveBag, EQUIP_TPL, GONGFA_TPL, vaultEquipContrib, itemIcon, fmtItem, rollEquipAttr, attrPower } from '../equip_data.js'
+import { CFG, MAT_COMMON, MAT_RED, MAT_COLOR, MAT_POOL, getVault, rand, pick, clamp, playerMoney, areaDefLevel, facilityCost, posCnOf, FAKE_FAC_MULT, activeFacilityKeys, regionOfArea, sectRegion, SECT_FILE, isPlayerLead, inWarUpkeep, WAR_UPKEEP_MAT_MULT, WAR_UPKEEP_STONE_MULT, areaInRaidRest, AREA_RAID_REST_MS } from './utils.js'
 
 /* ---------- 宗门矿山(战俘挖矿) ---------- */
 /** 矿山每小时灵石产出: 基础值按境界计算后再减半(境界1→50, 仙帝(68)→150000) */
@@ -17,11 +21,21 @@ export function mineStonesPerHr (level) {
 /** 矿山矿物池(紫/金常见, 红稀有; 彩单独0.5%判定) */
 export const MINE_MATS = ['星霜草', '青鸾草', '月魄石', '星璇石', '望舒花', '月华芝', '流光玉', '织云石', '凤栖花', '凤羽玉']
 
-/** 矿难死亡概率: 境界越高越难死, 仙帝(68)不死 */
-export function mineDeathRate (level) {
-  level = Math.min(Math.max(Number(level) || 1, 1), 68)
-  if (level >= 68) return 0
-  return clamp(0.3 * (1 - level / 68), 0, 0.3)
+export const MINE_MAX_DAYS = 20
+const MINE_HOUR_MS = 3600000
+const MINE_MAX_HOURS = MINE_MAX_DAYS * 24
+
+/** 矿难随服役整小时递增，境界越低越容易死；所有境界最迟20天死亡。 */
+export function mineDeathRate (durationMs, checkedDurationMs = 0, level = XIANDI_BASE_LEVEL) {
+  const hours = Math.max(0, Math.floor((Number(durationMs) || 0) / MINE_HOUR_MS))
+  const checkedHours = Math.max(0, Math.floor((Number(checkedDurationMs) || 0) / MINE_HOUR_MS))
+  if (hours >= MINE_MAX_HOURS) return 1
+  if (hours <= checkedHours) return 0
+  level = Math.max(1, Math.min(Math.floor(Number(level) || 1), REALM_MAX_LEVEL))
+  const realmRisk = Math.sqrt(XIANDI_BASE_LEVEL / level)
+  // 仙帝巅峰(68级)为基准；更高重数继续降低风险，但不豁免20天上限。
+  // 由存活概率 (1-h/480)^realmRisk 换算，只结算上次检查之后的区间。
+  return 1 - Math.pow((MINE_MAX_HOURS - hours) / (MINE_MAX_HOURS - checkedHours), realmRisk)
 }
 
 /** 矿山动态历史：保留最近200条，供宗门矿山/天下矿山查询 */
@@ -47,6 +61,24 @@ export function mineTick (f, now = Date.now()) {
         continue
       }
       const lv = Number(p.level) || 1
+      /* 旧档缺失入矿时间时回退人物记录；两者皆无则从本次起算，并持久化。 */
+      const startedAt = [m.at, p.mineSince].filter(x => x != null && x !== '').map(Number)
+        .find(t => Number.isFinite(t) && t >= 0 && t <= now) ?? now
+      m.at = startedAt
+      const previousCheck = Number(m.lastDeathCheckAt ?? startedAt)
+      const checkedAt = Number.isFinite(previousCheck) && previousCheck >= startedAt ? previousCheck : startedAt
+      const deathRate = mineDeathRate(now - startedAt, checkedAt - startedAt, lv)
+      m.lastDeathCheckAt = Math.max(checkedAt, now)
+      /* 先清算矿难再产出；离线跨过20天时，不能在死亡截止时间之后继续挖矿。 */
+      if (deathRate >= 1 || (deathRate > 0 && Math.random() < deathRate)) {
+        const deathAt = Math.min(now, startedAt + MINE_MAX_HOURS * MINE_HOUR_MS)
+        const duration = deathAt - startedAt
+        const hours = Math.floor(duration / MINE_HOUR_MS)
+        killPerson(f, p, `【矿难】${s.name} 矿山矿工 ${m.name} 力竭而亡`, deathAt)
+        addMineEvent(f, { t: deathAt, type: 'death', sect: sid, name: m.name, at: startedAt, duration, stones: m.outStones || 0, mats: { ...(m.outMats || {}) }, colorHit: m.colorHit || 0, txt: `【矿难】${s.name} 的矿工 ${m.name} 挖矿${Math.floor(hours / 24)}天${hours % 24}小时后遇难` })
+        logEvent(f, 'flavor', `【矿难】${s.name} 矿山矿工 ${m.name} 不堪重负，死于矿下`, deathAt, { who: [m.name], sect: sid })
+        continue
+      }
       /* 产出灵石：按用户要求统一降为原来的2/3 */
       const stones = Math.floor(mineStonesPerHr(lv) * 2 / 3)
       vault.stones = (vault.stones || 0) + stones
@@ -69,15 +101,7 @@ export function mineTick (f, now = Date.now()) {
         m.colorHit = (m.colorHit || 0) + 1
         logEvent(f, 'flavor', `【矿彩】${s.name} 矿山矿工 ${p.name} 挖出 🌈${color}！`, now, { who: [m.name], sect: sid })
       }
-      /* 矿难判定(境界越高越难死, 仙帝不死) */
-      if (Math.random() < mineDeathRate(lv)) {
-        const duration = Math.max(0, now - (m.at || now))
-        killPerson(f, p, `【矿难】${s.name} 矿山矿工 ${m.name} 力竭而亡`, now)
-        addMineEvent(f, { t: now, type: 'death', sect: sid, name: m.name, at: m.at || now, duration, stones: m.outStones || 0, mats: { ...(m.outMats || {}) }, colorHit: m.colorHit || 0, txt: `【矿难】${s.name} 的矿工 ${m.name} 挖矿${Math.max(0, Math.floor(duration / 3600000))}小时后遇难` })
-        logEvent(f, 'flavor', `【矿难】${s.name} 矿山矿工 ${m.name} 不堪重负，死于矿下`, now, { who: [m.name], sect: sid })
-        continue
-      }
-      addMineEvent(f, { t: now, type: 'work', sect: sid, name: m.name, at: m.at || now, duration: Math.max(0, now - (m.at || now)), stones, mats: { ...(m.outMats || {}) }, colorHit: m.colorHit || 0, txt: `【挖矿】${s.name} 矿工 ${m.name} 本小时产出灵石${stones}` })
+      addMineEvent(f, { t: now, type: 'work', sect: sid, name: m.name, at: startedAt, duration: Math.max(0, now - startedAt), stones, mats: { ...(m.outMats || {}) }, colorHit: m.colorHit || 0, txt: `【挖矿】${s.name} 矿工 ${m.name} 本小时产出灵石${stones}` })
       remain.push(m)
     }
     f.sectMines[sid] = remain
@@ -171,15 +195,16 @@ export async function offer (gid, uid, amount) {
   await xujing_data.getQQYUserHome(uid, m.home, m.filename, true)
   const s = f.sects[p.sect]
   getVault(f, p.sect).stones = (getVault(f, p.sect).stones || 0) + amount
-  /* 核心职位无需贡献点: 上供照常入宝库, 只是不给贡献 */
-  const isBoss = p.pos === 'zongzhu' || p.pos === 'fuzong' || p.pos === 'taishang'
-  const contrib = isBoss ? 0 : Math.floor(amount / CFG.OFFER_CONTRIB)
+  /* 所有职位均可上供得贡献；每日基础贡献上限不限制上供所得。 */
+  f.vaultStoneDraws ||= {}
+  const returned = Math.min(amount, Number(f.vaultStoneDraws[String(uid)]) || 0)
+  const credit = donationCredit(f.vaultStoneDraws[String(uid)], amount)
+  f.vaultStoneDraws[String(uid)] = credit.drawn
+  const contrib = credit.contribution
   p.contribution = (p.contribution || 0) + contrib
   saveFake(f, gid)
-  logEvent(f, 'flavor', `【上供】🌙 玩家 ${p.name} 向 ${s.name} 上供 ${amount} 灵石${isBoss ? '（无需贡献点）' : `，得贡献 +${contrib}`}`)
-  return { ok: true, msg: isBoss
-    ? `✅ 你已向【${s.name}】上供 ${amount} 灵石（你无需贡献点，灵石已入宗门宝库）`
-    : `✅ 你已向【${s.name}】上供 ${amount} 灵石，贡献 +${contrib}（当前 ${p.contribution}）` }
+  logEvent(f, 'flavor', `【上供】🌙 玩家 ${p.name} 向 ${s.name} 上供 ${amount} 灵石，得贡献 +${contrib}`)
+  return { ok: true, msg: `✅ 你已向【${s.name}】上供 ${amount} 灵石${returned ? `（其中${returned}为归还取用的灵石）` : ''}，贡献 +${contrib}（当前 ${p.contribution}）` }
 }
 
 /** 一键上供功法: 将玩家背包中红色及以下功法全部移入宗门宝库，不计贡献。 */
@@ -231,9 +256,10 @@ export async function exchange (gid, uid, name, count) {
   const total = costPer * count
   if ((p.contribution || 0) < total) return { ok: false, msg: `贡献不足（需 ${total}，当前 ${p.contribution || 0}）~` }
   const vault = getVault(f, p.sect)
+  const reserve = vaultReserve(f, p.sect)
   if (isStone) {
     const need = CFG.EXCHANGE.stone.unit * count
-    if ((vault.stones || 0) < need) return { ok: false, msg: `宝库灵石不足（需 ${need}）~` }
+    if (vaultAvailable(vault, reserve, '灵石') < need) return { ok: false, msg: `宝库可兑换灵石不足（需${need}，预留${reserve.stones}用于宗门建设、维护和出征）` }
     vault.stones -= need
     const m = await playerMoney(gid, uid)
     m.home[uid].money = m.money + need
@@ -250,6 +276,7 @@ export async function exchange (gid, uid, name, count) {
     for (const group of takeVaultEquipAttrs(vault, name, count)) addItem(uid, name, group.count, group.attr, gid)
   } else {
     if ((vault.mats[name] || 0) < count) return { ok: false, msg: `宝库${itemIcon(name)}${name}不足（现有 ${vault.mats[name] || 0}）~` }
+    if (vaultAvailable(vault, reserve, name) < count) return { ok: false, msg: `宝库${name}需预留${reserve.mats[name] || 0}件用于建设和维护，可兑换${vaultAvailable(vault, reserve, name)}件。` }
     vault.mats[name] -= count
     if (vault.mats[name] <= 0) delete vault.mats[name]
     addItem(uid, name, count, null, gid)
@@ -458,7 +485,7 @@ export function resolveVaultName (vault, name) {
   return { name: null }
 }
 
-/** 核心职位取用宗门金库: 灵石/材料/丹药/装备(三种核心职位权力一致, 可自由取用; 名称与数量均支持模糊输入) */
+/** 核心职位取用宗门金库的富余资源；名称与数量均支持模糊输入。 */
 export async function takeFromVault (f, gid, uid, name, count) {
   const p = f.players[String(uid)]
   if (!p) return { ok: false, msg: '你不是宗门成员~' }
@@ -468,7 +495,7 @@ export async function takeFromVault (f, gid, uid, name, count) {
   if (!s) return { ok: false, msg: '宗门不存在~' }
   const vault = getVault(f, sid)
   name = String(name || '').trim()
-  if (!name) return { ok: false, msg: '用法：#取用宝库 [灵石|物品名] [数量]（宗主/副宗/太上可自由取用）' }
+  if (!name) return { ok: false, msg: '用法：#取用宝库 [灵石|物品名] [数量]（宗主/副宗/太上可取用富余资源）' }
   const posCn = posCnOf(p.pos)
   const all = count === 'all' || count === '全部' || count === '全'
   const want = all ? Infinity : Math.max(1, Math.floor(Number(count) || 1))
@@ -476,12 +503,17 @@ export async function takeFromVault (f, gid, uid, name, count) {
   /* 灵石(单独仓库) */
   if (name === '灵石') {
     const have = vault.stones || 0
-    const n = all ? have : want
-    if (n <= 0 || have < n) return { ok: false, msg: `宝库灵石不足（现有 ${have}）~` }
+    const reserve = vaultReserve(f, sid)
+    const available = vaultAvailable(vault, reserve, '灵石')
+    const n = all ? available : want
+    if (n <= 0 || have < n) return { ok: false, msg: `宝库可取用${available}灵石，需预留${reserve.stones}用于建设、维护和出征。` }
+    if (available < n) return { ok: false, msg: `宝库可取用${available}灵石，预留${reserve.stones}用于建设、维护和出征。` }
     vault.stones -= n
     const m = await playerMoney(gid, uid)
     m.home[uid].money = (Number(m.home[uid].money) || 0) + n
     await xujing_data.getQQYUserHome(uid, m.home, m.filename, true)
+    f.vaultStoneDraws ||= {}
+    f.vaultStoneDraws[String(uid)] = (Number(f.vaultStoneDraws[String(uid)]) || 0) + n
     saveFake(f, gid)
     logEvent(f, 'flavor', `【取用】🌙 ${posCn} ${p.name} 从宗门金库取用 ${n} 灵石`)
     return { ok: true, msg: `✅ 你已从宗门金库取用 ${n} 灵石（宝库剩 ${vault.stones || 0}）~` }
@@ -492,8 +524,11 @@ export async function takeFromVault (f, gid, uid, name, count) {
   if (hit.needChoice) return { ok: false, msg: `“${name}”可对应多个宝库物品：${hit.choices.map(n => fmtItem(n)).join('、')}，请用全名再取用~` }
   if (!hit.name) return { ok: false, msg: `宝库中没有找到“${name}”（先 #宗门宝库 看看有什么）~` }
   const real = hit.name
-  const n = all ? hit.have : want
-  if (n <= 0 || hit.have < n) return { ok: false, msg: `宝库${itemIcon(real)}${real}不足（现有 ${hit.have}）~` }
+  const reserve = vaultReserve(f, sid)
+  const available = Math.max(0, hit.have - (reserve.mats[real] || 0))
+  const n = all ? available : want
+  if (n <= 0 || hit.have < n) return { ok: false, msg: `宝库${itemIcon(real)}${real}可取用${available}件，需预留${reserve.mats[real] || 0}件用于建设和维护。` }
+  if (available < n) return { ok: false, msg: `宝库${real}需预留${reserve.mats[real] || 0}件，可取用${available}件。` }
   /* 按仓扣减: 材料→丹药→装备 顺位, 直到扣够 */
   const inMats = (vault.mats && vault.mats[real]) || 0
   const inPills = (vault.pills && vault.pills[real]) || 0
@@ -805,37 +840,47 @@ function vaultEquipCount (vault, quality) {
   return n
 }
 
-/** 宗门自动生产(每30分钟): 材料 → 增益丹(九类合计动态上限约100) + 红装(上限10件) + 彩装(上限2件) 入宝库;
- *  修为丹/破障丹由药园产出, 不参与炼丹库存上限; 升级设施/护城阵所需材料一律保留(×2)不被消耗 */
+/** 按门人缺少的部位生产，避免同一部位反复堆库存。 */
+function neededVaultEquip (f, sid, quality) {
+  const vault = getVault(f, sid)
+  const bags = sectAlive(f, sid).map(p => p.bag || {})
+  for (const [uid, p] of Object.entries(f.players || {})) {
+    if (p.sect !== sid) continue
+    const file = getPlayerBagFile(f.gid, uid)
+    bags.push(fs.existsSync(file) ? getBag(uid, f.gid) : {})
+  }
+  const need = Object.fromEntries(['weapon', 'helmet', 'chest', 'pants', 'shoes', 'ring'].map(slot => [slot, 0]))
+  for (const bag of bags) {
+    const slots = Object.keys(need).filter(slot => {
+      const name = bag.equipped?.[slot]
+      return !String(name || '').startsWith('rainbow:') && (EQUIP_TPL[name]?.quality || 0) < quality
+    }).sort((a, b) => attrPower(bag.equippedAttr?.[a] || {}) - attrPower(bag.equippedAttr?.[b] || {}))
+    for (const slot of slots) need[slot] += bag.equipped?.[slot] ? 1 : 3
+    if (slots.length) need[slots[0]] += 2
+  }
+  for (const [name, count] of Object.entries(vault.equips || {})) {
+    const tpl = EQUIP_TPL[name]
+    if (tpl?.quality === quality) need[tpl.type] /= 1 + Number(count)
+  }
+  const slots = Object.keys(need).filter(slot => need[slot] > 0).sort((a, b) => need[b] - need[a])
+  if (!slots.length) return null
+  const pool = Object.keys(EQUIP_TPL).filter(name => EQUIP_TPL[name].quality === quality && EQUIP_TPL[name].type === slots[0])
+  return pool.length ? pick(pool) : null
+}
+function getPlayerBagFile (gid, uid) { return Save_Path + '/bag/' + String(gid) + '/' + String(uid) + '.json' }
+
+/** 宗门每半小时有限生产增益丹、红装和彩装；基本丹药由药园按需求分配产量。 */
 export function autoRefine (f) {
   for (const id of Object.keys(f.sects)) {
     const s = f.sects[id]
     const vault = getVault(f, id)
-    /* 保留升级设施/护城阵所需的材料 ×2 —— 只有超出保留量的材料才允许炼丹/炼装(不会被升级吃掉) */
-    const keep = {}
-    const mergeKeep = (mats) => {
-      for (const [m, c] of Object.entries(mats || {})) keep[m] = Math.max(keep[m] || 0, Math.ceil(c))
-    }
-    for (const fac of Object.keys(CFG.FACILITIES)) {
-      const cur = (s.facilities && s.facilities[fac]) || 0
-      if (cur >= 5) continue
-      const c = facilityCost(fac, cur + 1)
-      if (c && c.mats) mergeKeep(c.mats)
-    }
-    /* 护城阵: 该宗门占领小区的下一级(玩家全价比例) */
-    for (const [area, owner] of Object.entries(f.areas || {})) {
-      if (owner !== id) continue
-      const lv = areaDefLevel(f, area)
-      if (lv >= 5) continue
-      const base = facilityCost('hushan', lv + 1)
-      if (!base || !base.mats) continue
-      const m2 = {}
-      for (const [m, c] of Object.entries(base.mats)) m2[m] = Math.max(1, Math.round(c * CFG.AREA_DEF_RATIO))
-      mergeKeep(m2)
-    }
-    const members = Math.max(1, sectAlive(f, id).length)
+    /* 仅使用下一次建设和两小时维护储备以外的材料。 */
+    const keep = vaultReserve(f, id).mats
+    const members = Math.max(1, sectAlive(f, id).length + Object.values(f.players || {}).filter(p => p.sect === id).length)
     /* 只统计炼丹产出的增益丹；药园的修为丹/破障丹完全独立，不占这个库存额度 */
     const pillCap = Math.max(100, members * 5)
+    const preparing = (f.sectAttacks || []).some(a => a.phase === 'prep' && (a.atkSect === id || a.defSect === id || a.targetType === 'sect' && a.target === id))
+    const targetEach = Math.max(1, Math.ceil(members / (preparing ? 3 : 10)))
     const redCap = Math.min(10, Math.max(2, Math.ceil(members / 8)))
     const colorCap = Math.min(2, Math.max(1, Math.ceil(members / 30)))
     /* 只为下一次设施/护城升级保留一份缓冲，富余材料允许继续生产 */
@@ -852,6 +897,7 @@ export function autoRefine (f) {
     const refinePillTotal = () => recipes.reduce((sum, [pill]) => sum + (vault.pills[pill] || 0), 0)
     for (const [pill, mats] of recipes) {
       if (refinePillTotal() >= pillCap) break
+      if ((vault.pills[pill] || 0) >= targetEach) continue
       if (mats.some(([m, c]) => have(m) < c)) continue
       if (takeMats(Object.fromEntries(mats))) vault.pills[pill] = (vault.pills[pill] || 0) + 1
     }
@@ -861,18 +907,16 @@ export function autoRefine (f) {
       const mats = {}
       for (const m of SECT_RED_ORE) mats[m] = 1
       if (takeMats(mats)) {
-        const r = pick(reds)
-        if (!vault.equips) vault.equips = {}
-        vault.equips[r] = (vault.equips[r] || 0) + 1
+        const r = neededVaultEquip(f, id, 6) || pick(reds)
+        depositWarLoot(vault, [{ name: r, count: 1, attr: rollEquipAttr(EQUIP_TPL[r].type, 6) }])
       }
     }
     /* 3. 炼彩装(6造梦神玉 → 随机彩装入宝库, 上限2件; 彩矿稀有, 炼出即镇宗之宝) */
     const colors = Object.keys(EQUIP_TPL).filter(k => EQUIP_TPL[k].quality === 7)
     if (colors.length && vaultEquipCount(vault, 7) < colorCap && have(SECT_COLOR_ORE) >= 6) {
       if (takeMats({ [SECT_COLOR_ORE]: 6 })) {
-        const c = pick(colors)
-        if (!vault.equips) vault.equips = {}
-        vault.equips[c] = (vault.equips[c] || 0) + 1
+        const c = neededVaultEquip(f, id, 7) || pick(colors)
+        depositWarLoot(vault, [{ name: c, count: 1, attr: rollEquipAttr(EQUIP_TPL[c].type, 7) }])
       }
     }
   }
@@ -885,10 +929,25 @@ export function yaoyuanOutput (f, now = Date.now()) {
     const lv = (s.facilities && s.facilities.yaoyuan) || 0
     if (lv <= 0) continue
     const vault = getVault(f, id)
-    const members = sectAlive(f, id).length
-    const pillCap = Math.max(20, members * 3)
-    const xi = Math.min(Math.round(5 + (lv - 1) * 11.25), Math.max(0, pillCap - (vault.pills['修为丹'] || 0)))
-    const po = Math.min(Math.round(3 + (lv - 1) * 6.75), Math.max(0, pillCap - (vault.pills['破障丹'] || 0)))
+    const people = sectAlive(f, id)
+    const humans = Object.values(f.players || {}).filter(p => p.sect === id).length
+    const pillCap = Math.max(20, (people.length + humans) * 3)
+    const count = (p, name) => Number(p.bag?.items?.[name]?.count ?? p.bag?.items?.[name]) || 0
+    const demand = {
+      修为丹: people.reduce((n, p) => n + ((p.exp || 0) < fakeSubThreshold(p.level + 1) ? Math.max(0, 2 - count(p, '修为丹')) : 0), 0) + humans * 2,
+      破障丹: people.reduce((n, p) => n + ((p.exp || 0) >= fakeSubThreshold(p.level + 1) ? Math.max(0, 1 - count(p, '破障丹')) : 0), 0) + humans
+    }
+    const base = { 修为丹: Math.round(5 + (lv - 1) * 11.25), 破障丹: Math.round(3 + (lv - 1) * 6.75) }
+    const made = { 修为丹: 0, 破障丹: 0 }
+    const stock = name => (vault.pills[name] || 0) + made[name]
+    for (let i = 0; i < base.修为丹 + base.破障丹; i++) {
+      const names = ['破障丹', '修为丹'].filter(name => stock(name) < pillCap)
+      if (!names.length) break
+      names.sort((a, b) => Math.max(0, demand[b] - stock(b)) - Math.max(0, demand[a] - stock(a)) ||
+        stock(a) / base[a] - stock(b) / base[b])
+      made[names[0]]++
+    }
+    const xi = made.修为丹, po = made.破障丹
     if (xi <= 0 && po <= 0) continue
     vault.pills['修为丹'] = (vault.pills['修为丹'] || 0) + xi
     vault.pills['破障丹'] = (vault.pills['破障丹'] || 0) + po
@@ -941,20 +1000,11 @@ export function taxShareToVault (f, w) {
 
 /* ---------- 设施维护费 / 伪玩家自动建设 ---------- */
 /** 单设施每小时维护费 = 建造灵石(0→1) / 2400 × 等级 (10天=建造成本10%); 伪玩家宗门×0.3(曾×0.1) */
-export function facilityMaintPerHr (f, id, fac, lv) {
-  if (!lv) return 0
-  const build = facilityCost(fac, 1).stones
-  const v = Math.round(build / 2400 * lv)
-  const isFake = !f.sects[id].owner
-  /* 维护费(2026-08-18 用户要求): 玩家宗主宗门基础值×15; 伪玩家宗主宗门基础值×10(不再用30%折扣) */
-  const base = isFake ? Math.max(1, Math.round(v * 10)) : v * 15
-  /* 战后 3 小时: 玩家宗主宗门灵石维护×5(伪玩家宗门不收战后翻倍) */
-  return (isPlayerLead(f, id) && inWarUpkeep(f, id)) ? base * WAR_UPKEEP_STONE_MULT : base
-}
+export function facilityMaintPerHr (f, id, fac, lv) { return facilityMaintenance(f, id, fac, lv) }
 
 /** 每小时: 扣设施维护费; 宝库不足则设施掉级(降最高级)直到够付或全0 */
 export function maintFacilities (f, now = Date.now()) {
-  const FAC = ['yanwu', 'hushan', 'lingmai', 'yaoyuan']
+  const FAC = activeFacilityKeys()
   for (const id of Object.keys(f.sects)) {
     const s = f.sects[id]
     if (!s) continue
@@ -990,20 +1040,25 @@ export function maintFacilities (f, now = Date.now()) {
 
 /** 伪玩家宗门自动建造/升级设施(费用 FAKE_FAC_MULT=30%, 曾10%); 每次尝试(资源够就建), 优先补0级(演武场→护山阵→灵脉), 再升最低级(上限8级) */
 export function fakeBuildFacilities (f, now = Date.now()) {
-  const FAC = ['yanwu', 'hushan', 'lingmai', 'yaoyuan']
+  const FAC = activeFacilityKeys()
   for (const id of Object.keys(f.sects)) {
     const s = f.sects[id]
     if (!s || s.owner) continue // 只伪玩家宗门(无玩家宗主)
     if (!s.facilities) s.facilities = { yanwu: 0, hushan: 0, lingmai: 0, yaoyuan: 1 }
     /* 优先补0级设施(演武场→护山阵→灵脉), 再升已有最低级(上限8级) */
     const toBuild = FAC.find(x => (s.facilities[x] || 0) === 0)
-    const fac = toBuild || FAC.filter(x => (s.facilities[x] || 0) < (x === 'yaoyuan' || x === 'yanwu' ? 5 : 8)).sort((a, b) => (s.facilities[a] || 0) - (s.facilities[b] || 0))[0]
+    const fac = toBuild || FAC.filter(x => (s.facilities[x] || 0) < (['yaoyuan', 'yanwu', 'tiangong'].includes(x) ? 5 : 8)).sort((a, b) => (s.facilities[a] || 0) - (s.facilities[b] || 0))[0]
     if (!fac) continue
     const c = facilityCost(fac, (s.facilities[fac] || 0) + 1)
-    const stones = Math.max(1, Math.round(c.stones * FAKE_FAC_MULT))
+    const priceMult = fac === 'tiangong' ? 1 : FAKE_FAC_MULT
+    const stones = Math.max(1, Math.round(c.stones * priceMult))
     const mats = {}
-    for (const [m, n] of Object.entries(c.mats)) mats[m] = Math.max(1, Math.round(n * FAKE_FAC_MULT))
+    for (const [m, n] of Object.entries(c.mats)) mats[m] = Math.max(1, Math.round(n * priceMult))
     const vault = getVault(f, id)
+    if (fac === 'tiangong') {
+      const reserve = vaultReserve(f, id, now)
+      if ((vault.stones || 0) - stones < reserve.maintenance + reserve.deployment) continue
+    }
     if ((vault.stones || 0) < stones) continue
     if (Object.entries(mats).some(([m, n]) => (vault.mats[m] || 0) < n)) continue
     vault.stones -= stones

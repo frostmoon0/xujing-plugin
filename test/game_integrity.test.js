@@ -21,6 +21,10 @@ import { teleportPass } from '../components/teleport_pass.js'
 import { trialDay, trialWeek, rotateTrialPeriods, settleTrialPeriods } from '../components/trial_periods.js'
 import { writeJsonAtomic } from '../components/json_store.js'
 import * as zhenhai from '../components/zhenhai_data.js'
+import { recoverTaichuPlayerTransactions } from '../components/taichu_player.js'
+import { playerInTaichu } from '../components/taichu_presence.js'
+import { isTaichuEnabled } from '../components/taichu_equipment.js'
+import * as taichuCombat from '../components/taichu_combat.js'
 
 const mem = new Map(); const hashes = new Map()
 global.redis = {
@@ -50,9 +54,10 @@ function app (file, expression, overrides = {}) {
     .replace(/^import\s[\s\S]*?from\s*['"][^'"]+['"];?\r?$/gm, '')
     .replace(/^export\s*\{[^}]*\}\s*;?\s*$/gm, '').replace(/^export /gm, '')
   return vm.runInNewContext(`${text}\n;(${expression})`, {
-    ...equip, ...world, ...interact, ...boss, ...guards, ...shop,
+    ...equip, ...world, ...interact, ...boss, ...guards, ...shop, ...taichuCombat,
     fs, path, console, structuredClone, setInterval, setTimeout, clearTimeout, redis: global.redis,
     Save_Path, Plugin_Path, Plugin_Name, withGameLock, xujing_data, Wanhun, teleportPass,
+    recoverTaichuPlayerTransactions, playerInTaichu, isTaichuEnabled,
     parseWanhunNamedCmd, wanhunNamedCmdReg, global: {},
     getFake, saveFake, playerSectName: () => null, getNick: async (_g, uid) => String(uid),
     logPlayerTrade: () => {}, Bot: global.Bot, segment: global.segment, logger: global.logger,
@@ -200,7 +205,7 @@ for (const entry of ['scroll', 'treasure-event', 'terrain-event']) {
         const g = gid(); const st = Object.assign(realm._testEmptyRealm(), { gid: g, phase: 'explore', region: 'center', terrain: 'dongtian', diff: 'huang', specialPending: true, specialGranted: 0, fakeSpecialPending: true, fakeSpecialGranted: 0 })
         const t = { id: 't', kind, leader: '901', members: ['901'], name: 'test', pool: [], contrib: {}, combatPower: 1000, lives: 3 }; st.teams.t = t
         if (entry === 'scroll') { t.node = { type: 'scroll', actor: '901', choices: [{ n: 1 }], data: {} }; await realm.resolveNode(st, g, t, t.node, 1, {}) }
-        else realm.applyEvent(st, g, entry === 'treasure-event' ? { kind: 'treasure', name: 'test' } : { kind: 'terrain', name: '灵脉暴走' })
+        else await realm.applyEvent(st, g, entry === 'treasure-event' ? { kind: 'treasure', name: 'test' } : { kind: 'terrain', name: '灵脉暴走' })
         assert.ok(st[kind === 'fake' ? 'fakeSpecialGranted' : 'specialGranted'] > 0)
         assert.equal(st[kind === 'fake' ? 'specialGranted' : 'fakeSpecialGranted'], 0)
       }

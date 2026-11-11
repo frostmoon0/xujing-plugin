@@ -3,6 +3,8 @@ import { getPuppetBattleBuff, getPuppetPower } from './puppet_data.js'
 import { getWanhunBattleBuff, getWanhunSoulPower } from './wanhun_data.js'
 import { getActivePetPower } from './pet_data.js'
 import { REALM_MAX_LEVEL } from './realm_cap.js'
+import { readPlayerInjury } from './fake_data.js'
+import { injuredPower } from './injury.js'
 
 /**
  * 全游戏统一绝对战力体系：决斗、幻境试炼、守卫/伏击、宗门战斗必须复用本文件的战力计算，禁止各玩法另起一套战力。
@@ -89,15 +91,16 @@ export async function getAttackBuff (uid) {
 /**
  * 综合战力: 境界战力 + 装备战力 + 出战宠物战力 + 万魂 (乘攻 buff)
  * 决斗胜率 / 幻境试炼伤害 / 守卫/伏击/宗门 共用同一套战力体系
- * gid/uid 可选: 传入后计入该玩家出战宠物的战力(未出战/幼崽/蛋为 0)
+ * gid/uid 可选: 传入后计入该玩家出战宠物和当前伤势。
  * @param {number} level 境界等级
  * @param {object} bag 背包对象(缺省视为无装备)
  * @param {object|number} buff 完整buff对象或攻击倍率(默认1)
  * @param {string} [gid] 群号(查出战宠物用)
  * @param {string|number} [uid] 玩家qq(查出战宠物用)
+ * @param {object|null} [injury] 可选伤势快照，省略时只读该群现有玩家伤势
  * @returns {{ realmPower:number, equipPower:number, power:number }}
  */
-export function calcCombatPower (level, bag, buff = 1, gid = 'global', uid = '') {
+export function calcCombatPower (level, bag, buff = 1, gid = 'global', uid = '', injury = undefined) {
   const rp = realmPower(level)
   const { power: equipPower } = getTotalAttr(bag || {})
   const { atk } = normalizeBuff(buff)
@@ -107,7 +110,9 @@ export function calcCombatPower (level, bag, buff = 1, gid = 'global', uid = '')
   }
   let puppetPower = 0
   try { puppetPower = getPuppetPower(bag || {}) } catch (err) { puppetPower = 0 }
-  return { realmPower: rp, equipPower, puppetPower, power: Math.round((rp + equipPower + getWanhunSoulPower(bag, level) + petPower + puppetPower) * (atk || 1)) }
+  const rawPower = Math.round((rp + equipPower + getWanhunSoulPower(bag, level) + petPower + puppetPower) * (atk || 1))
+  const effectiveInjury = injury === undefined ? readPlayerInjury(gid, uid) : injury
+  return { realmPower: rp, equipPower, puppetPower, rawPower, power: injuredPower(rawPower, effectiveInjury) }
 }
 
 /**

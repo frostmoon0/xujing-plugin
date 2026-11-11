@@ -1,3 +1,4 @@
+import { wearPlayerTaichu, taichuBattleReceipt } from '../../components/taichu_combat.js'
 //随便写的,大佬勿喷 初版@鸢:随机娶群友，指定娶群友
 import { BotApi, AlemonApi, plugin } from '../../model/api/api.js'
 import fs from 'fs'
@@ -669,6 +670,9 @@ export class qqy extends plugin {
         const oppDmg = makeDamageFn(level2, at, 0.15, oppBuffs, e.group_id)
         //一律五局三胜,管理员不加成(一视同仁,照常抢劫)
         const result = fightBestOf5(win, { dmgMe: myDmg, dmgOpp: oppDmg, defMe: myBuffs.def })
+        const wearReceipt = taichuBattleReceipt(e, 'marriage-duel')
+        wearPlayerTaichu(e.group_id, id, wearReceipt)
+        wearPlayerTaichu(e.group_id, at, wearReceipt)
         const extra = '胜者可抢走对方500~1000灵石！'
         const myNick = (e.sender && (e.sender.card || e.sender.nickname)) || '你'
         const oppName = (await this.people(e, 'nickname', at)) || '对方'
@@ -2227,6 +2231,9 @@ export class qqy extends plugin {
         const oppDmg = makeDamageFn(level2, user_id2, 0.15, oppBuffs, e.group_id)
         //一律五局三胜,管理员不加成(一视同仁,照常抢老婆)
         const result = fightBestOf5(win, { dmgMe: myDmg, dmgOpp: oppDmg, defMe: myBuffs.def })
+        const wearReceipt = taichuBattleReceipt(e, 'marriage-duel')
+        wearPlayerTaichu(e.group_id, user_id, wearReceipt)
+        wearPlayerTaichu(e.group_id, user_id2, wearReceipt)
         const extra = '胜者将获得抢夺资格！'
         //构建战斗合并转发记录
         const msgs = buildFightRecord({

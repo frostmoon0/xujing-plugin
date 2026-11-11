@@ -1,5 +1,9 @@
+import { wearPlayerTaichu, wearNpcTaichu } from './taichu_combat.js'
 import { withGameLock } from './game_lock.js'
-import { warActorOwner } from './sect/war_state.js'
+import { hasTruce } from './sect/diplomacy_state.js'
+import { npcCanAct } from './npc_action.js'
+import { realmLootValue, realmFightMargin, realmWantsFight, realmNpcChoice, realmNpcShouldLeave, realmNpcAmbush } from './realm_ai.js'
+import { realmNpcTeamIdentity, formatRealmNpcAction } from './realm_narrative.js'
 /* ============================================================
  * 遗蜕秘境 - 数据与核心逻辑
  * 伪玩家: 使用本群 fake_data 中的真实人物; 入境期间暂停外部行为, 出境恢复
@@ -17,7 +21,7 @@ import command from './command.js'
 import { REGION_KEYS, REGIONS, getWorld, getLoc, setLoc, regionNameOf, getSeal, sealCoversRegion } from './world_data.js'
 import { getBuffs, calcCombatPower, guardWinRate } from './fight.js'
 import { ZHENHAI_MATERIALS, ZHENHAI_NAME, ZHENHAI_DROP_CHANCE, ZHENHAI_DROP_TABLE } from './zhenhai_data.js'
-import { getBag, addItem, consumeItem, isBound, itemIcon, ITEM_TPL, MATERIAL_TPL, EQUIP_TPL, GONGFA_TPL, ARRAY_MATS, saveBag } from './equip_data.js'
+import { getBag, addItem, addItemToBag, takeBagItems, consumeItem, isBound, itemIcon, ITEM_TPL, MATERIAL_TPL, EQUIP_TPL, GONGFA_TPL, ARRAY_MATS, saveBag } from './equip_data.js'
 import { getFake, saveFake, personPower, sectName, sectAlive, isInSectMine, killPerson } from './fake_data.js'
 // karma helper is exposed on xujing_data default export
 import Wanhun from './wanhun_data.js'
@@ -717,6 +721,7 @@ export async function openPrivateRealm (gid, cfg, ownerUid, partyId, partyMember
   }
   for (const uid of members) { team.contrib[uid] = 0; team.victory[uid] = 0; try { const w = getWorld(gid); const seal = getSeal(w); if (getLoc(w, uid) !== st.region && !(seal && seal.region === st.region && Number(seal.until) > Date.now() && String(seal.owner) !== String(uid))) setLoc(w, uid, st.region) } catch (err) { } }
   st.teams[team.id] = team
+  await refreshTeamPower(gid, team)
   savePrivateRealm(st, gid)
   return { ok: true, st, team, info: { privateId: st.privateId, title: st.title, region: st.region, diffName: diff.name, realm: diff.realm, exploreMin: st.exploreMin, fakeTeams: 0 } }
 }
@@ -745,11 +750,13 @@ function leaderOf (persons) {
   if (role) return role.name
   return persons.slice().sort((a, b) => personPower(b) - personPower(a))[0]?.name || persons[0]?.name
 }
-function mkFakeTeam (st, id, persons, name) {
+function mkFakeTeam (st, id, persons, f) {
   const regions = [...new Set(persons.map(p => p.loc).filter(Boolean))]
   const travelMin = regions.includes(st.region) ? randRange([0, 2]) : randRange([2, 10])
+  const leader = leaderOf(persons)
+  const identity = realmNpcTeamIdentity(persons, { leader, sectNameOf: sid => sectName(f, sid) })
   return {
-    id, kind: 'fake', leader: leaderOf(persons), members: persons.map(p => p.name), name, sectName: name,
+    id, kind: 'fake', leader, members: persons.map(p => p.name), ...identity,
     pos: 0, step: 0, pool: [], contrib: {}, victory: {},
     arrivalAt: Date.now() + travelMin * 60000, arrived: travelMin <= 0, entered: false,
     nextActionAt: Date.now() + (travelMin + 1) * 60000, lastBarrierHit: Date.now(), node: null, pendingDisposal: null,
@@ -760,7 +767,7 @@ function mkFakeTeam (st, id, persons, name) {
 /** 每人独立决定出发; 只有已经决定出发的人才可能被随机匹配, 不强制拉朋友/同门 */
 export function genFakeTeams (gid, st) {
   const f = getFake(gid)
-  const alive = Object.values(f.roster || {}).filter(p => p.alive && !isInSectMine(f, p.name) && !p.realmBusy && !warActorOwner(f, 'fake', p.name))
+  const alive = Object.values(f.roster || {}).filter(p => npcCanAct(f, p) && (Number(p.fakeLostUntil) || 0) <= Date.now())
   const willing = shuffle(alive.filter(p => Math.random() < wantChance(p)))
   const available = new Map(willing.map(p => [p.name, p]))
   const teams = {}; let seq = 0
@@ -775,9 +782,7 @@ export function genFakeTeams (gid, st) {
       if (Math.random() < affinity) { group.push(p); available.delete(p.name) }
     }
     seq++
-    const sameSect = [...new Set(group.map(p => p.sect).filter(Boolean))]
-    const name = sameSect.length === 1 ? sectName(f, sameSect[0]) : (group.length > 1 ? '散修结伴队' : `独行散修·${seed.name}`)
-    teams[`fake${seq}`] = mkFakeTeam(st, `fake${seq}`, group, name)
+    teams[`fake${seq}`] = mkFakeTeam(st, `fake${seq}`, group, f)
   }
   return teams
 }
@@ -831,8 +836,14 @@ function reconcileFakeBusy (gid, st) {
 function syncFakeTeam (gid, st, team) {
   const persons = currentFakePersons(gid, team)
   team.members = persons.map(p => p.name)
-  if (team.leader && !team.members.includes(team.leader)) team.leader = leaderOf(persons)
+  if (!team.members.includes(team.leader)) team.leader = leaderOf(persons)
+  refreshFakeTeamName(gid, team, persons)
   return persons
+}
+function refreshFakeTeamName (gid, team, persons = currentFakePersons(gid, team)) {
+  const f = getFake(gid)
+  const leader = persons.some(p => p.name === team.leader) ? team.leader : leaderOf(persons)
+  Object.assign(team, realmNpcTeamIdentity(persons, { leader, sectNameOf: sid => sectName(f, sid) }))
 }
 
 /* ---------- 破界 ---------- */
@@ -938,6 +949,7 @@ export async function enterRealm (st, gid, uid) {
     st.teams[team.id] = team
   }
   team.members.push(String(uid)); if (!team.contrib[String(uid)]) team.contrib[String(uid)] = 0; if (!team.victory[String(uid)]) team.victory[String(uid)] = 0
+  await refreshTeamPower(gid, team)
   /* 进入前往秘境大区, 这是跨区赶路的统一入口; 不会把未入场队员带进来; 封海时区外玩家不得借道 */
   try { const w = getWorld(gid); const seal = getSeal(w); if (getLoc(w, uid) !== st.region && !(seal && seal.region === st.region && Number(seal.until) > Date.now() && String(seal.owner) !== String(uid))) setLoc(w, uid, st.region) } catch (err) { }
   if (st.private) savePrivateRealm(st, gid)
@@ -993,7 +1005,7 @@ function targetTeam (st, self) {
   return actives.find(t => t.kind === 'player') || actives[0] || null
 }
 function actionActor (team) { const m = team.members || []; if (!m.length) return null; team.actorCursor = ((team.actorCursor || 0) + 1) % m.length; return m[team.actorCursor] }
-function buildNode (st, team, type, teamPower = Math.max(1, Number(team.combatPower) || 1)) {
+function buildNode (st, team, type, teamPower = Math.max(1, Number(team.combatPower) || 1), preferredTarget = undefined) {
   const terrain = TERRAINS[st.terrain]
   const node = { type, terrain: st.terrain, title: '', text: '', choices: [], actor: actionActor(team), data: {} }
   if (type === 'treasure') {
@@ -1001,13 +1013,13 @@ function buildNode (st, team, type, teamPower = Math.max(1, Number(team.combatPo
   } else if (type === 'canwu') {
     node.title = '📜 道则残碑'; node.text = '残碑尚存道则，碑灵守在近旁。'; node.data = { kind: 'insight', requiredPower: combatPowerFor(st, team, 0.9) }; node.choices = [{ n: 1, label: '参悟（成功得宝并暴露，失败扣队命）' }, { n: 2, label: '拓印（得宝，乱源+1，暴露10分钟）' }, { n: 3, label: '绕行' }]
   } else if (type === 'fake') {
-    const candidates = Object.values(st.teams).filter(t => t.kind === 'fake' && t.entered !== false && t.members.length && !t.dead && !t.engagedBy && !t.node && !(Number(t.encounterLockUntil) > Date.now()) && t.id !== team.id).sort((a, b) => String(a.id).localeCompare(String(b.id))); const target = candidates[0]
+    const candidates = Object.values(st.teams).filter(t => t.kind === 'fake' && t.entered !== false && t.members.length && !t.dead && !t.engagedBy && !t.node && !(Number(t.encounterLockUntil) > Date.now()) && t.id !== team.id).sort((a, b) => String(a.id).localeCompare(String(b.id))); const target = preferredTarget === undefined ? candidates[0] : preferredTarget
     if (!target) return buildNode(st, team, 'treasure')
     target.engagedBy = team.id
     target.encounterLockUntil = 0
     node.title = '🧙 遭遇修士'; node.text = `与【${target.name}】相遇。`; node.data = { kind: 'fight', target: target.id, victim: target.members.slice().sort()[0] }; node.choices = [{ n: 1, label: '交战（胜后处置败者）' }, { n: 2, label: '买路（300灵石）' }, { n: 3, label: '绕道' }]
   } else if (type === 'player') {
-    const target = targetTeam(st, team); if (!target) return buildNode(st, team, 'treasure')
+    const target = preferredTarget === undefined ? targetTeam(st, team) : preferredTarget; if (!target) return buildNode(st, team, 'treasure')
     target.engagedBy = team.id
     target.encounterLockUntil = 0
     node.title = '⚔️ 遭遇队伍'; node.text = `与【${target.name}】相遇。`; node.data = { kind: 'pvp', target: target.id, victim: target.members.slice().sort()[0] }; node.choices = [{ n: 1, label: '交战（胜后处置败者）' }, { n: 2, label: '避让' }, { n: 3, label: '观望' }]
@@ -1038,11 +1050,10 @@ function buildNode (st, team, type, teamPower = Math.max(1, Number(team.combatPo
 export async function genNode (st, team, gid) {
   for (const other of Object.values(st.teams || {})) if (other.kind === 'fake' && !other.dead) syncFakeTeam(gid, st, other)
   if (!team.members.length) return null
-  const profiles = await teamProfiles(gid, team)
-  const teamPower = Math.max(1, Math.round(profiles.reduce((sum, p) => sum + (Number(p.power) || 0), 0) * (team.powerBoost || 1)))
-  team.combatPower = teamPower
+  const teamPower = await refreshTeamPower(gid, team)
   const type = NODE_TYPES[(Number(team.step) || 0) % NODE_TYPES.length]
-  const node = buildNode(st, team, type, teamPower)
+  const target = team.kind === 'fake' && ['fake', 'player'].includes(type) ? await fakeRealmTarget(st, gid, team, type, teamPower) : undefined
+  const node = buildNode(st, team, type, teamPower, target)
   team.node = node
   team.lastActionAt = Date.now()
   saveRealmState(st, gid)
@@ -1057,12 +1068,96 @@ async function teamProfiles (gid, team) {
   if (team.kind === 'fake') return currentFakePersons(gid, team).map(p => ({ name: p.name, level: Number(p.level) || 0, power: personPower(p), person: p }))
   const out = []; for (const uid of team.members || []) out.push(await playerProfile(gid, uid)); return out
 }
+/** combatPower仅作展示缓存，所有判定都从当前成员和统一战力公式重新计算。 */
+export async function refreshTeamPower (gid, team) {
+  const profiles = await teamProfiles(gid, team)
+  if (team.kind === 'fake') refreshFakeTeamName(gid, team, profiles.map(p => p.person))
+  const injury = team.kind === 'fake' ? Math.max(0.2, 1 - (Number(team.injured) || 0) * 0.12) : 1
+  const power = profiles.reduce((sum, p) => sum + Math.max(0, Number(p.power) || 0), 0)
+  team.combatPower = Math.max(1, Math.round(power * (Number(team.powerBoost) || 1) * injury))
+  return team.combatPower
+}
+function nodeEnemyPower (st, team, node) {
+  return Number(node.type === 'beast' ? node.data?.enemyPower : node.data?.requiredPower) || combatPowerFor(st, team, node.type === 'trial' ? 1.15 : 1)
+}
+export async function refreshRealmNode (st, gid, team, node) {
+  const power = await refreshTeamPower(gid, team)
+  if (node.type === 'fake' || node.type === 'player') {
+    const target = st.teams[node.data?.target]
+    if (target) {
+      if (target.kind === 'fake') refreshFakeTeamName(gid, target)
+      node.data.targetName = target.name
+    }
+  }
+  if (node.type === 'beast' || node.type === 'trial') {
+    const enemy = nodeEnemyPower(st, team, node)
+    const prefix = node.type === 'beast' ? `${node.data.enemyName || '秘境妖兽'}拦住去路。` : (node.data.eventText || String(node.text || '').split('\n我方战力：')[0])
+    node.text = `${prefix}\n我方战力：${power} · ${node.type === 'beast' ? '妖兽' : '对方'}战力：${enemy}\n胜率：${guardWinRate(power, enemy)}%`
+  }
+  return power
+}
+function fakeTeamActor (gid, team) {
+  const persons = currentFakePersons(gid, team)
+  return persons.find(p => p.name === team.leader) || persons[0]
+}
+function realmTeamRelation (gid, a, b) {
+  const f = getFake(gid)
+  const sectsOf = team => (team.members || []).map(id => team.kind === 'fake' ? f.roster?.[id]?.sect : f.players?.[id]?.sect).filter(Boolean)
+  const friendly = sectsOf(a).some(sa => sectsOf(b).some(sb => {
+    if (sa === sb || hasTruce(f, sa, sb)) return true
+    const pair = f.diplomacyPairs?.[JSON.stringify([String(sa), String(sb)].sort())]
+    return pair ? pair.status === 'allied' : (f.sects?.[sa]?.allies || []).includes(sb) || (f.sects?.[sb]?.allies || []).includes(sa)
+  })) || a.kind === 'fake' && b.kind === 'fake' && currentFakePersons(gid, a).some(pa => currentFakePersons(gid, b).some(pb => related(pa, pb)))
+  const revenge = (a.revenge || []).includes(b.id) || a.kind === 'fake' && currentFakePersons(gid, a).some(p => (p.relations?.enemies || []).some(n => (b.members || []).includes(n)))
+  return { friendly: !!friendly, revenge: !!revenge }
+}
+function realmOpponents (st, team) {
+  return Object.values(st.teams || {}).filter(t => t !== team && !t.dead && t.entered !== false && t.members?.length)
+}
+async function fakeThreatPower (st, gid, team) {
+  let strongest = 0
+  for (const other of realmOpponents(st, team)) {
+    const relation = realmTeamRelation(gid, team, other)
+    if (relation.friendly || other.kind === 'fake' && !realmWantsFight(other, fakeTeamActor(gid, other), realmTeamRelation(gid, other, team).revenge)) continue
+    strongest = Math.max(strongest, await refreshTeamPower(gid, other))
+  }
+  return strongest
+}
+/** 只挑有足够优势的非友方目标，不按名册顺序或玩家身份盲目碰撞。 */
+async function fakeRealmTarget (st, gid, team, type, power) {
+  const actor = fakeTeamActor(gid, team)
+  if (!actor) return null
+  const candidates = []
+  for (const target of activeTeams(st, team)) {
+    if (type === 'fake' && target.kind !== 'fake') continue
+    const relation = realmTeamRelation(gid, team, target)
+    if (relation.friendly || !realmWantsFight(team, actor, relation.revenge)) continue
+    const otherPower = await refreshTeamPower(gid, target)
+    if (power < otherPower * realmFightMargin(team, actor)) continue
+    candidates.push({ target, power: otherPower, score: (relation.revenge ? 100 : 0) + realmLootValue(target) / (1 + otherPower / Math.max(1, power)) })
+  }
+  candidates.sort((a, b) => b.score - a.score || a.power - b.power || String(a.target.id).localeCompare(String(b.target.id)))
+  return candidates[0]?.target || null
+}
+async function wearRealmTeam (st, gid, team, receipt, amount = 2) {
+  if (team.kind === 'fake') {
+    const f = getFake(gid)
+    let changed = false
+    for (const name of team.members || []) changed = wearNpcTaichu(f.roster?.[name], receipt, amount) || changed
+    if (changed) saveFake(f, gid)
+  } else {
+    for (const uid of team.members || []) wearPlayerTaichu(gid, uid, receipt, amount)
+  }
+}
+
 async function teamFight (st, gid, a, b) {
-  const ap = await teamProfiles(gid, a); const bp = await teamProfiles(gid, b)
-  const myPower = Math.round(ap.reduce((s, p) => s + p.power, 0) * (a.powerBoost || 1))
-  const oppPower = Math.round(bp.reduce((s, p) => s + p.power, 0) * (b.powerBoost || 1)); const winRate = guardWinRate(myPower, oppPower)
+  const myPower = await refreshTeamPower(gid, a); const oppPower = await refreshTeamPower(gid, b)
+  const winRate = guardWinRate(myPower, oppPower)
   const result = deterministicFightResult(winRate >= 50)
-  const win = result.winner === 'me'; const loser = win ? b : a; const loserProfiles = win ? bp : ap; const victim = loserProfiles.slice().sort((x, y) => String(x.name).localeCompare(String(y.name)))[0]?.name || null
+  const win = result.winner === 'me'; const loser = win ? b : a; const loserProfiles = await teamProfiles(gid, loser); const victim = loserProfiles.slice().sort((x, y) => String(x.name).localeCompare(String(y.name)))[0]?.name || null
+  const receipt = `realm-pvp:${st.realmId || st.startAt}:${a.id}:${a.step}:${b.id}:${b.step}`
+  await wearRealmTeam(st, gid, a, receipt, win ? 2 : 4)
+  await wearRealmTeam(st, gid, b, receipt, win ? 4 : 2)
   if (win) { credit(a, 3); transferVictory(loser, a) } else { transferVictory(a, b) }
   return { win, myPower, oppPower, winRate, victim, result }
 }
@@ -1087,8 +1182,8 @@ export async function resolveNode (st, gid, team, node, idx, cfg) {
   const msgs = []
   const actor = node.actor
   let autoDisposalDone = false
-  const teamPower = Math.max(1, Number(team.combatPower) || 1)
-  const requiredPower = Number(node.data?.requiredPower) || combatPowerFor(st, team, 1)
+  const teamPower = await refreshRealmNode(st, gid, team, node)
+  const requiredPower = nodeEnemyPower(st, team, node)
   const success = teamPower >= requiredPower
 
   if (node.type === 'treasure') {
@@ -1202,6 +1297,9 @@ export async function resolveNode (st, gid, team, node, idx, cfg) {
     else msgs.push('已放弃夺宝。')
   }
 
+  if ((['trial', 'chuangguan', 'beast'].includes(node.type) && idx === 1) || (node.type === 'elder' && idx === 3)) {
+    await wearRealmTeam(st, gid, team, `realm-node:${st.realmId || st.startAt}:${team.id}:${team.step}:${node.type}`, success ? 2 : 4)
+  }
   releaseNodeTarget(st, team, node)
   team.node = null
   team.pendingDisposal = null
@@ -1372,9 +1470,9 @@ async function extractPlayerInventory (gid, uid, bagRate, moneyRate, cfg) {
       const have = Number(bag.items[n]?.count ?? bag.items[n]) || 0
       const take = Math.min(have, left)
       if (take <= 0) continue
-      consumeItem(uid, n, take, null, gid)
-      items.push({ name: n, count: take, quality: itemQuality(n), rare: itemQuality(n) >= 6 })
-      left -= take
+      const entries = takeBagItems(bag, n, take)
+      for (const entry of entries) items.push({ ...entry, quality: itemQuality(n), rare: itemQuality(n) >= 6 })
+      left -= entries.reduce((sum, entry) => sum + entry.count, 0)
     }
     /* 搜刮包含穿在身上的装备: 直接脱下并从玩家装备栏移除, 避免死亡后装备凭空消失 */
     if (left > 0) {
@@ -1387,8 +1485,8 @@ async function extractPlayerInventory (gid, uid, bagRate, moneyRate, cfg) {
         items.push({ name, count: 1, quality: itemQuality(name), rare: itemQuality(name) >= 6, attr })
         left -= 1
       }
-      saveBag(uid, bag, gid)
     }
+    if (items.length) saveBag(uid, bag, gid)
   }
   let money = 0
   if (moneyRate > 0) {
@@ -1422,15 +1520,9 @@ function extractFakeInventory (gid, victim, bagRate, moneyRate, cfg) {
       const have = Number(p.bag.items[n]?.count ?? p.bag.items[n]) || 0
       const take = Math.min(have, left)
       if (take <= 0) continue
-      if (typeof p.bag.items[n] === 'object') {
-        p.bag.items[n].count -= take
-        if (p.bag.items[n].count <= 0) delete p.bag.items[n]
-      } else {
-        p.bag.items[n] -= take
-        if (p.bag.items[n] <= 0) delete p.bag.items[n]
-      }
-      items.push({ name: n, count: take, quality: itemQuality(n), rare: itemQuality(n) >= 6 })
-      left -= take
+      const entries = takeBagItems(p.bag, n, take)
+      for (const entry of entries) items.push({ ...entry, quality: itemQuality(n), rare: itemQuality(n) >= 6 })
+      left -= entries.reduce((sum, entry) => sum + entry.count, 0)
     }
     if (left > 0) {
       for (const [slot, name] of Object.entries(p.bag.equipped || {})) {
@@ -1490,27 +1582,26 @@ export function rollEvent (st, cfg) {
   st.firedEvents.push(ev.name)
   return ev
 }
-export function applyEvent (st, gid, ev) {
+export async function applyEvent (st, gid, ev) {
   const msgs = []; const pushes = []; const name = ev.name
   if (ev.kind === 'treasure') {
-    for (const t of Object.values(st.teams)) if (!t.dead && t.members.length) {
+    for (const t of Object.values(st.teams)) if (!t.dead && t.entered !== false && t.members.length) {
       const r = rollRewardList(st, st.diff, Math.random, { special: true, fake: t.kind === 'fake' })
       const got = []
       for (const item of r) got.push(addToPool(st, t, item))
       msgs.push(`【${t.name}】获得秘藏：${fmtRewards(got)}${got.some(g => g && g.rare) ? '✨' : ''}。`)
     }
   } else if (ev.kind === 'guardian' || ['守园大妖', '残念Boss', '傀儡暴动', '尸傀潮', '龙宫守卫暴动', '禁地凶物', '魔潮', '封印松动'].includes(name)) {
-    for (const t of Object.values(st.teams)) if (!t.dead && t.members.length) {
-      const teamPower = t.kind === 'fake'
-        ? Math.max(1, Math.round(currentFakePersons(gid, t).reduce((sum, p) => sum + personPower(p), 0)))
-        : Math.max(1, Number(t.combatPower) || 1)
+    for (const t of Object.values(st.teams)) if (!t.dead && t.entered !== false && t.members.length) {
+      if (t.kind === 'fake' && !syncFakeTeam(gid, st, t).length) continue
+      const teamPower = await refreshTeamPower(gid, t)
       const enemyPower = combatPowerFor(st, t, 1.15)
-      const eventNode = { type: 'trial', title: '👹 异变拦路', text: `${ev.text}\n我方战力：${teamPower} · 对方战力：${enemyPower} · 胜率：${guardWinRate(teamPower, enemyPower)}%`, choices: [{ n: 1, label: '迎战（成功得宝，失败扣队命）' }, { n: 2, label: '绕行' }], actor: actionActor(t), data: { kind: 'chuangguan', requiredPower: enemyPower } }
+      const eventNode = { type: 'trial', title: '👹 异变拦路', text: `${ev.text}\n我方战力：${teamPower} · 对方战力：${enemyPower}\n胜率：${guardWinRate(teamPower, enemyPower)}%`, choices: [{ n: 1, label: '迎战（成功得宝，失败扣队命）' }, { n: 2, label: '绕行' }], actor: actionActor(t), data: { kind: 'chuangguan', requiredPower: enemyPower, eventText: ev.text } }
       if (t.node) { if (!Array.isArray(t.eventQueue)) t.eventQueue = []; t.eventQueue.push(eventNode) }
       else { t.node = eventNode; t.lastActionAt = Date.now(); if (t.kind === 'player') { syncPlayerTeam(st, gid, t); pushes.push({ team: t, node: t.node }) } }
     }
   } else if (name === '灵脉暴走' || name === '主棺异动' || name === '飞升残影' || name === '挖出禁忌' || name === '仙兵共鸣') {
-    for (const t of Object.values(st.teams)) if (!t.dead && t.members.length) {
+    for (const t of Object.values(st.teams)) if (!t.dead && t.entered !== false && t.members.length) {
       const r = rollRewardList(st, st.diff, Math.random, { special: true, fake: t.kind === 'fake' })
       const got = []
       for (const item of r) got.push(addToPool(st, t, item))
@@ -1556,6 +1647,7 @@ export async function advanceTeams (st, gid, cfg) {
     if (!t.members.includes(String(t.leader))) continue
     if (Array.isArray(t.eventQueue) && t.eventQueue.length) {
       t.node = t.eventQueue.shift()
+      await refreshRealmNode(st, gid, t, t.node)
       t.lastActionAt = now
       pending.push({ team: t, node: t.node })
       continue
@@ -1586,16 +1678,33 @@ export async function driveFakeTeams (st, gid, cfg) {
     if (t.kind !== 'fake' || t.entered === false || t.dead || t.engagedBy || !t.members.length) continue
     syncFakeTeam(gid, st, t)
     if (!t.members.length) { t.dead = true; continue }
-    if (Array.isArray(t.eventQueue) && t.eventQueue.length) {
+    if (!t.node && now < (t.nextActionAt || 0)) continue
+    const power = await refreshTeamPower(gid, t)
+    if (realmNpcShouldLeave(t, power, await fakeThreatPower(st, gid, t), st.private ? Infinity : st.endAt - now)) {
+      const settled = await settleTeamNow(st, t, gid)
+      removeAmbushTeam(st, gid, t)
+      msgs.push(`【${t.name}】${settled.totalItems ? `收好${settled.totalItems}项战利品，` : ''}沿来路撤离秘境。`)
+      continue
+    }
+    if (!t.node && Array.isArray(t.eventQueue) && t.eventQueue.length) {
       t.node = t.eventQueue.shift()
       t.lastActionAt = now
     }
     if (t.node) {
-      if (t.node.type === 'disposal') continue
+      const node = t.node
+      if (node.type === 'disposal') {
+        const actor = fakeTeamActor(gid, t)
+        if (actor) {
+          const idx = fakeDisposalIndex(actor)
+          const r = await resolveDisposal(st, gid, t, idx, cfg)
+          msgs.push(...formatRealmNpcAction(t, node, idx, r.msgs))
+        }
+        continue
+      }
       const actor = currentFakePersons(gid, t).find(p => p.name === t.leader) || currentFakePersons(gid, t)[0]
-      const idx = fakeChoice(t, t.node, actor)
-      const r = await resolveNode(st, gid, t, t.node, idx, cfg)
-      msgs.push(...r.msgs.map(x => `【${t.name}】${x}`))
+      const idx = await fakeChoice(st, gid, t, node, actor)
+      const r = await resolveNode(st, gid, t, node, idx, cfg)
+      msgs.push(...formatRealmNpcAction(t, node, idx, r.msgs))
       if (r.disposalFor) pushes.push(r.disposalFor)
       continue
     }
@@ -1603,29 +1712,20 @@ export async function driveFakeTeams (st, gid, cfg) {
     const node = await genNode(st, t, gid)
     if (!node) continue
     const actor = currentFakePersons(gid, t).find(p => p.name === t.leader) || currentFakePersons(gid, t)[0]
-    const idx = fakeChoice(t, node, actor)
+    const idx = await fakeChoice(st, gid, t, node, actor)
     const r = await resolveNode(st, gid, t, node, idx, cfg)
-    msgs.push(...r.msgs.map(x => `【${t.name}】${x}`))
+    msgs.push(...formatRealmNpcAction(t, node, idx, r.msgs))
     if (r.disposalFor) pushes.push(r.disposalFor)
   }
   if (msgs.length) saveRealmState(st, gid)
   return { msgs, pushes }
 }
-function fakeChoice (team, node, actor) {
-  const evil = actor && (actor.path === '魔道' || actor.trait === '嗜杀'); const brave = actor && actor.trait === '好斗'; const greedy = evil || brave || (actor && actor.act === '贪玩')
-  if (node.type === 'treasure') return greedy ? 1 : 2
-  if (node.type === 'fake' || node.type === 'player') return greedy ? 1 : 3
-  if (node.type === 'jueze') return evil ? 3 : (actor?.trait === '善良' ? 1 : 2)
-  if (node.type === 'canwu' || node.type === 'dushi') return brave ? 1 : 3
-  if (node.type === 'chuangguan') return brave ? 1 : 2
-  if (node.type === 'duojie') return brave ? 1 : 2
-  if (node.type === 'jiemi') return 2
-  if (node.type === 'beast') return brave ? 1 : 2
-  if (node.type === 'maze') return 3
-  if (node.type === 'spring' || node.type === 'scroll') return 1
-  if (node.type === 'elder') return 2
-  if (node.type === 'contest') return 2
-  return 2
+async function fakeChoice (st, gid, team, node, actor) {
+  const power = await refreshRealmNode(st, gid, team, node)
+  const target = st.teams[node.data?.target]
+  const relation = target ? realmTeamRelation(gid, team, target) : {}
+  const opponentPower = target ? await refreshTeamPower(gid, target) : Infinity
+  return realmNpcChoice(team, node, actor, { power, requiredPower: nodeEnemyPower(st, team, node), opponentPower, ...relation })
 }
 
 /** 玩家队抉择超时未回复时的系统代选: 一律选保守/不消耗资源/不触发战斗的选项, 只保留该步现状(不得新收益) */
@@ -1703,13 +1803,11 @@ function grantItem (gid, uid, item) { if (item.currency || item.name === '灵石
 function grantFakeItem (f, p, item) {
   if (item.currency || item.name === '灵石') { p.money = (Number(p.money) || 0) + (item.count || 0); return }
   if (!p.bag) p.bag = { items: {}, equipped: {} }
-  p.bag.items = p.bag.items || {}
-  const old = p.bag.items[item.name]
-  if (old && typeof old === 'object') old.count = (Number(old.count) || 0) + (item.count || 1)
-  else p.bag.items[item.name] = (Number(old) || 0) + (item.count || 1)
+  addItemToBag(p.bag, item.name, item.count || 1, item.attr || null)
 }
 export async function settleMember (team, uid, gid) { const plan = planSplit(team); const p = plan.find(x => String(x.uid) === String(uid)); if (!p) return []; const msgs = []; for (const item of p.items) { consumePool(team, item); await grantItem(gid, uid, item); msgs.push(`${itemIcon(item.name)}${item.name}×${item.count || 1}`) }; return msgs }
 export async function settleTeamNow (st, team, gid) {
+  if (team.kind === 'fake') refreshFakeTeamName(gid, team)
   const plan = planSplit(team); const msgs = []
   if (team.kind === 'player') {
     for (const p of plan) {
@@ -1734,11 +1832,12 @@ export async function settleTeamNow (st, team, gid) {
 export function scheduleNext (st, now, cfg) { const first = cfg.first_spawn_hours || [3, 18]; const next = cfg.next_spawn_hours || [2, 12]; if (now - st.cycleStart >= (cfg.cycle_hours || 24) * 3600000 || st.spawnCount >= (cfg.spawn_per_cycle || 3)) { st.cycleStart = now; st.spawnCount = 0; st.nextSpawn = now + randRange(first) * 3600000 } else { st.spawnCount++; st.nextSpawn = now + randRange(next) * 3600000 }; return st.nextSpawn }
 /* ---------- 出口围剿(公开秘境探索最后5分钟): 全队表态 → 围剿方随机混战 / 溜走方择机突围 ---------- */
 /** 进入围剿: 广播由调用方发; 返回待推送表态菜单的玩家队列表(伪玩家队按性格立即表态) */
-export function beginAmbush (st, gid, now) {
+export async function beginAmbush (st, gid, now) {
   st.ambushAt = now
   st.ambushRound = 0
   st.ambushChoiceEnd = now + 45000 // 表态宽限期: 45秒内回复菜单, 之后未表态才代选(时间压缩)
   const pending = []
+  for (const t of Object.values(st.teams)) if (!t.dead && t.entered !== false && t.members?.length) await refreshTeamPower(gid, t)
   for (const t of Object.values(st.teams)) {
     if (t.dead || !t.members.length || t.entered === false) continue
     /* 撤退阶段不再推进探索节点 */
@@ -1747,23 +1846,21 @@ export function beginAmbush (st, gid, now) {
       if (targetId && st.teams[targetId] && st.teams[targetId].engagedBy === t.id) delete st.teams[targetId].engagedBy
     }
     t.node = null; t.pendingDisposal = null
-    if (t.kind === 'fake') { t.ambush = fakeAmbushChoice(st, t); continue }
+    if (t.kind === 'fake') { t.ambush = fakeAmbushChoice(st, gid, t); continue }
     t.ambush = null
     t.ambushNode = { type: 'ambush', title: '⚔️ 出口围剿', text: '各队正向出口聚集。请选择去留。', choices: [{ n: 1, label: '留守围剿（胜者夺取败者30%战利品）' }, { n: 2, label: '突围离场（失败损失30%战利品）' }] }
     pending.push({ team: t, node: t.ambushNode })
   }
   return pending
 }
-/** 伪玩家队按性格自动表态: 好斗/嗜杀/魔道/贪玩 → 围剿; 平和/善良/懒散 → 溜走 */
-function fakeAmbushChoice (st, team) {
+/** 保留性格差异，但伤重、收获丰厚或场上存在强敌时优先离场。 */
+function fakeAmbushChoice (st, gid, team) {
   try {
-    const persons = currentFakePersons(String(st.gid || ''), team)
-    const p = persons.find(x => x.name === team.leader) || persons[0]
+    const p = fakeTeamActor(gid, team)
     if (!p) return 'flee'
-    if (p.path === '魔道' || p.trait === '嗜杀' || p.trait === '好斗' || p.act === '贪玩') return 'fight'
-    if (p.trait === '平和' || p.trait === '善良' || p.act === '懒散') return 'flee'
-    return 'fight'
-  } catch (err) { return 'fight' }
+    const opponents = realmOpponents(st, team).filter(t => !realmTeamRelation(gid, team, t).friendly).map(t => ({ team: t, power: t.combatPower }))
+    return realmNpcAmbush(team, p, team.combatPower, opponents)
+  } catch (err) { return 'flee' }
 }
 /** 玩家超时未表态代选: 战力 ≥ 全场其它队均值 → 围剿, 否则溜走 */
 async function autoPlayerAmbush (st, gid, team) {
@@ -1777,12 +1874,7 @@ async function autoPlayerAmbush (st, gid, team) {
 }
 /** 队伍当前战力: 玩家=成员战力×powerBoost(受伤递减), 伪玩家=成员战力×(1-受伤) */
 async function ambushPower (gid, team) {
-  if (team.kind === 'fake') {
-    const persons = currentFakePersons(gid, team)
-    return Math.max(1, Math.round(persons.reduce((s, p) => s + personPower(p), 0) * Math.max(0.2, 1 - (team.injured || 0) * 0.12)))
-  }
-  const profiles = await teamProfiles(gid, team)
-  return Math.max(1, Math.round(profiles.reduce((s, p) => s + (Number(p.power) || 0), 0) * (team.powerBoost || 1)))
+  return refreshTeamPower(gid, team)
 }
 /** 按比例从队伍池子取(队伍级抢夺, 与个人贡献无关) */
 function takePoolShare (team, rate) {
@@ -1816,6 +1908,8 @@ function shareLoot (teams, loot) {
 }
 /** 队伍离场: 释放他人遭遇引用, 删除队伍, 伪玩家成员回世界 */
 function removeAmbushTeam (st, gid, team) {
+  releaseNodeTarget(st, team, team.node)
+  for (const other of Object.values(st.teams || {})) if (other.engagedBy === team.id) delete other.engagedBy
   for (const o of Object.values(st.teams || {})) {
     const tid = o.node && o.node.data && o.node.data.target
     if (tid === team.id) releaseNodeTarget(st, o, o.node)
@@ -1837,8 +1931,13 @@ async function meleeFight (st, gid, a, b) {
   const pa = await ambushPower(gid, a); const pb = await ambushPower(gid, b)
   const winRate = guardWinRate(pa, pb)
   const win = Math.random() * 100 < winRate
+  const receipt = `realm-melee:${st.realmId || st.startAt}:${st.ambushRound}:${a.id}:${b.id}`
+  await wearRealmTeam(st, gid, a, receipt, win ? 2 : 4)
+  await wearRealmTeam(st, gid, b, receipt, win ? 4 : 2)
   const winner = win ? a : b; const loser = win ? b : a
-  const msgs = [`⚔️ ${a.name}（${pa}）对阵${b.name}（${pb}）· 前者胜率${winRate}%\n${winner.name}获胜。`]
+  const msgs = [a.kind === 'fake' && b.kind === 'fake'
+    ? `⚔️ 【${a.name}】与【${b.name}】在出口交锋，【${winner.name}】击退了对手。`
+    : `⚔️ ${a.name}（${pa}）对阵${b.name}（${pb}）· 前者胜率${winRate}%\n${winner.name}获胜。`]
   const loot = takePoolShare(loser, AMBUSH_TAKE)
   const got = []
   for (const item of loot.items) { addPoolItem(winner, item); got.push(item) }
@@ -1868,11 +1967,14 @@ async function meleeRound (st, gid, now) {
   const msgs = [`⚔️ 出口围剿·第 ${st.ambushRound} 轮混战`]
   const fighters = Object.values(st.teams).filter(t => t.ambush === 'fight' && !t.dead && t.members.length)
   const order = shuffle(fighters.slice())
-  for (let i = 0; i + 1 < order.length; i += 2) {
-    const r = await meleeFight(st, gid, order[i], order[i + 1])
+  while (order.length) {
+    const a = order.shift()
+    const index = order.findIndex(b => !(a.kind === 'fake' || b.kind === 'fake') || !realmTeamRelation(gid, a, b).friendly)
+    if (index < 0) { msgs.push(a.kind === 'fake' ? `【${a.name}】守在出口，暂未与人交手。` : `🌀 ${a.name} 本轮未交战`); continue }
+    const b = order.splice(index, 1)[0]
+    const r = await meleeFight(st, gid, a, b)
     msgs.push(...r.msgs)
   }
-  if (order.length % 2) msgs.push(`🌀 ${order[order.length - 1].name} 本轮未交战`)
   if (!fighters.length) msgs.push('🌫️ 出口已无围剿者')
   return msgs
 }
@@ -1880,21 +1982,32 @@ async function meleeRound (st, gid, now) {
 async function tryFleeRound (st, gid, now) {
   const msgs = []
   const fighters = Object.values(st.teams).filter(t => t.ambush === 'fight' && !t.dead && t.members.length)
-  let guardPower = 0
-  for (const f of fighters) guardPower += await ambushPower(gid, f)
   const fleers = Object.values(st.teams).filter(t => t.ambush === 'flee' && !t.dead && t.members.length)
   for (const t of fleers) {
+    const guards = fighters.filter(f => !(t.kind === 'fake' || f.kind === 'fake') || !realmTeamRelation(gid, t, f).friendly)
+    let guardPower = 0
+    for (const guard of guards) guardPower += await ambushPower(gid, guard)
     const my = await ambushPower(gid, t)
     const winRate = guardWinRate(my, guardPower)
-    if (Math.random() * 100 < winRate) {
+    const escaped = Math.random() * 100 < winRate
+    if (guards.length) {
+      const receipt = `realm-breakout:${st.realmId || st.startAt}:${st.ambushRound}:${t.id}`
+      await wearRealmTeam(st, gid, t, receipt, escaped ? 2 : 4)
+      for (const guard of guards) await wearRealmTeam(st, gid, guard, receipt, 2)
+    }
+    if (escaped) {
       const got = await settleTeamNow(st, t, gid)
-      msgs.push(`🕊️ 【${t.name}】突围成功，已结算离场${got.msgs.length ? `（${got.msgs.join('、')}）` : ''}。`)
+      msgs.push(t.kind === 'fake'
+        ? `🕊️ 【${t.name}】突围成功，带着收获离开秘境${got.msgs.length ? `（${got.msgs.join('、')}）` : ''}。`
+        : `🕊️ 【${t.name}】突围成功，已结算离场${got.msgs.length ? `（${got.msgs.join('、')}）` : ''}。`)
       removeAmbushTeam(st, gid, t)
     } else {
       const loot = takePoolShare(t, AMBUSH_TAKE)
-      const gotTxt = shareLoot(fighters, loot)
+      const gotTxt = shareLoot(guards, loot)
       await settleTeamNow(st, t, gid)
-      msgs.push(`🚨 【${t.name}】突围失败，损失30%战利品${gotTxt.length ? `（${gotTxt.join('、')}）` : ''}，剩余战利品已结算离场`)
+      msgs.push(t.kind === 'fake'
+        ? `🚨 【${t.name}】突围失败，被截去30%战利品${gotTxt.length ? `（${gotTxt.join('、')}）` : ''}，带着剩余收获退出秘境。`
+        : `🚨 【${t.name}】突围失败，损失30%战利品${gotTxt.length ? `（${gotTxt.join('、')}）` : ''}，剩余战利品已结算离场`)
       removeAmbushTeam(st, gid, t)
     }
   }
@@ -1903,6 +2016,11 @@ async function tryFleeRound (st, gid, now) {
 /** 围剿阶段每分钟推进: 未表态代选 → 混战一轮 → 溜走择机 */
 export async function processAmbushRound (st, gid, now) {
   const msgs = []
+  for (const t of Object.values(st.teams)) if (!t.dead && t.members.length && t.entered !== false) await refreshTeamPower(gid, t)
+  for (const t of Object.values(st.teams)) if (t.kind === 'fake' && !t.dead && t.ambush === 'fight' && fakeAmbushChoice(st, gid, t) === 'flee') {
+    t.ambush = 'flee'
+    msgs.push(`【${t.name}】收拢战利品，退出围剿。`)
+  }
   const choiceEnd = st.ambushChoiceEnd || now
   for (const t of Object.values(st.teams)) {
     if (t.kind !== 'player' || t.dead || !t.members.length || t.ambush || !t.ambushNode) continue

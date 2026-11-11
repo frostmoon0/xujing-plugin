@@ -18,11 +18,12 @@ import {
   TERRAINS, DIFFS, BARRIERS, activeRealmGroups, partyIdOf, partyInfoOf,
   spawnRealm, attackBarrier, fakeAttackBarrier, breakBarrier, stopBarrierAuto,
   enterRealm, leaveTeam, teamOf, advanceTeams, advanceFakeArrivals, driveFakeTeams, syncPlayerTeam,
-  resolveNode, resolveDisposal, menuText, rollEvent, applyEvent, settleAll, actionDelay, REALM_QUALITY_WEIGHTS, planSplit, fmtRewards,
+  resolveNode, resolveDisposal, menuText, rollEvent, applyEvent, settleAll, actionDelay, REALM_QUALITY_WEIGHTS, planSplit, fmtRewards, refreshRealmNode,
   isNight, reconcileFakeBusy, withRealmLock, autoPickForPlayer, beginAmbush, processAmbushRound, replaceRealmPlayerIds
 } from '../../components/realm_data.js'
 import { SECRET_KEY, consumeItem, addItem, QUALITY, itemIcon } from '../../components/equip_data.js'
-import { getFake, withFakeLock } from '../../components/fake_data.js'
+import { getFake, sectName, withFakeLock } from '../../components/fake_data.js'
+import { realmNpcTeamIdentity } from '../../components/realm_narrative.js'
 import { forceLock, isCurrent, unlock, currentInteract } from '../../components/interact.js'
 import { guardActionLocked } from '../../components/action_lock.js'
 import { textToImg } from '../../components/common-lib/reply-img.js'
@@ -101,16 +102,23 @@ async function teamRows (st, gid) {
     let action
     if (t.node) action = t.node.title
     else if (t.arrivalAt && Date.now() < t.arrivalAt) action = `🛣️ 赶路（约${Math.max(1, Math.ceil((t.arrivalAt - Date.now()) / 60000))}分钟后到达）`
-    else if (t.kind === 'fake' && st.phase === 'barrier') action = '⚔️ 持续攻击屏障（每20秒）'
-    else if (t.kind === 'fake' && t.entered === false) action = '🚪 待入场'
+    else if (t.kind === 'fake' && st.phase === 'barrier') action = '⚔️ 正在破除入口禁制'
+    else if (t.kind === 'fake' && t.entered === false) action = '🚪 守在入口，等待入境'
+    else if (t.kind === 'fake' && t.ambush === 'fight') action = '守住出口，留意过往修士'
+    else if (t.kind === 'fake' && t.ambush === 'flee') action = '收拢行装，寻找离场时机'
+    else if (t.kind === 'fake' && t.injured) action = '调息疗伤，准备继续探路'
+    else if (t.kind === 'fake' && t.hidden) action = '隐匿气息，继续探路'
+    else if (t.kind === 'fake') action = '稍作休整，准备继续深入'
     else action = '⏳ 等待行动'
     let name = t.name
-    let tag = t.kind === 'fake' ? '伪玩家' : `${(t.members || []).length}人`
+    let tag = `${(t.members || []).length}人`
+    let members = ''
     if (t.kind === 'fake') {
-      name = (t.members || []).map(n => {
-        const p = fakeWorld.roster && fakeWorld.roster[n]
-        return p ? `${n}@${regionNameOf(p.loc)}` : n
-      }).join('、')
+      const persons = (t.members || []).map(n => fakeWorld.roster?.[n] || { name: n })
+      const identity = realmNpcTeamIdentity(persons, { leader: t.leader, sectNameOf: sid => sectName(fakeWorld, sid) })
+      name = identity.name
+      tag = persons.length === 1 ? '独行' : `${identity.sectName ? '同门' : '结伴'} · ${persons.length}人`
+      if (persons.length > 1) members = `同行：${persons.map(p => p.name).join('、')}`
     }
     const lootPlan = planSplit(t)
     const memberLoot = (t.members || []).map(uid => {
@@ -119,7 +127,7 @@ async function teamRows (st, gid) {
       const label = t.kind === 'fake' ? (fakeWorld.roster?.[uid]?.name || '无名散修') : memberNameOf(memberNames, uid)
       return `${label}：${items.length ? fmtRewards(items) : '暂无收获'}`
     }).join('；')
-    rows.push({ name, tag, kind: t.kind, action, loot: memberLoot || '暂无收获' })
+    rows.push({ name, tag, members, kind: t.kind, action, loot: memberLoot || '暂无收获' })
   }
   return rows
 }
@@ -197,6 +205,7 @@ function buildRealmText (data) {
     if (!r.teams.length) { lines.push('👥 场内暂无队伍'); continue }
     for (const t of r.teams) {
       lines.push(`· ${t.name}（${t.tag}）—— ${t.action}`)
+      if (t.members) lines.push(`  ${t.members}`)
       lines.push(`  🎁 当前收获：${t.loot}`)
     }
   }
@@ -488,6 +497,7 @@ async function resumeNightChoices (st, gid) {
     syncPlayerTeam(st, gid, t)
     const node = t.ambushNode || t.node
     if (!node) continue
+    if (node.type === 'beast' || node.type === 'trial') await refreshRealmNode(st, gid, t, node)
     await forceLock(gid, t.leader, 'realm')
     await notifyAt(gid, t.leader, `🌅 探索已恢复，倒计时已顺延。请继续选择：\n${menuText(node)}`)
   }
@@ -509,7 +519,7 @@ async function processExplore (st, gid, cfg, now, extra) {
   /* 出口围剿(仅公开秘境): 探索最后5分钟触发, 不再推进探索节点 */
   if (!st.private) {
     if (!st.ambushAt && now >= st.endAt - AMBUSH_MINUTES * 60000) {
-      const pending = beginAmbush(st, gid, now)
+      const pending = await beginAmbush(st, gid, now)
       sendToGroup(gid, `⚔️ ${st.title} 出口围剿开始。\n队长选择留守围剿或突围离场；突围失败将损失30%本场战利品。`)
       for (const p of pending) { await forceLock(gid, p.team.leader, 'realm'); notifyAt(gid, p.team.leader, menuText(p.node)) }
       if (st.private) savePrivateRealm(st, gid)

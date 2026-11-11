@@ -68,10 +68,10 @@ test('伪玩家没有魂石不会进万魂窟', () => {
   Math.random = () => 0
   try {
     const noStone = { roster: { 甲: make('甲'), 乙: make('乙') }, major: [], minor: [], byPerson: {}, bySect: {}, fakeCaves: [] }
-    fakeCaveTick(noStone, 'g', Date.now())
+    fakeCaveTick(noStone, 'g', +new Date(2026, 10, 7, 12))
     assert.equal(noStone.fakeCaves.length, 0)
     const withStone = { roster: { 甲: make('甲', 2), 乙: make('乙', 2) }, major: [], minor: [], byPerson: {}, bySect: {}, fakeCaves: [] }
-    fakeCaveTick(withStone, 'g', Date.now())
+    fakeCaveTick(withStone, 'g', +new Date(2026, 10, 7, 12))
     assert.equal(withStone.fakeCaves.length, 1)
     assert.equal(withStone.roster.甲.bag.items.魂石.count, 1)
     assert.equal(withStone.roster.乙.bag.items.魂石.count, 1)
@@ -83,7 +83,7 @@ test('伪玩家魂石耗尽会自动退出万魂窟', () => {
   const old = Math.random
   Math.random = () => 0
   try {
-    const t = Date.now()
+    const t = +new Date(2026, 10, 7, 12)
     const f = { roster: { 甲: make('甲'), 乙: make('乙') }, major: [], minor: [], byPerson: {}, bySect: {}, fakeCaves: [] }
     fakeCaveTick(f, 'g', t)
     assert.equal(f.fakeCaves.length, 1)

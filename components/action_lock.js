@@ -15,6 +15,7 @@ import { captiveOf, rescuingOf, isSectWarParticipant } from './sect_system.js'
 import { dynastyReadActive } from './dynasty_data.js'
 import { getFake } from './fake_data.js'
 import { playerInRealm } from './realm_data.js'
+import { playerInTaichu } from './taichu_presence.js'
 
 /** 玩家当前是否处于"禁止其他动作"的锁定状态(洗劫/逃亡/天牢/伏击/讨伐/万魂窟/失魂/界壁跨越/登仙令/宗门被俘/营救/屠城读阵/宗门攻防战/遗蜕秘境)
  *  仅用于动作类处理器前置复查; 万魂窟内合法动作(窟内战斗/商人)与遗蜕秘境内的秘境数字决策由各自处理器单独放行,
@@ -25,6 +26,8 @@ export async function isPlayerActionLocked (gid, uid, opts = {}) {
   uid = String(uid || '')
   if (!gid || !uid) return false
   const battleFree = !!opts.skipBattle
+  // 古墟数字仅自身处理器可豁免，避免其他已打开菜单绕过副本锁。
+  if (!battleFree && !opts.skipTaichu && playerInTaichu(gid, uid)) return true
   // skipToken 仅供持令旅行，skipCave 仅供窟内操作；均不豁免天牢/被俘/失魂等惩罚。
   try {
     /* 遗蜕秘境中(公开/专属, 屏障/探索阶段): 不能分心逛街/跨区/换队等外部动作 */

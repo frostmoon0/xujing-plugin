@@ -1,4 +1,6 @@
 import { withGameLock } from '../../components/game_lock.js'
+import { playerInTaichu } from '../../components/taichu_presence.js'
+import { recoverTaichuPlayerTransactions } from '../../components/taichu_player.js'
 /*yunzai*/
 import plugin from '../../../../lib/plugins/plugin.js'
 /*bot*/
@@ -105,6 +107,8 @@ class YuePlugin extends plugin {
       /* 商店入口不是纯查看: dangeShow/qigeShow/cangbaogeShow 会开启购买交互(裸数字可买),
        * 放入 VIEW_METHODS 会让洗劫/伏击/讨伐/万魂/天牢/战争等锁定状态都能"开商店→数字购买"绕过锁 → 移出白名单 */
       const WANHUN_RECOVERY = new Set(['wanhunPanel', 'caveStatus', 'takePill', 'rescue', 'wanhunStatus'])
+      for (const method of ['taichuGuide', 'taichuRecipes', 'taichuStatus']) VIEW_METHODS.add(method)
+      const TAICHU_METHODS = new Set(['taichuAct', 'taichuPick', 'taichuLeave', 'taichuClaim', 'taichuPatch', 'taichuSupply'])
       return new Proxy(this, {
         get (target, prop, receiver) {
           // 只拦截 rule 中声明的指令方法, 其余属性(rule/event/priority/name等)原样返回
@@ -116,6 +120,8 @@ class YuePlugin extends plugin {
               const orig = v.bind(target)
               const wrapped = async (...args) => withGameLock(args[0]?.group_id, async () => {
                 const e = args[0]
+                // 先完成已接受的扣费/背包/副本检查点，再允许其他玩法修改同一账户。
+                if (e?.group_id) await recoverTaichuPlayerTransactions(e.group_id)
                 // 0. 全角数字转半角(中文输入法常把数字打成全角, 统一转半角保证所有数字参数解析正常)
                 if (e && typeof e.msg === 'string' && /[０-９]/.test(e.msg)) {
                   e.msg = e.msg.replace(/[０-９]/g, d => String.fromCharCode(d.charCodeAt(0) - 0xFEE0))
@@ -313,6 +319,10 @@ class YuePlugin extends plugin {
                       return true
                     }
                   } catch (err) {}
+                }
+                if (e?.group_id && !VIEW_METHODS.has(prop) && !TAICHU_METHODS.has(prop) && !SELF_ACTION_METHODS.has(prop) && !isChoiceMsg && playerInTaichu(e.group_id, e.user_id)) {
+                  await e.reply('你正在太初古墟中探索，请先 #撤离古墟；#古墟状态 查看当前节点。')
+                  return true
                 }
                 // 4.5 活跃度统计(供三阁动态补货): 有效互动计入该群, 玩的人越多货越多
                 try {

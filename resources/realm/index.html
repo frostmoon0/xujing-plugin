@@ -67,6 +67,7 @@
           <span class="realm-team-name">{{$value.name}}</span>
           <span class="realm-team-tag {{$value.kind}}">{{$value.tag}}</span>
           <span class="realm-team-action">{{$value.action}}</span>
+          {{if $value.members}}<span class="realm-team-members">{{$value.members}}</span>{{/if}}
           <span class="realm-team-loot">🎁 {{$value.loot}}</span>
         </div>
         {{/each}}

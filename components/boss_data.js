@@ -1,3 +1,4 @@
+import { wearPlayerTaichu, wearNpcTaichu } from './taichu_combat.js'
 /* ============================================================
  * 世界Boss系统 - 数据与核心逻辑
  * 生成: 繁荣度倒数3名大区随机 / 每次1个 / 2天周期≥1≤3次
@@ -9,7 +10,7 @@ import fs from 'fs'
 import { Plugin_Name, Save_Path } from './plugin.js'
 import xujing_data from './xujing_data.js'
 import { REGIONS, REGION_KEYS, getWorld, getLoc, regionNameOf, bossOf } from './world_data.js'
-import { getBuffs, calcDamage, fightWinRate } from './fight.js'
+import { getBuffs, calcDamage, calcCombatPower, absoluteWinRate } from './fight.js'
 import { getBag, addItem, itemIcon, yaodanName } from './equip_data.js'
 import { DAILY_RANDOM_SPAWN_MIN, DAILY_RANDOM_SPAWN_MAX } from './spawn_schedule.js'
 
@@ -351,14 +352,18 @@ export async function spawnBoss (st, gid, region = null, respawn = false) {
 
 /* ---------- 攻击(单人一次伤害) ---------- */
 export async function attackHit (st, uid, gid) {
+  if (!(Number(st.hp) > 0)) return { dmg: 0, level: 0 }
   const battle = await xujing_data.getQQYUserBattle(uid, null, false, `${gid}.json`)
   const level = Number(battle[uid] && battle[uid].level) || 0
   const bag = getBag(uid, gid)
   const buff = await getBuffs(uid, gid)
-  const { dmg } = calcDamage(level, bag, 0.15, buff, gid, uid)
+  const rolled = calcDamage(level, bag, 0.15, buff, gid, uid)
+  const dmg = Math.min(st.hp, Math.max(0, rolled.dmg))
   st.damage[String(uid)] = (st.damage[String(uid)] || 0) + dmg
   st.attackGid[String(uid)] = String(gid)
   st.hp = Math.max(0, st.hp - dmg)
+  // 每次现世整场只扣一次；20秒自动连击复用本次Boss结束时间作为回执。
+  if (dmg > 0) wearPlayerTaichu(gid, uid, `boss:${st.end}:${st.typeName}`, 3)
   return { dmg, level }
 }
 
@@ -426,6 +431,7 @@ export function startToken (st, region) {
 /** 第一个抢到(须与登仙令掉落同大区) */
 export function firstGrab (st, uid, gid) {
   if (!st.token) return { ok: false, msg: `当前没有现世的${itemIcon('登仙令')}登仙令~` }
+  if (!(Number(st.token.end) > Date.now())) return { ok: false, msg: '本轮登仙令争夺已结束。' }
   if (st.token.holder) return { ok: false, msg: `${itemIcon('登仙令')}登仙令已被他人夺得，输入 #抢夺登仙令 @他 继续抢夺！` }
   if (st.token.region) {
     const w = getWorld(gid)
@@ -439,6 +445,7 @@ export function firstGrab (st, uid, gid) {
 export async function stealGrab (st, challengerUid, gid) {
   const t = st.token
   if (!t || !t.holder) return { ok: false, msg: `当前没有可抢夺的${itemIcon('登仙令')}登仙令~` }
+  if (!(Number(t.end) > Date.now())) return { ok: false, msg: '本轮登仙令争夺已结束，归属已确定。' }
   if (String(t.holder) === String(challengerUid)) return { ok: false, msg: `${itemIcon('登仙令')}登仙令就在你手上，抢什么~` }
   if ((t.excluded || []).includes(String(challengerUid))) return { ok: false, msg: '你已抢夺失败过一次，无缘再争此令~' }
   const holderUid = t.holder
@@ -453,6 +460,9 @@ export async function stealGrab (st, challengerUid, gid) {
   const powerFactor = Math.max(0, TOKEN_HOLDER_POWER - TOKEN_HOLDER_POWER_DROP * (Number(t.defended) || 0))
   const holderWin = winChance(hLevel, cLevel, holderUid, challengerUid, hb, cb, gid, powerFactor)
   const challengerWin = Math.random() * 100 >= holderWin
+  const receipt = `boss-token:${t.end}:${holderUid}:${challengerUid}:${t.defended || 0}`
+  wearPlayerTaichu(gid, holderUid, receipt, challengerWin ? 4 : 2)
+  wearPlayerTaichu(gid, challengerUid, receipt, challengerWin ? 2 : 4)
   if (!challengerWin) {
     /* 持令者守住: 战力再削5%(累积), 挑战者失败进冷却 */
     t.defended = (Number(t.defended) || 0) + 1
@@ -488,7 +498,9 @@ async function levelOf (uid, gid) {
 }
 /** 抢夺胜率(持令者buff×powerFactor) */
 function winChance (hLevel, cLevel, holderUid, challengerUid, hb, cb, gid, powerFactor) {
-  const mb = Object.assign({}, hb, { atk: (hb.atk || 1) * (powerFactor || 1) })
-  const { win } = fightWinRate(hLevel, cLevel, holderUid, challengerUid, 8, mb, cb, gid)
-  return win
+  const holder = calcCombatPower(hLevel, getBag(holderUid, gid), hb, gid, holderUid).power
+  const challenger = calcCombatPower(cLevel, getBag(challengerUid, gid), cb, gid, challengerUid).power
+  const factor = Number.isFinite(Number(powerFactor)) ? Math.max(0, Number(powerFactor)) : 1
+  const scaled = holder * factor
+  return scaled > 0 ? absoluteWinRate(scaled, challenger) : (challenger > 0 ? 0 : 50)
 }

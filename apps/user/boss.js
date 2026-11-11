@@ -332,12 +332,13 @@ async function bossTick (gid) {
         const w = getWorld(gid)
         let atkCnt = 0
         for (const uid of Object.keys(st.auto)) {
+          if (st.hp <= 0) break
           const rec = st.auto[uid]
           if (!rec || !rec.gid) continue
           if (getLoc(w, uid) !== st.region) continue//不在同大区, 待命
           const since = now - (rec.lastHit || 0)
           const hits = Math.min(3, Math.max(1, Math.floor(since / (ATTACK_CD * 1000))))
-          for (let i = 0; i < hits; i++) await attackHit(st, uid, rec.gid)
+          for (let i = 0; i < hits && st.hp > 0; i++) await attackHit(st, uid, rec.gid)
           rec.lastHit = now
           atkCnt++
         }

@@ -1,3 +1,4 @@
+import { wearPlayerTaichu, taichuBattleReceipt } from '../../components/taichu_combat.js'
 import { withGameLock } from '../../components/game_lock.js'
 /* ============================================================
  * 洗劫藏宝阁(隐藏玩法) - 指令与流程
@@ -102,6 +103,7 @@ async function guardCatch (gid, st) {
   const guardPower = guardPowerFor(pi.power, st.level, st.guardCount, st.inChange, rareBoost, guardMult)
   const dmgMe = makeDamageFn(pi.level, st.uid, 0.15, pi.buff, gid)
   const res = guardFight(pi.power, guardPower, dmgMe, guardDmgFn(guardPower), pi.buff.def)
+  wearPlayerTaichu(gid, st.uid, `raid-guard:${st.start}:${st.phase}:${st.lastBcast || st.start}`)
   return { caught: res.winner === 'opp', res, guardPower, myPower: pi.power }
 }
 
@@ -119,7 +121,7 @@ async function applyPenalty (gid, st, byGuard, attackerUid = '') {
     msgs.push(`你被搜走了：${deducted.map(d => `${lootIcon(d.name)}${d.name}×${d.count}`).join('、')}`)
     if (attackerUid) {
       // 被玩家击败: 战利品归攻击者
-      for (const d of deducted) addItem(attackerUid, d.name, d.count, null, gid)
+      for (const d of deducted) addItem(attackerUid, d.name, d.count, d.attr || null, gid)
       const aname = await getNick(gid, attackerUid)
       msgs.push(`这些物品落入了 ${aname || attackerUid} 手中！`)
     }
@@ -369,6 +371,9 @@ export class raid extends plugin {
     const dmgOpp = makeDamageFn(tgt.level, tgtUid, 0.15, tgt.buff, gid)
     // defMe 应为攻击者自己的防御(受伤减免), 原先误传成对方的防御
     const result = fightBestOf5(win, { dmgMe, dmgOpp, defMe: atk.buff.def })
+    const wearReceipt = taichuBattleReceipt(e, 'raid-pvp')
+    wearPlayerTaichu(gid, atkUid, wearReceipt)
+    wearPlayerTaichu(gid, tgtUid, wearReceipt)
     const atkName = await getNick(gid, atkUid)
     const tgtName = await getNick(gid, tgtUid)
     if (result.winner === 'opp') {

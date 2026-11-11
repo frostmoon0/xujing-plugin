@@ -2,12 +2,13 @@ import { getWorld, sealBlocksTravel, DEFAULT_REGION } from '../world_data.js'
 import { personPower, fakeTravelTo, isInSectJail, isInRaidJail, isInSectMine } from '../fake_data.js'
 import { CFG, getVault, sectRegion } from './utils.js'
 import { warCaptiveOwner, warActorAvailable, recordWarExit } from './war_state.js'
+import { npcCanParticipate } from '../npc_action.js'
 
 /** 只生成计划，不扣钱、不改位置；通过后统一提交。 */
 export function planWarDeployment (f, gid, sid, region, candidates, count = 0, war = null, budget = null) {
   const available = Math.max(0, budget ?? (Number(getVault(f, sid)?.stones) || 0))
   const world = getWorld(gid)
-  const sorted = candidates.filter(p => p && p.alive && !p.realmBusy && !p.fakeTravel && p.status !== 'mine' && !p.mineOf && !isInSectJail(f, p.name) && !isInRaidJail(f, p.name) && !isInSectMine(f, p.name) && !warCaptiveOwner(f, 'fake', p.name) && warActorAvailable(f, 'fake', p.name, war))
+  const sorted = candidates.filter(p => npcCanParticipate(f, p) && warActorAvailable(f, 'fake', p.name, war))
     .sort((a, b) => Number((b.loc || DEFAULT_REGION) === region) - Number((a.loc || DEFAULT_REGION) === region) || personPower(b) - personPower(a))
   const units = []; let cost = 0
   for (const p of sorted) {
@@ -61,9 +62,7 @@ export function withHomeReserve (f, sid, candidates, war = null) {
   if (!s || s.owner) return candidates
   const home = s.region || 'center'
   const all = Object.values(f.roster || {}).filter(p => p.alive && p.sect === sid && p.status === 'sect')
-  const local = all.filter(p => (p.loc || 'center') === home && !p.realmBusy && !p.fakeTravel &&
-    !isInSectJail(f, p.name) && !isInRaidJail(f, p.name) && !isInSectMine(f, p.name) &&
-    !warCaptiveOwner(f, 'fake', p.name) && warActorAvailable(f, 'fake', p.name))
+  const local = all.filter(p => (p.loc || 'center') === home && npcCanParticipate(f, p) && warActorAvailable(f, 'fake', p.name))
   if (all.length < 3 || !local.length) return candidates
   const tai = new Set(f.sectMap?.[sid]?.taishang || [])
   if (local.some(p => tai.has(p.name) && !candidates.some(q => q.name === p.name))) return candidates

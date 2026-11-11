@@ -3,7 +3,10 @@
 // 被埋在下层的交互保留各自待选状态, 等回到栈顶再恢复; unlock 只摘除自己, 不影响他人
 // 用法: await forceLock(gid, uid, 'street') → {ok, prev, prevCN}; 完成后 await unlock(gid, uid, type)
 const TTL = 5 * 60//交互占用默认5分钟(与逛街/换装超时一致)
+// 太初沿用同一LIFO交互栈，不能抢占其他数字菜单。
 const TYPE_CN = { 'sect-war': '宗门战争', street: '逛街', break: '渡劫', equip: '换装', gift: '赠送', sell: '出售', go: '跨区', list: '上架', 'dismantle-color': '分解彩装', dismantle: '分解红装', 'wanhun-shop': '魔窟商人', 'wanhun-cave': '万魂窟', pet: '搜寻灵兽', realm: '秘境', 'craft-color': '合成彩装', 'craft-rainbow': '合成彩武', 'wanhun-craft': '万魂炼制', 'puppet-craft': '傀儡炼制', 'dynasty-siege': '王朝攻城', sellgf: '出售功法', ambush: '伏击处置' }
+
+TYPE_CN.taichu = '太初古墟'
 
 /** 交互 key(同旧实现, 不含 type: 一个用户在一个群只对应一个栈) */
 function iKey (gid, uid) {

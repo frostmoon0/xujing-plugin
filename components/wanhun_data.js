@@ -1,4 +1,6 @@
+import { wearPlayerTaichu, wearNpcTaichu } from './taichu_combat.js'
 import { caveNight, syncCaveNightClock } from './cave_clock.js'
+import { caveEnemyPower, caveEncounterDelay, GHOST_ENCOUNTER_CHANCE, CAVE_PROTECTION_MS, CAVE_LOST_MS } from './cave_rules.js'
 import { withGameLock } from './game_lock.js'
 import fs from 'fs'
 import path from 'path'
@@ -30,7 +32,6 @@ const SOUL_TRAIN_COST = 50
 const SOUL_TRAIN_ITEM = '无主幽魂'
 /* 按万魂幡阶位允许的副魂数: 5阶1个 / 7阶2个 / 9阶3个 */
 const DEPUTY_MAX_BY_RANK = [0, 0, 0, 0, 0, 1, 1, 2, 2, 3]
-const GHOST_ENCOUNTER_CHANCE = 0.08
 const UPGRADE = [
   null,
   { souls: 30, karma: 5 },
@@ -179,18 +180,14 @@ export function fmtMissing (missing) {
 function randomInt (min, max) { return min + Math.floor(Math.random() * (max - min + 1)) }
 function pick (arr) { return arr[Math.floor(Math.random() * arr.length)] }
 function now () { return Date.now() }
-/* 阴魂战力曲线:整体下调20%；80分钟约4万，之后每10分钟增加约8000。 */
-function caveEnemyPower (minutes) {
-  const elapsed = Math.max(0, Number(minutes) || 0)
-  const base = 500
-  const scale = power => Math.round(power * 0.8)
-  if (elapsed < 45) {
-    const progress = elapsed / 45
-    return scale(base + (35000 - base) * progress * progress)
-  }
-  if (elapsed < 60) return scale(35000 + (40000 - 35000) * (elapsed - 45) / 15)
-  if (elapsed < 80) return scale(40000 + (50000 - 40000) * (elapsed - 60) / 20)
-  return scale(50000 + (elapsed - 80) * 1000)
+/** 显示与结算读取同一份当前战力；遭遇只固定敌方，不固定玩家增益和伤势。 */
+async function caveChances (uid, gid, enemyPower) {
+  const battle = await xujing_data.getQQYUserBattle(uid, null, false, `${gid}.json`)
+  const bag = getBag(uid, gid)
+  const buffs = await getBuffs(uid, gid)
+  const power = calcCombatPower(Number(battle[uid]?.level) || 0, bag, buffs, gid, uid).power
+  const winChance = guardWinRate(power, enemyPower)
+  return { winChance, retreatChance: hasDingxianyou(bag) ? 100 : winChance }
 }
 
 /* 万魂窟掉落表统一由 cave_loot.js 提供(玩家/伪玩家同源), 此处只保留敌人名 */
@@ -511,8 +508,8 @@ export const Wanhun = {
       inCave: true,
       enteredAt,
       nightClockAt: enteredAt,
-      protectionUntil: protectedByStone ? enteredAt + 10 * 60 * 1000 : enteredAt,
-      nextEncounterAt: enteredAt + randomInt(30000, 120000),
+      protectionUntil: protectedByStone ? enteredAt + CAVE_PROTECTION_MS : enteredAt,
+      nextEncounterAt: enteredAt + caveEncounterDelay(),
       nextRealmDropAt: protectedByStone ? 0 : enteredAt + 60 * 1000,
       unprotected: !protectedByStone,
       pending: null,
@@ -559,18 +556,12 @@ export const Wanhun = {
         if (notify) notify(`🌫️ 一只无主幽魂在你眼前游荡！\n回复 1：吸收（获得${itemIcon(SOUL_TRAIN_ITEM)}${SOUL_TRAIN_ITEM}）\n回复 2：放走。`)
       } else {
         const power = caveEnemyPower(minutes)
-        const battle = await xujing_data.getQQYUserBattle(uid, null, false, `${gid}.json`)
-        const player = battle[uid] || {}
-        const bag = getBag(uid, gid)
-        const buffs = await getBuffs(uid, gid)
-        const playerPower = calcCombatPower(Number(player.level) || 0, bag, buffs, gid, uid).power
-        const chance = guardWinRate(playerPower, power)
-        const retreatChance = hasDingxianyou(getBag(uid, gid)) ? 100 : chance
+        const { winChance: chance, retreatChance } = await caveChances(uid, gid, power)
         const namePool = minutes >= 60 ? CAVE_ENEMY_NAMES.high : (minutes >= 30 ? CAVE_ENEMY_NAMES.mid : CAVE_ENEMY_NAMES.low)
         const name = pick(namePool)
         cave.pending = { id: `yin-${t}`, type: 'battle', name, power, winChance: chance, retreatChance, createdAt: t }
         changed = true
-        if (notify) notify(`🕯️ 阴魂来袭：${name}（战力约${power}）\n当前单局战斗胜率：${chance}%\n当前撤退成功率：${chance}%\n回复 1：战斗（胜利获得掉落，失败进入失魂）\n回复 2：撤退（成功无奖励，失败进入失魂）。`)
+        if (notify) notify(`🕯️ 阴魂来袭：${name}（战力约${power}）\n当前单局战斗胜率：${chance}%\n当前撤退成功率：${retreatChance}%\n回复 1：战斗（胜利获得掉落，失败进入失魂）\n回复 2：撤退（成功无奖励，失败进入失魂）。`)
       }
     }
     const left = cave.protectionUntil - t
@@ -581,7 +572,7 @@ export const Wanhun = {
     }
     if (cave.protectionUntil <= t && !cave.unprotected) {
       if (consumeItem(uid, '魂石', 1, null, gid)) {
-        cave.protectionUntil = t + 10 * 60 * 1000
+        cave.protectionUntil = t + CAVE_PROTECTION_MS
         u.lastWarningAt = 0
         changed = true
         if (notify) notify('🔹魂石自动消耗，万魂窟保护已续期10分钟。')
@@ -595,7 +586,7 @@ export const Wanhun = {
     if (cave.unprotected) {
       if (consumeItem(uid, '魂石', 1, null, gid)) {
         cave.unprotected = false
-        cave.protectionUntil = t + 10 * 60 * 1000
+        cave.protectionUntil = t + CAVE_PROTECTION_MS
         cave.nextRealmDropAt = 0
         u.lastWarningAt = 0
         changed = true
@@ -669,7 +660,8 @@ export const Wanhun = {
     if (u.lostInCave) return `失魂中：困在万魂窟内，只能使用 #服用${itemIcon('还魂丹')}还魂丹。${realmText}`
     if (cave.pending) {
       if (cave.pending.type === 'ghost') return `🌫️ 一只无主幽魂在你眼前游荡！\n回复 1：吸收（获得${itemIcon(SOUL_TRAIN_ITEM)}${SOUL_TRAIN_ITEM}）\n回复 2：放走。${realmText}`
-      return `万魂窟内已遇到【${cave.pending.name}】，战力约${cave.pending.power}。当前单局战斗胜率${cave.pending.winChance || '计算中'}%，撤退成功率${cave.pending.retreatChance || '计算中'}%。请发送 #万魂窟战、#万魂窟撤退，或回复1/2。${realmText}`
+      const chance = await caveChances(uid, gid, cave.pending.power)
+      return `万魂窟内已遇到【${cave.pending.name}】，战力约${cave.pending.power}。当前单局战斗胜率${chance.winChance}%，撤退成功率${chance.retreatChance}%。请发送 #万魂窟战、#万魂窟撤退，或回复1/2。${realmText}`
     }
     return `万魂窟探索${minutes}分钟，魂石保护还剩${protect}分钟，下一次阴魂即将出现。使用 #退出万魂窟 离开。${realmText}`
   },
@@ -687,7 +679,7 @@ export const Wanhun = {
     if (enemy.type === 'ghost') {
       if (action === 'absorb') addItem(uid, SOUL_TRAIN_ITEM, 1, null, gid)
       cave.pending = null
-      cave.nextEncounterAt = now() + randomInt(30000, 120000)
+      cave.nextEncounterAt = now() + caveEncounterDelay()
       cave.loot = cave.loot || {}
       cave.loot[SOUL_TRAIN_ITEM] = (cave.loot[SOUL_TRAIN_ITEM] || 0) + 1
       saveGroup(gid, data)
@@ -695,17 +687,13 @@ export const Wanhun = {
         ? `🌫️ 吸收成功！获得${itemIcon(SOUL_TRAIN_ITEM)}${SOUL_TRAIN_ITEM}×1。`
         : '🌫️ 你放走了幽魂，它飘散而去，没有留下任何东西。' }
     }
-    const battle = await xujing_data.getQQYUserBattle(uid, null, false, `${gid}.json`)
-    const p = battle[uid] || {}
-    const bag = getBag(uid, gid)
-    const buffs = await getBuffs(uid, gid)
-    const playerPower = calcCombatPower(Number(p.level) || 0, bag, buffs, gid, uid).power
+    const chances = await caveChances(uid, gid, enemy.power)
     if (action === 'retreat') {
-      const guaranteed = hasDingxianyou(bag)
-      const chance = guaranteed ? 100 : guardWinRate(playerPower, enemy.power)
+      const guaranteed = hasDingxianyou(getBag(uid, gid))
+      const chance = chances.retreatChance
       if (guaranteed || Math.random() * 100 < chance) {
         cave.pending = null
-        cave.nextEncounterAt = now() + randomInt(30000, 120000)
+        cave.nextEncounterAt = now() + caveEncounterDelay()
         saveGroup(gid, data)
         return { ok: true, msg: guaranteed
           ? '定仙游护佑生效！你从阴魂面前安全撤退（成功率100%），没有获得战利品。'
@@ -715,8 +703,9 @@ export const Wanhun = {
       saveGroup(gid, data)
       return { ok: true, lost: true, msg: `撤退失败（成功率${chance}%）！你被阴魂拖入深处，进入失魂状态，只能使用 #服用还魂丹。` }
     }
-    const chance = guardWinRate(playerPower, enemy.power)
+    const chance = chances.winChance
     const match = fightBestOf5(chance)
+    wearPlayerTaichu(gid, uid, `wanhun:${cave.enteredAt}:${enemy.id || enemy.createdAt}`, match.winner === 'me' ? 2 : 4)
     if (match.winner !== 'me') {
       u.lostInCave = true
       saveGroup(gid, data)
@@ -730,7 +719,7 @@ export const Wanhun = {
     /* 遗蜕古钥: 万魂窟战胜阴魂按彩级概率产, 每日每群最多2把 */
     try { await tryGiveSecretKey(gid, uid) } catch (err) { }
     cave.pending = null
-    cave.nextEncounterAt = now() + randomInt(30000, 120000)
+    cave.nextEncounterAt = now() + caveEncounterDelay()
     saveGroup(gid, data)
     return { ok: true, msg: `你战胜了【${enemy.name}】（单局胜率${chance}%）！获得：${Object.entries(rewards).map(([n, c]) => `${itemIcon(n)}${n}×${c}`).join('、')}` }
   },
@@ -754,7 +743,7 @@ export const Wanhun = {
     u.lostUntil = 0
     if (hadCaveTrap && u.cave?.inCave) {
       u.cave.pending = null
-      u.cave.nextEncounterAt = now() + randomInt(30000, 120000)
+      u.cave.nextEncounterAt = now() + caveEncounterDelay()
     }
     saveGroup(gid, data)
     return { ok: true, msg: hadCaveTrap && u.cave?.inCave
@@ -767,7 +756,7 @@ export const Wanhun = {
     if (!u.lostInCave || !u.cave?.inCave) return { ok: false, msg: '目标当前没有被困在万魂窟。' }
     u.lostInCave = false
     u.cave = null
-    u.lostUntil = now() + 10 * 60 * 60 * 1000
+    u.lostUntil = now() + CAVE_LOST_MS
     saveGroup(gid, data)
     return { ok: true, msg: `救援成功，目标已被送出万魂窟，但失魂状态还会持续10小时，期间不能行动。` }
   },

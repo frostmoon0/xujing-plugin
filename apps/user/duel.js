@@ -1,3 +1,4 @@
+import { wearPlayerTaichu, taichuBattleReceipt } from '../../components/taichu_combat.js'
 import { BotApi, AlemonApi, plugin } from '../../model/api/api.js'
 import fs from "fs";
 import command from '../../components/command.js'
@@ -150,6 +151,9 @@ export class duel extends plugin {//决斗
 
 		//一律五局三胜,管理员不加成(没有禁言系统的群也照常决斗)
 		const result = fightBestOf5(win, { dmgMe: myDmg, dmgOpp: oppDmg, defMe: myBuffs.def })
+        const wearReceipt = taichuBattleReceipt(e, 'duel')
+        wearPlayerTaichu(e.group_id, user_id, wearReceipt)
+        wearPlayerTaichu(e.group_id, user_id2, wearReceipt)
 		const canMute = !!(e.group && e.group.is_admin && typeof e.group.muteMember === 'function')
 		//越阶击败(爆冷)写入天下大事
 		try {

@@ -1,17 +1,28 @@
 import { warActorOwner, warCaptiveOwner } from './sect/war_state.js'
 import { absoluteWinRate, fightBestOf5 } from './fight.js'
+import { wearNpcTaichu } from './taichu_combat.js'
 
 const MINUTE = 60000
 export const NPC_CONFLICT_CD = 60 * MINUTE
 export const NPC_VICTIM_CD = 120 * MINUTE
 
-/** 日常主动行为统一资格；不剥夺在途/被俘成员的宗门身份。 */
-export function npcCanAct (f, p, now = Date.now()) {
+/** 身体与关押状态统一资格；参战时另行核对是否属于当前战争。 */
+export function npcInCave (f, p) {
+  return !!(p?.fakeCaveLost || (f.fakeCaves || []).some(c => (c.names || []).includes(p?.name)))
+}
+
+export function npcCanParticipate (f, p, now = Date.now(), { skipCave = false } = {}) {
   if (!p?.alive || p.realmBusy || p.fakeTravel || p.servantOf || p.mineOf || p.status === 'mine') return false
-  if (warActorOwner(f, 'fake', p.name) || warCaptiveOwner(f, 'fake', p.name)) return false
+  if (p.fakeCaveLost || (!skipCave && npcInCave(f, p))) return false
+  if ((Number(p.fakeLostUntil) || 0) > now || warCaptiveOwner(f, 'fake', p.name)) return false
   if (Object.values(f.sectMines || {}).some(xs => (xs || []).some(x => x?.name === p.name))) return false
   if (Object.values(f.sectJails || {}).some(xs => (xs || []).some(x => x?.name === p.name))) return false
   return !(f.raidJail || []).some(x => x?.name === p.name && x.until > now)
+}
+
+/** 日常主动行为不得同时占用宗门战争身份。 */
+export function npcCanAct (f, p, now = Date.now(), options = {}) {
+  return npcCanParticipate(f, p, now, options) && !warActorOwner(f, 'fake', p.name)
 }
 
 export function npcCanThreaten (f, p, now = Date.now()) {
@@ -25,7 +36,7 @@ export function npcCanBeTarget (f, p, actor, now = Date.now()) {
     (p.encounterSafeUntil || 0) <= now && (p.loc || 'center') === (actor?.loc || 'center')
 }
 
-/** 真实胜负先于资产与死亡；不修改背包、宗门、修为或人数。 */
+/** 真实胜负与装备损耗先于资产转移和死亡；宗门、修为或人数由调用方处理。 */
 export function resolveNpcEncounter (f, actors, target, powerOf, now = Date.now(), { lethal = false, vendetta = false } = {}) {
   const party = [...new Set(actors)].filter(Boolean)
   if (!party.length || party.some(p => !npcCanThreaten(f, p, now)) || !npcCanBeTarget(f, target, party[0], now) ||
@@ -38,6 +49,9 @@ export function resolveNpcEncounter (f, actors, target, powerOf, now = Date.now(
     return { ok: false, reason: 'outmatched' }
   }
   const won = fightBestOf5(absoluteWinRate(attack, defense)).winner === 'me'
+  const receipt = `npc-encounter:${f.gid || ''}:${now}:${party.map(p => p.name).sort().join(',')}:${target.name}`
+  for (const p of party) wearNpcTaichu(p, receipt, won ? 2 : 4)
+  wearNpcTaichu(target, receipt, won ? 4 : 2)
   for (const p of [...party, target]) {
     p.lastFight = now
     p.dangerUntil = now + NPC_CONFLICT_CD

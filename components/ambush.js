@@ -1,4 +1,5 @@
-import { warActorOwner } from './sect/war_state.js'
+import { wearPlayerTaichu, wearNpcTaichu } from './taichu_combat.js'
+import { npcCanAct } from './npc_action.js'
 /* ============================================================
  * 伏击玩法 · 核心逻辑 (状态机)
  * #伏击 → 10分钟准备 → 0~30分钟随机触发事件
@@ -334,7 +335,7 @@ function heatAdd (f, loc) {
  *  myPw: 玩家当前战力, 用于类型匹配实力(肥羊=富且弱, 劫修=凶且强) */
 export function genPassers (f, loc, exclude = null, myPw = 0) {
   const ex = exclude || new Set()
-  const pool = Object.values(f.roster).filter(p => p && p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !p.servantOf && p.status !== 'mine' && !p.mineOf && (p.loc || DEFAULT_REGION) === loc && !ex.has(p.name))
+  const pool = Object.values(f.roster).filter(p => npcCanAct(f, p) && (p.loc || DEFAULT_REGION) === loc && !ex.has(p.name))
   if (!pool.length) return null
   const heat = heatOf(f, loc)
   /* 风声紧(≥3次) → 结伴概率翻倍(世界会躲落单) */
@@ -538,7 +539,7 @@ async function reactionInjury (f, gid, uid, targets, baseLevel = 2) {
 async function doFight (st, key, gid, uid, sneak) {
   const f = getFake(gid)
   const nick = await getNick(gid, uid)
-  const targets = st.names.map(n => f.roster[n]).filter(p => p && p.alive)
+  const targets = currentAmbushTargets(f, st)
   if (!targets.length) { await redis.del(key); return { ok: false, msg: '目标早已走远……' } }
   heatAdd(f, st.loc)
   const whoTxt = `【${st.names.join('、')}】`
@@ -554,6 +555,9 @@ async function doFight (st, key, gid, uid, sneak) {
   if (sneak) winRate = Math.min(MAX_WIN_RATE, winRate + 10)
   const win = Math.random() * 100 < winRate
   const rateTxt = `评估胜率约 ${Math.round(winRate)}%`
+  const wearReceipt = `ambush:${uid}:${st.startedAt}`
+  wearPlayerTaichu(gid, uid, wearReceipt, win ? 2 : 4)
+  for (const p of targets) wearNpcTaichu(p, wearReceipt, win ? 4 : 2)
   /* ---- 输 ---- */
   if (!win) {
     const rescuer = await servantRescue(gid, uid)
@@ -760,7 +764,7 @@ export async function startAmbush (gid, uid) {
   const f = getFake(gid)
   const w = getWorld(gid)
   const loc = getLoc(w, uid)
-  const pool = Object.values(f.roster).filter(p => p && p.alive && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !p.servantOf && p.status !== 'mine' && !p.mineOf && (p.loc || DEFAULT_REGION) === loc)
+  const pool = Object.values(f.roster).filter(p => npcCanAct(f, p) && (p.loc || DEFAULT_REGION) === loc)
   if (!pool.length) return { ok: false, msg: `${regionNameOf(loc)} 空无一人，无处可伏击~` }
   const st = { phase: 'prep', gid, uid, loc, startedAt: Date.now(), prepEnd: Date.now() + AMBUSH_PREP_MIN * 60000 }
   await redis.set(key, JSON.stringify(st), { EX: 3600 })
@@ -835,6 +839,12 @@ export async function ambushStatus (gid, uid) {
   return { ok: false, msg: '伏击状态异常~' }
 }
 
+function currentAmbushTargets (f, st) {
+  const targets = (st.names || []).map(n => f.roster[n]).filter(p => npcCanAct(f, p) && (p.loc || DEFAULT_REGION) === (st.loc || DEFAULT_REGION))
+  st.names = targets.map(p => p.name)
+  return targets
+}
+
 /** 玩家抉择: act = 'hit'(偷袭) | 'let'(放走) | 'talk'(现身试探) */
 export async function ambushAct (gid, uid, act) {
   const key = AMBUSH_KEY(gid, uid)
@@ -844,7 +854,7 @@ export async function ambushAct (gid, uid, act) {
   if (st.phase !== 'waiting') return { ok: false, msg: '现在没有待抉择的目标~' }
   const f = getFake(gid)
   const nick = await getNick(gid, uid)
-  const targets = st.names.map(n => f.roster[n]).filter(p => p && p.alive)
+  const targets = currentAmbushTargets(f, st)
   if (!targets.length) { await redis.del(key); return { ok: false, msg: '目标早已走远……' } }
   const whoTxt = `【${st.names.join('、')}】`
   /* ---- 放走: 不结怨, 对方感恩 ---- */
@@ -896,7 +906,12 @@ async function ambushDisposeUnlocked (gid, uid, action) {
   if (st.phase !== 'won') return { ok: false, msg: '当前没有待处置的猎物~' }
   const f = getFake(gid)
   const nick = await getNick(gid, uid)
-  const targets = st.names.map(n => f.roster[n]).filter(p => p && p.alive)
+  const targets = currentAmbushTargets(f, st)
+  if (!targets.length) {
+    await redis.del(key)
+    try { await unlock(gid, uid, 'ambush') } catch (err) { }
+    return { ok: false, msg: '猎物已离开当前大区或暂不可行动，伏击结束。' }
+  }
   const whoTxt = `【${st.names.join('、')}】`
   const reaction = st.reaction || 'beg'
   const kneel = reaction === 'kneel'
@@ -1087,7 +1102,13 @@ async function ambushTickOneUnlocked (st, now = Date.now()) {
     /* 超时未处置: 自动搜刮释放(诈降偷袭的目标直接放走, 免得反被偷袭) */
     try {
       const f = getFake(gid)
-      const targets = st.names.map(n => f.roster[n]).filter(p => p && p.alive)
+      const targets = currentAmbushTargets(f, st)
+      if (!targets.length) {
+        await redis.del(AMBUSH_KEY(gid, uid))
+        try { await unlock(gid, uid, 'ambush') } catch (err) { }
+        atPlayer(gid, uid, '\n猎物已离开当前大区或暂不可行动，伏击结束。')
+        return
+      }
       if (st.reaction !== 'feint') {
         let lootMoney = 0
         for (const p of targets) {

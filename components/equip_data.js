@@ -1,6 +1,9 @@
+import { VAULT_EQUIP_PRICES } from './sect/vault_rules.js'
 import fs from 'fs'
 import { writeJsonAtomic } from './json_store.js'
 import { Plugin_Name, Save_Path } from './plugin.js'
+import { TAICHU_EQUIPMENT, TAICHU_MATERIALS } from './taichu_data.js'
+import { createTaichuAttr, normalizeTaichuAttr, taichuEquipStats, taichuSetCount, fmtTaichuAttr, isTaichuEnabled } from './taichu_equipment.js'
 
 const bagpath = `${Save_Path}/bag`
 
@@ -140,6 +143,9 @@ export const EQUIP_TPL = {
 
 /** 新手初始装备 */
 export const STARTER_ITEMS = ['桃木剑', '花布冠', '素纱衣', '素纱裙', '素绣鞋', '白珠戒']
+
+// 可按名字识别和转移，禁止混入 Object.keys 构造的普通掉落、生产或随机彩装池。
+Object.defineProperties(EQUIP_TPL, Object.fromEntries(Object.entries(TAICHU_EQUIPMENT).map(([name, value]) => [name, { value, enumerable: false }])))
 
 /** 黄/红/彩品质属性随机范围(衔接:紫最高=黄最低,黄最高=红最低; 彩装=红装×3) */
 const RAND_ATK = { 5: [40, 120], 6: [120, 300], 7: [360, 900] }//武器攻击
@@ -320,6 +326,8 @@ export const MATERIAL_TPL = {
 
 /** 万魂窟专属材料: 仅由西域万魂窟掉落, 普通秘境/灵宝盒/藏宝阁不得产出 */
 export const WANHUN_ONLY_MATS = new Set(['万魂幡残卷', '阴魂砂', '游魂骨', '鬼火草', '幽冥木', '摄魂铁', '阴魂石', '玄阴玉', '镇魂晶', '血煞髓', '万魂帝晶'])
+
+Object.defineProperties(MATERIAL_TPL, Object.fromEntries(Object.entries(TAICHU_MATERIALS).map(([name, value]) => [name, { value, enumerable: false }])))
 
 /** 妖丹阶数中文名(品质与阶数一致): 世界Boss掉落, 傀儡打造/每阶升级所需 */
 const YAODAN_CN = ['', '一', '二', '三', '四', '五', '六', '七']
@@ -522,7 +530,7 @@ export function taxSect() {
 }
 
 /** 宗门宝库装备贡献价：品质1~7；普通弟子通过灵石上供可逐步负担 */
-export const VAULT_EQUIP_CONTRIB = [0, 20, 40, 80, 120, 180, 260, 360]
+export const VAULT_EQUIP_CONTRIB = VAULT_EQUIP_PRICES
 export function vaultEquipContrib(name) {
   const q = EQUIP_TPL[name]?.quality || 0
   return VAULT_EQUIP_CONTRIB[q] || 0
@@ -546,6 +554,11 @@ export function equipSellPrice(name, attr) {
 
 /** 道具获得方式(未知则返回'未知'): 丹药-丹阁/配方台, 装备-器阁/新手礼包, 黄红暂未知 */
 export function getItemSource(name) {
+  if (TAICHU_EQUIPMENT[name]) return '太初古墟路线通关后，使用对应图谱、核心、旧装备胚子及跨玩法材料在天工坊打造'
+  if (TAICHU_MATERIALS[name]) {
+    if (name === '古墟补给' || name === '太初修补包') return '太初补给配方制作'
+    return name.endsWith('碎片') ? '太初古墟对应路线奖励，10碎片定向合成完整物品' : '太初古墟对应路线奖励或10枚对应碎片定向合成'
+  }
   if (name === '镇海珠') return '东海「镇海海眼」材料打造；拥有即生效，绑定不可赠送'
   if (name === '定仙游') return `${itemIcon('神游蛊')}神游蛊×1 + ${itemIcon('玄阴玉')}玄阴玉×5 + ${itemIcon('镇魂晶')}镇魂晶×5 + ${itemIcon('血煞髓')}血煞髓×5 合成`
   if (name === '无主幽魂') return '万魂窟探索中随机遇到幽魂 · 回复1吸收获得'
@@ -708,8 +721,31 @@ export function ensureBagShape (bag, options = {}) {
       raw.attr = fallback()
       changed = true
     }
+    if (TAICHU_EQUIPMENT[name]) {
+      const groups = raw.list?.length ? raw.list : [{ count: raw.count, attr: raw.attr }]
+      const split = []
+      for (const group of groups) {
+        for (let index = 0; index < group.count; index++) {
+          let attr = normalizeTaichuAttr(group.attr || fallback())
+          if (JSON.stringify(attr) !== JSON.stringify(group.attr)) changed = true
+          if (index > 0) { attr = structuredClone(attr); attr.taichu.id = createTaichuAttr({}).taichu.id; changed = true }
+          split.push({ count: 1, attr })
+        }
+      }
+      raw.list = split
+      if (split.length) raw.attr = split[0].attr
+    }
   }
   if (repairEquippedState(bag, options.removeEquippedFromItems !== false)) changed = true
+  for (const [part, name] of Object.entries(bag.equipped || {})) {
+    if (TAICHU_EQUIPMENT[name]) {
+      const normalized = normalizeTaichuAttr(bag.equippedAttr[part] || getItemAttr(null, name))
+      if (JSON.stringify(normalized) !== JSON.stringify(bag.equippedAttr[part])) {
+        bag.equippedAttr[part] = normalized
+        changed = true
+      }
+    }
+  }
   return changed
 }
 
@@ -784,14 +820,16 @@ export function saveBag(user_id, bag, gid = 'global') {
 }
 
 /** 计算穿戴总属性与战力 */
-export function getTotalAttr(bag) {
+export function getTotalAttr(bag, { enabled = isTaichuEnabled() } = {}) {
   let atk = 0, def = 0, hp = 0
   const equipped = bag.equipped || {}
   const equippedAttr = bag.equippedAttr || {}
+  const setCount = taichuSetCount(bag, { enabled })
   for (const [slot, name] of Object.entries(equipped)) {
     if (name && EQUIP_TPL[name]) {
       const ea = equippedAttr[slot]
-      const attr = (ea && Object.keys(ea).length) ? ea : getItemAttr(bag, name)
+      const raw = (ea && Object.keys(ea).length) ? ea : getItemAttr(bag, name)
+      const attr = TAICHU_EQUIPMENT[name] ? taichuEquipStats(raw, slot, setCount, { enabled }) : raw
       atk += attr.atk || 0
       def += attr.def || 0
       hp += attr.hp || 0
@@ -916,7 +954,7 @@ export function fmtEquip(name, count = 1, attr) {
   if (!t) return ''
   const q = QUALITY[t.quality]
   const text = attr ? fmtAttr(attr) : ''
-  return `${q.icon}${name}（${PARTS[t.type]}）${text}${count > 1 ? ` ×${count}` : ''}`
+  return `${q.icon}${name}（${PARTS[t.type]}）${text}${TAICHU_EQUIPMENT[name] ? fmtTaichuAttr(attr, t.type) : ''}${count > 1 ? ` ×${count}` : ''}`
 }
 
 /** 装备综合评分(用于同品质排序) */
@@ -927,19 +965,22 @@ function equipScore(attr) {
 /** 自动穿上背包中每个部位最好的装备,返回本次新穿上的装备名列表(穿上扣背包1件, 旧装备还回背包)
  *  修复: ①候选包含当前穿着的(防止已穿最好的却被背包次品替换=一键降级/来回换)
  *  ②同名多属性按最优属性组穿戴(不再固定取第一组) */
-export function autoEquipBest(bag) {
+export function autoEquipBest(bag, { enabled = isTaichuEnabled() } = {}) {
   bag.equipped = bag.equipped || {}
   bag.equippedAttr = bag.equippedAttr || {}
   const items = bag.items || {}
   const changed = []
+  const taichuEnabled = enabled
   for (const part of Object.keys(PARTS)) {
     /* 彩虹武器已装备时,不再自动替换该部位(成长型神兵由玩家手动穿脱) */
-    if (part === 'weapon' && isRainbowRef(bag.equipped[part])) continue
+    const rainbowEquipped = part === 'weapon' && isRainbowRef(bag.equipped[part])
+    if (rainbowEquipped && (!taichuEnabled || !Object.keys(items).some(name => TAICHU_EQUIPMENT[name]?.type === 'weapon' && items[name]?.count > 0))) continue
     /* 候选 = 背包该部位每件(按属性分组) + 当前穿着(已扣背包的那件) */
     const options = []
     for (const n of Object.keys(items)) {
       const t = EQUIP_TPL[n]
       if (!t || t.type !== part) continue
+      if (t.taichu && !taichuEnabled) continue
       const it = items[n]
       const groups = (it && Array.isArray(it.list) && it.list.length)
         ? it.list.map(g => ({ name: n, attr: g.attr || {}, count: g.count }))
@@ -953,13 +994,23 @@ export function autoEquipBest(bag) {
       const ea = bag.equippedAttr && bag.equippedAttr[part]
       cur = { name: curName, attr: (ea && Object.keys(ea).length) ? ea : getItemAttr(bag, curName), count: 1, equipped: true }
       options.push(cur)
+    } else if (rainbowEquipped) {
+      const rainbow = getRainbowByRef(bag, curName)
+      cur = { name: curName, attr: { atk: rainbow ? rainbowAtk(rainbow) : 0 }, count: 1, equipped: true }
+      options.push(cur)
     }
     if (!options.length) continue
     options.sort((a, b) => {
-      const qa = EQUIP_TPL[a.name].quality, qb = EQUIP_TPL[b.name].quality
-      if (qb !== qa) return qb - qa
-      const pa = attrPower(a.attr), pb = attrPower(b.attr)
+      // 含候选换装后的整套收益；损坏装备按零属性比较。
+      const score = option => {
+        if (!taichuEnabled) return attrPower(option.attr)
+        const trial = { ...bag, equipped: { ...bag.equipped, [part]: option.name }, equippedAttr: { ...bag.equippedAttr, [part]: option.attr } }
+        return getTotalAttr(trial, { enabled }).power
+      }
+      const pa = score(a), pb = score(b)
       if (pb !== pa) return pb - pa
+      const qa = EQUIP_TPL[a.name]?.quality || 7, qb = EQUIP_TPL[b.name]?.quality || 7
+      if (qb !== qa) return qb - qa
       /* 全等时优先当前穿着, 避免无意义换装 */
       if (a.equipped && !b.equipped) return -1
       if (b.equipped && !a.equipped) return 1
@@ -1004,6 +1055,21 @@ export function addItemToBag (bag, name, count = 1, attr = null, autoEquip = tru
   bag.items = bag.items || {}
   const tpl = EQUIP_TPL[name]
   const isEquip = !!tpl
+  if (tpl?.taichu) {
+    if (!Number.isSafeInteger(count)) return []
+    // 一件一个身份。接收交易/搜刮传入的完整attr时保留原ID、附魔及耐久。
+    for (let index = 0; index < count; index++) {
+      const base = Object.fromEntries(['atk', 'def', 'hp'].filter(key => tpl[key]).map(key => [key, tpl[key]]))
+      const incoming = attr?.taichu ? structuredClone(attr) : createTaichuAttr(attr ? { ...base, atk: attr.atk ?? base.atk, def: attr.def ?? base.def, hp: attr.hp ?? base.hp } : base)
+      if (attr?.taichu && index > 0) incoming.taichu.id = createTaichuAttr({}).taichu.id
+      const it = bag.items[name] ||= { count: 0, attr: incoming, list: [] }
+      if (!it.list) it.list = it.count > 0 ? [{ count: it.count, attr: it.attr }] : []
+      it.list.push({ count: 1, attr: incoming })
+      it.count += 1
+      it.attr = it.list[0].attr
+    }
+    return autoEquip ? autoEquipBest(bag) : []
+  }
   /* 黄/红/彩装备未指定属性时每次重新随机(不同属性分组存); 紫及以下用模板固定值 */
   const isRand = isEquip && (tpl.quality || 0) > 4
   const a = attr || (isRand
@@ -1091,6 +1157,38 @@ export function consumeBagItem (bag, name, count = 1, attr = null) {
     if (it.count <= 0) delete bag.items[name]
   }
   return true
+}
+
+/** 按实际属性组从背包取出物品，用于搜刮等转移；不足时不扣任何一件。 */
+export function takeBagItems (bag, name, count = 1) {
+  count = Math.max(0, Math.floor(Number(count) || 0))
+  const raw = bag?.items?.[name]
+  const have = Math.max(0, Number(raw?.count ?? raw) || 0)
+  if (!count || have < count) return []
+  const source = EQUIP_TPL[name] && Array.isArray(raw.list) ? raw.list : [{ count: have, attr: raw?.attr || (EQUIP_TPL[name] ? getItemAttr(bag, name) : null) }]
+  let stock = have
+  const groups = source.map(g => {
+    const n = Math.min(stock, Math.max(0, Math.floor(Number(g.count) || 0)))
+    stock -= n
+    return { count: n, attr: g.attr }
+  }).filter(g => g.count > 0)
+  if (stock > 0) return []
+  let remaining = count
+  const entries = []
+  for (const group of groups) {
+    const n = Math.min(remaining, Math.max(0, Number(group.count) || 0))
+    if (n) entries.push({ name, count: n, attr: EQUIP_TPL[name] ? structuredClone(group.attr || {}) : null })
+    remaining -= n
+    if (!remaining) break
+  }
+  if (remaining) return []
+  const item = typeof raw === 'object' ? structuredClone(raw) : { count: have }
+  if (Array.isArray(raw.list)) { item.list = structuredClone(groups); item.attr = item.list[0]?.attr }
+  const next = { items: { [name]: item } }
+  if (!consumeBagItem(next, name, count)) return []
+  if (next.items[name]?.count > 0) bag.items[name] = next.items[name]
+  else delete bag.items[name]
+  return entries
 }
 
 /** 整批材料先在副本扣除；任一种不足时不改变原背包。调用方负责保存。 */

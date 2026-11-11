@@ -220,17 +220,17 @@ test('玩家超时未回复的系统代选全部为保守选项', () => {
   assert.equal(autoPickForPlayer(null), 1)
 })
 
-test('出口围剿初始化: 玩家队收表态菜单, 伪玩家按性格表态, 探索节点清空', () => {
+test('出口围剿初始化: 玩家队收表态菜单, 伪玩家按实力和收益表态, 探索节点清空', async () => {
   const gid = 'testambush0001'
   writeFakeRoster(gid, { 强者: { name: '强者', alive: true, level: 100, trait: '好斗' } })
   const st = _test.emptyRealm()
   st.gid = gid
   st.realmId = 'r1'
   st.teams = {
-    A: { id: 'A', kind: 'player', name: '玩家队', leader: '1', members: ['1'], node: { type: 'treasure' }, pool: [] },
+    A: { id: 'A', kind: 'player', name: '玩家队', leader: '1', members: ['1'], node: { type: 'treasure' }, pool: [{ name: '修为丹', count: 2 }] },
     B: { id: 'B', kind: 'fake', name: '伪强者队', leader: '强者', members: ['强者'], node: null, pool: [] }
   }
-  const pending = beginAmbush(st, gid, 1000000)
+  const pending = await beginAmbush(st, gid, 1000000)
 
   assert.equal(st.ambushAt, 1000000)
   assert.equal(st.ambushChoiceEnd, 1000000 + 45000, '表态宽限期45秒')
@@ -242,7 +242,7 @@ test('出口围剿初始化: 玩家队收表态菜单, 伪玩家按性格表态,
   rm(`${WORLD_DIR}/fake_${gid}.json`)
 })
 
-test('伪玩家平和性格倾向悄悄溜走', () => {
+test('伪玩家平和性格倾向悄悄溜走', async () => {
   const gid = 'testambush0002'
   writeFakeRoster(gid, { 平和者: { name: '平和者', alive: true, level: 1, trait: '平和' } })
   const st = _test.emptyRealm()
@@ -250,7 +250,7 @@ test('伪玩家平和性格倾向悄悄溜走', () => {
   st.realmId = 'r2'
   st.teams = { B: { id: 'B', kind: 'fake', name: '伪平和队', leader: '平和者', members: ['平和者'], node: null, pool: [] } }
 
-  beginAmbush(st, gid, 2000000)
+  await beginAmbush(st, gid, 2000000)
 
   assert.equal(st.teams.B.ambush, 'flee', '平和性格应倾向溜走')
   rm(`${WORLD_DIR}/fake_${gid}.json`)

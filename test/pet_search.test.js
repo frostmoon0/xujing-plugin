@@ -35,7 +35,8 @@ test('到期搜寻在命令前惰性结算，不会被下一次搜寻覆盖', ()
   }
 })
 
-test('未到期搜寻仍保留进度，不能重复开启', () => {
+test('未到期搜寻仍保留进度，不能重复开启', t => {
+  t.mock.method(Math, 'random', () => 0.5)
   const gid = `search-test-${Date.now()}-pending`
   const uid = 'user-2'
   const state = emptyPetState(gid)
