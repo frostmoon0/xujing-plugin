@@ -1,6 +1,6 @@
 import fs from 'fs'
 import path from 'path'
-import { Plugin_Name, Plugin_Path, Save_Path } from './plugin.js'
+import { Plugin_Name, Plugin_Path, Save_Path, isTestRuntime } from './plugin.js'
 import { normalizeBattleLevels } from './realm_cap.js'
 // 存档统一存放于 Yunzai 本体 data 目录(如 C:/Users/Administrator/Desktop/Yunzai-Bot/data/xujing-yue-plugin/save)
 const dirpath = `${Save_Path}`
@@ -13,6 +13,8 @@ const QQYbattlepath = `${Save_Path}/battle`
 // ===== 存档自动迁移(兜底) =====
 // 旧版存档在插件目录内(data 根目录 / data/save),若未手动搬移,启动时自动迁移到 Yunzai 本体 data 目录
 function migrateOldSave() {
+    // 测试只使用临时存档，不能把旧版正式数据搬入临时目录。
+    if (isTestRuntime) return
     const oldRoot = path.join(Plugin_Path, 'data')
     const saveRoot = `${Save_Path}`
     const list = [

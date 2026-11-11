@@ -1,14 +1,15 @@
 import fs from 'node:fs'
 import YAML from 'yaml'
-import { Plugin_Name, Plugin_Path } from './plugin.js'
+import { Plugin_Name, Plugin_Path, isTestRuntime } from './plugin.js'
 
 const _defpath = `${Plugin_Path}/config/xujing.config.def.yaml`;
 
-const configyamlpath = `${Plugin_Path}/config/xujing.config.yaml`;
+const userConfigPath = `${Plugin_Path}/config/xujing.config.yaml`;
+const configyamlpath = isTestRuntime && !fs.existsSync(userConfigPath) ? _defpath : userConfigPath;
 
 const resourcespath = `${Plugin_Path}/resources/xujing.resources.yaml`;
 
-if (!fs.existsSync(configyamlpath)) {//如果配置不存在，则复制一份默认配置到配置里面
+if (!isTestRuntime && !fs.existsSync(configyamlpath)) {//如果配置不存在，则复制一份默认配置到配置里面
     fs.copyFileSync(`${_defpath}`, `${configyamlpath}`);
 }
 

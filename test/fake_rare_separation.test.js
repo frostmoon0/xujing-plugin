@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { Save_Path } from '../components/plugin.js'
 import { SPECIAL_MAX, rollReward } from '../components/realm_data.js'
 import { FAKE_ARTIFACT_BLACKLIST, fakeCanUseArtifact, fakeMarketIndex, fakeTradePrice, fakeItemSupply, fakeArtifactTick, fakeBasePrice, fakeCaveTick, fakeGoalTick, fakeMerchantShop, fakeTravelTo, fakeTravelTick, personPower, pruneFakeMerchantShops, fakeGhostStock, fakeMartBuy, repairFakeEquipment, inheritFakeAssets, genFate, gongfaScore, runBestGongfa, fakeLearnBestGongfa, fakeSellJunkGongfa } from '../components/fake_data.js'
 import { EQUIP_TPL } from '../components/equip_data.js'
@@ -123,7 +124,7 @@ test('伪玩家跨区走真实传送费用/耗时', () => {
   Math.random = () => 0
   try { fakeTravelTick(f, 1000 + 5 * 60000) } finally { Math.random = old }
   assert.equal(poor.loc, 'west')
-  try { fs.rmSync(`C:/Users/Administrator/Desktop/Yunzai-Bot/data/xujing-yue-plugin/save/world/world_${gid}.json`, { force: true }) } catch (err) { }
+  try { fs.rmSync(`${Save_Path}/world/world_${gid}.json`, { force: true }) } catch (err) { }
 })
 
 test('伪玩家法宝接入实际战力(定仙游/万魂/傀儡)', () => {

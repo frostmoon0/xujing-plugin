@@ -5,10 +5,12 @@
  * ============================================================ */
 import fs from 'fs'
 import path from 'path'
-import { Plugin_Name, Save_Path } from './plugin.js'
+import { Plugin_Name, Save_Path, Data_Path, isTestRuntime } from './plugin.js'
 
 const SAVE_DIR = Save_Path
-export const BACKUP_DIR = process.env.XUJING_BACKUP_DIR
+export const BACKUP_DIR = isTestRuntime
+  ? path.join(Data_Path, Plugin_Name, 'backups')
+  : process.env.XUJING_BACKUP_DIR
   ? path.resolve(process.env.XUJING_BACKUP_DIR)
   : path.resolve('D:/Yunzai-Bot-backup', Plugin_Name)
 export const MAX_BACKUPS = 100

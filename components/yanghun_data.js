@@ -41,6 +41,16 @@ function ensureDir () {
   if (!fs.existsSync(SAVE_DIR)) fs.mkdirSync(SAVE_DIR, { recursive: true })
 }
 
+/** 后台仅结算真实群号的独立存档，全局兼容档仍可按需读取。 */
+export function activeYanghunGroups () {
+  try {
+    if (!fs.existsSync(SAVE_DIR)) return []
+    return fs.readdirSync(SAVE_DIR, { withFileTypes: true })
+      .filter(entry => entry.isFile() && /^yanghun_\d+\.json$/.test(entry.name))
+      .map(entry => entry.name.slice('yanghun_'.length, -'.json'.length))
+  } catch (err) { return [] }
+}
+
 function fileOf (gid) {
   return path.join(SAVE_DIR, `yanghun_${String(gid || 'global')}.json`)
 }
@@ -322,8 +332,7 @@ export const Yanghun = {
   async settleAll (at = Date.now()) {
     ensureDir()
     let result = { groups: 0, users: 0 }
-    for (const file of fs.readdirSync(SAVE_DIR).filter(name => /^yanghun_.+\.json$/.test(name))) {
-      const gid = file.replace(/^yanghun_|\.json$/g, '')
+    for (const gid of activeYanghunGroups()) {
       const data = readGroup(gid)
       result.groups++
       for (const uid of Object.keys(data.users || {})) {

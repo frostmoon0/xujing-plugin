@@ -47,6 +47,15 @@ const UPGRADE = [
 function ensureDir () {
   if (!fs.existsSync(SAVE_DIR)) fs.mkdirSync(SAVE_DIR, { recursive: true })
 }
+/** 后台仅推进真实群号的独立存档，跳过全局兼容档与测试档。 */
+export function activeWanhunGroups () {
+  try {
+    if (!fs.existsSync(SAVE_DIR)) return []
+    return fs.readdirSync(SAVE_DIR, { withFileTypes: true })
+      .filter(entry => entry.isFile() && /^wanhun_\d+\.json$/.test(entry.name))
+      .map(entry => entry.name.slice('wanhun_'.length, -'.json'.length))
+  } catch (err) { return [] }
+}
 function fileOf (gid) { return path.join(SAVE_DIR, `wanhun_${String(gid || 'global')}.json`) }
 function emptyGroup (gid) { return { gid: String(gid || 'global'), users: {}, shops: {} } }
 function readGroup (gid) {
@@ -243,6 +252,7 @@ export function caveActionBlocked (fnc, { isChoiceMsg = false, isView = false } 
 }
 
 function notifyPlayer (gid, uid, text) {
+  if (!/^\d+$/.test(String(gid || ''))) return
   try {
     const group = Bot.pickGroup(gid)
     if (group && group.sendMsg) group.sendMsg([segment.at(Number(uid)), text])
@@ -1086,33 +1096,32 @@ export const getWanhunBattleBuff = (uid, gid = 'global') => Wanhun.getBattleBuff
 export const getWanhunPanel = (uid, gid = 'global') => Wanhun.panel(uid, gid)
 export const getWanhunSoulPower = (bag, playerLevel = 0) => Wanhun.getSoulPower(bag, playerLevel)
 
+export async function tickWanhunGroups () {
+  if (global.__xujingWanhunTickRunning__) return
+  global.__xujingWanhunTickRunning__ = true
+  try {
+    ensureDir()
+    for (const gid of activeWanhunGroups()) {
+      await withGameLock(gid, async () => {
+        const data = readGroup(gid)
+        Wanhun.tickShops(gid)
+        for (const uid of Object.keys(data.users || {})) {
+          /* 逐个串行推进: 每个玩家独立读档-改档-写档,
+             并发推进会让后写的档覆盖先写玩家的 pending(多人同时遇敌时后一人写完, 前一人的阴魂就没了) */
+          try {
+            await Wanhun.tickCave(uid, gid, text => notifyPlayer(gid, uid, text))
+          } catch (err) { }
+        }
+      })
+    }
+  } catch (err) { } finally {
+    global.__xujingWanhunTickRunning__ = false
+  }
+}
+
 if (!global.__xujingWanhunTick__) {
   global.__xujingWanhunTick__ = true
-  setInterval(() => {
-    if (global.__xujingWanhunTickRunning__) return
-    global.__xujingWanhunTickRunning__ = true
-    ;(async () => {
-      try {
-        ensureDir()
-        for (const file of fs.readdirSync(SAVE_DIR).filter(n => /^wanhun_.+\.json$/.test(n))) {
-          const gid = file.replace(/^wanhun_|\.json$/g, '')
-          await withGameLock(gid, async () => {
-          const data = readGroup(gid)
-          Wanhun.tickShops(gid)
-          for (const uid of Object.keys(data.users || {})) {
-            /* 逐个串行推进: 每个玩家独立读档-改档-写档,
-               并发推进会让后写的档覆盖先写玩家的 pending(多人同时遇敌时后一人写完, 前一人的阴魂就没了) */
-            try {
-              await Wanhun.tickCave(uid, gid, text => notifyPlayer(gid, uid, text))
-            } catch (err) { }
-          }
-          })
-        }
-      } catch (err) { } finally {
-        global.__xujingWanhunTickRunning__ = false
-      }
-    })()
-  }, 15000).unref()
+  setInterval(() => { tickWanhunGroups() }, 15000).unref()
 }
 
 export default Wanhun
