@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { Save_Path } from '../components/plugin.js'
 import { SPECIAL_MAX, rollReward } from '../components/realm_data.js'
-import { FAKE_ARTIFACT_BLACKLIST, fakeCanUseArtifact, fakeMarketIndex, fakeTradePrice, fakeItemSupply, fakeArtifactTick, fakeBasePrice, fakeCaveTick, fakeGoalTick, fakeMerchantShop, fakeTravelTo, fakeTravelTick, personPower, pruneFakeMerchantShops, fakeGhostStock, fakeMartBuy, repairFakeEquipment, inheritFakeAssets, genFate, gongfaScore, runBestGongfa, fakeLearnBestGongfa, fakeSellJunkGongfa } from '../components/fake_data.js'
+import { FAKE_ARTIFACT_BLACKLIST, fakeCanUseArtifact, fakeMarketIndex, fakeTradePrice, fakeItemSupply, fakeArtifactTick, fakeBasePrice, fakeCaveTick, fakeGoalTick, fakeMerchantShop, fakeTravelTo, fakeTravelTick, personPower, pruneFakeMerchantShops, repairFakeEquipment, inheritFakeAssets, genFate, gongfaScore, runBestGongfa, fakeLearnBestGongfa, fakeSellJunkGongfa } from '../components/fake_data.js'
+import * as fakeData from '../components/fake_data.js'
 import { EQUIP_TPL } from '../components/equip_data.js'
 
 test('伪玩家特殊彩名额与玩家完全独立', () => {
@@ -144,38 +145,33 @@ test('过期魔窟商人货单会被清理', () => {
   assert.equal(f.fakeMerchantShops.甲, undefined)
 })
 
-test('伪玩家缺法宝材料会去便宜鬼市补', () => {
-  const p = { name: '缺料', alive: true, realmBusy: false, loc: 'west', level: 30, money: 10000, fakeTradeThreshold: 0, bag: { items: { 魂石: { count: 1 } }, equipped: {}, equippedAttr: {}, artifacts: {} } }
+test('伪玩家没有真实卖家时不会凭空补齐法宝材料', () => {
+  const p = { name: '缺料', alive: true, realmBusy: false, loc: 'west', level: 1, money: 10000, fakeTradeThreshold: 0, bag: { items: { 魂石: { count: 8 }, 修为丹: { count: 1 } }, equipped: {}, equippedAttr: {}, artifacts: {} } }
   const f = { gid: 'mart', roster: { 缺料: p }, major: [], minor: [], byPerson: {}, bySect: {}, trades: [], fakeCaves: [] }
   fakeGoalTick(f, 'mart', Date.now())
-  assert.ok(p.bag.items.万魂幡残卷?.count >= 1, '应买到万魂幡残卷')
-  assert.ok(p.money < 10000, '应扣灵石')
+  assert.equal(p.bag.items.万魂幡残卷, undefined)
+  assert.equal(p.money, 10000)
+  assert.equal(f.trades.length, 0)
 })
 
-test('伪玩家不会倒卖最后一颗魂石', () => {
+test('伪玩家不会倒卖最后一颗魂石，缺石者仍可通过魔窟商人兑换', () => {
+  const now = Date.now()
   const a = { name: '甲', alive: true, realmBusy: false, loc: 'west', level: 30, money: 10000, fakeTradeThreshold: 0, bag: { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} } }
-  const b = { name: '乙', alive: true, realmBusy: false, loc: 'west', level: 30, money: 10000, fakeTradeThreshold: 0, bag: { items: { 魂石: { count: 1 } }, equipped: {}, equippedAttr: {}, artifacts: {} } }
+  const b = { name: '乙', alive: true, realmBusy: false, loc: 'west', level: 30, money: 10000, fakeTradeThreshold: 0, fakeGoalAt: now + 3600000, bag: { items: { 魂石: { count: 1 } }, equipped: {}, equippedAttr: {}, artifacts: {} } }
   const f = { gid: 'stone', roster: { 甲: a, 乙: b }, major: [], minor: [], byPerson: {}, bySect: {}, trades: [], fakeCaves: [] }
-  fakeGoalTick(f, 'stone', Date.now())
+  const slot = { name: '灵石', kind: 'money', count: 1000, reward: '魂石', used: false }
+  f.fakeMerchantShops = { 甲: { refreshAt: now + 3600000, demands: [slot] } }
+  fakeGoalTick(f, 'stone', now)
   assert.equal(b.bag.items.魂石.count, 1, '卖家必须保留最后一颗魂石')
-  assert.ok(a.bag.items.魂石?.count >= 1, '买家应从鬼市补到魂石')
+  assert.equal(a.bag.items.魂石?.count, 1, '缺石者通过货单兑换魂石')
+  assert.equal(a.money, 9000)
+  assert.equal(slot.used, true)
+  assert.ok(f.trades.some(x => x.txt.includes('魔窟商人')))
 })
 
-test('鬼市库存有数量限制并按周期补货', () => {
-  const p = { name: '买货', alive: true, money: 1000000, bag: { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} } }
-  const f = { roster: { 买货: p } }
-  const shop = fakeGhostStock(f, 1000)
-  shop.nextAt = 1000 + 24 * 3600000
-  const cap = shop.stock.魂石
-  assert.ok(cap > 0)
-  let bought = 0
-  for (let i = 0; i < cap + 5; i++) if (fakeMartBuy(f, p, '魂石', 1000 + i * 11 * 60000)) bought++
-  assert.equal(bought, cap, '不能超过初始库存')
-  assert.equal(shop.stock.魂石, undefined, '库存应售罄')
-  assert.equal(fakeMartBuy(f, p, '魂石', 1000 + (cap + 6) * 11 * 60000), false, '售罄后等补货')
-  shop.nextAt = 1000
-  fakeGhostStock(f, 1000 + 24 * 3600000 + 1)
-  assert.ok(shop.stock.魂石 > 0, '到点应补货')
+test('伪玩家专属鬼市的库存和购买入口已删除', () => {
+  assert.equal('fakeGhostStock' in fakeData, false)
+  assert.equal('fakeMartBuy' in fakeData, false)
 })
 
 test('伪玩家装备修复: 清无效战利品/空位陈旧属性并自动穿戴', () => {

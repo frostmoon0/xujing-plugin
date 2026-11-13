@@ -1212,6 +1212,9 @@ export function consumeItem(user_id, name, count = 1, attr = null, gid = 'global
 /* ---------- 遗蜕古钥: 每日每群上限2把, 产出概率与"彩色"同级 ---------- */
 export const SECRET_KEY = '遗蜕古钥'
 export const ARRAY_CORE = '万阵核心'
+/** 玩家和伪玩家共用：四种红色阵法材料各1 + 30万灵石。 */
+export const ARRAY_CORE_RECIPE = ARRAY_MATS.map(name => ({ name, count: 1 }))
+export const ARRAY_CORE_COST = 300000
 const SECRET_KEY_DAILY = 2
 const SECRET_KEY_CHANCE = 0.01 // 每次产出口概率1%(与彩色同级)
 const localSecretKeyCounts = new Map()

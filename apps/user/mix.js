@@ -7,7 +7,7 @@ import { Plugin_Name, Plugin_Path } from '../../components/plugin.js'
 import xujing_data from '../../components/xujing_data.js'
 import Yanghun from '../../components/yanghun_data.js'
 import { DEPLOY_MATS } from '../../components/dynasty_data.js'
-import { addItem, addItemToBag, consumeItem, consumeBagItem, consumeBagItems, getBag, getItemAttr, saveBag, hasDingxianyou, ITEM_TPL, MATERIAL_TPL, QUALITY, EQUIP_TPL, rollEquipAttr, rollRandomColorEquip, fmtAttr, ownedRedWeapons, craftRainbow, renameRainbow, rainbowInfoLines, itemIcon, yaodanName, rollYaodanTierFromRemnant } from '../../components/equip_data.js'
+import { addItem, addItemToBag, consumeItem, consumeBagItem, consumeBagItems, getBag, getItemAttr, saveBag, hasDingxianyou, ITEM_TPL, MATERIAL_TPL, QUALITY, EQUIP_TPL, rollEquipAttr, rollRandomColorEquip, fmtAttr, ownedRedWeapons, craftRainbow, renameRainbow, rainbowInfoLines, itemIcon, yaodanName, rollYaodanTierFromRemnant, ARRAY_CORE_RECIPE, ARRAY_CORE_COST } from '../../components/equip_data.js'
 import { forceLock, isCurrent, unlock } from '../../components/interact.js'
 import { guardActionLocked } from '../../components/action_lock.js'
 import { PUPPET_INITIAL_COST, PUPPET_UPGRADE_COSTS } from '../../components/puppet_data.js'
@@ -75,15 +75,6 @@ const PILL_QUALITY = { '仙帝丹': 7, '惊鸿丹': 6, '灵犀丹': 6, '玉甲�
 
 /** 红装制造配方: 所有矿物各1(不含彩色造梦神玉) → 随机部位随机属性红装 */
 const RED_ORE = ['月魄石', '星璇石', '流光玉', '织云石', '凤羽玉']//5种非彩色矿物
-
-/** 万阵核心配方: 四种红色阵法材料 + 30万灵石 → 1万阵核心 */
-const ARRAY_CORE_RECIPE = [
-    { name: '天衍阵纹', count: 1 },
-    { name: '乾坤阵晶', count: 1 },
-    { name: '太虚阵砂', count: 1 },
-    { name: '九幽阵髓', count: 1 }
-]
-const ARRAY_CORE_COST = 300000
 
 /** 彩装制造: 6 造梦神玉(彩矿) + 1 随机红装 → 随机彩装(品质7, 属性=红装×3; 独一无二一套6件) */
 const COLOR_ORE = '造梦神玉'

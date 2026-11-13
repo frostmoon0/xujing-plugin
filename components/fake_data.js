@@ -24,7 +24,7 @@ import { saveOrDefer, withDeferredSaveContext } from './deferred_save.js'
 import { Plugin_Path, Save_Path } from './plugin.js'
 import { getWorld, saveWorld, getRate, addTax, taxFor, regionNameOf, REGION_KEYS, DEFAULT_REGION, REGIONS, levelNameOf, sealBlocksTravel, FORCE_MIN, FORCE_DROP_MAX, TELEPORT_COST } from './world_data.js' // 摆摊交税/跨区/攻打位置校验需世界经济
 import { REALM_MAX_LEVEL } from './realm_cap.js'
-import { ITEM_PRICE, ITEM_TPL, MATERIAL_TPL, GONGFA_TPL, EQUIP_TPL, equipPrice, gongfaPrice, getTotalAttr, isBound, vaultEquipContrib, ensureBagShape, addItemToBag, consumeBagItem, autoEquipBest, rollEquipAttr, attrPower, itemIcon, isRainbowRef } from './equip_data.js'
+import { ITEM_PRICE, ITEM_TPL, MATERIAL_TPL, GONGFA_TPL, EQUIP_TPL, ARRAY_CORE, ARRAY_CORE_RECIPE, ARRAY_CORE_COST, equipPrice, gongfaPrice, getTotalAttr, isBound, vaultEquipContrib, ensureBagShape, addItemToBag, consumeBagItem, autoEquipBest, rollEquipAttr, attrPower, itemIcon, isRainbowRef } from './equip_data.js'
 import { getStock, buyStock, recordActive, SHOP_CN } from './shop_data.js'
 import { RAID_LEVELS, guardPowerFor } from './raid_data.js' // 伪玩家洗劫藏宝阁(与玩家同20档难度, 用守卫战力判定成败)
 import {
@@ -1901,7 +1901,7 @@ function genTeacherDisciple (f, t) {
     m.money = (m.money || 0) + gold
     return { type: 'flavor', ...evWho([a, m]), txt: `【孝敬】${whoA} ${a.name} 将 ${gold} 灵石孝敬给师父 ${whoM} ${r.master}` }
   }
-  const items = a.bag && a.bag.items ? Object.keys(a.bag.items) : []
+  const items = a.bag && a.bag.items ? Object.keys(a.bag.items).filter(name => name !== ARRAY_CORE) : []
   if (!items.length) return null
   const item = pick(items)
   fakeTakeItem(a.bag, item)
@@ -2315,7 +2315,7 @@ function genGift (f, t) {
   const giftLabel = relLabelOf(f, a, b.name)
   if (Math.random() < 0.5) {
     /* 送物品 */
-    const items = a.bag && a.bag.items ? Object.keys(a.bag.items) : []
+    const items = a.bag && a.bag.items ? Object.keys(a.bag.items).filter(name => name !== ARRAY_CORE) : []
     if (!items.length) return null
     const item = pick(items)
     if (!b.bag) b.bag = { items: {}, equipped: {} }
@@ -2502,7 +2502,9 @@ function genSell (f, t) {
   const p = pickBy(f, x => x.alive && x.bag && x.bag.items && Object.keys(x.bag.items).length)
   if (!p) return null
   const who = p.status === 'sect' && p.sect ? sectName(f, p.sect) : '散修'
-  const item = pick(Object.keys(p.bag.items))
+  const items = Object.keys(p.bag.items).filter(name => !isBound(name) && itemCount(p.bag.items[name]) > fakeNeedCount(f, p, name))
+  if (!items.length) return null
+  const item = pick(items)
   fakeTakeItem(p.bag, item)
   const price = GONGFA_TPL[item] ? gongfaPrice(item) : (ITEM_TPL[item] ? (ITEM_PRICE[item] || 50) : 50)
   const gain = Math.max(10, Math.floor(price / 2))
@@ -2686,7 +2688,9 @@ function genLoot (f, t) {
   if (!k) return null
   const v = pickBy(f, x => x.alive && x.name !== k.name && x.bag && x.bag.items && Object.keys(x.bag.items).length)
   if (!v) return null
-  const item = pick(Object.keys(v.bag.items))
+  const items = Object.keys(v.bag.items).filter(name => name !== ARRAY_CORE)
+  if (!items.length) return null
+  const item = pick(items)
   if (!k.bag) k.bag = { items: {}, equipped: {} }
   if (!fakeTransferEntry(v.bag, k.bag, item)) return null
   const whoK = k.status === 'sect' && k.sect ? sectName(f, k.sect) : '散修'
@@ -3290,7 +3294,6 @@ export const FAKE_RARE_POOL = [
   { name: '云裳仙蕊', weight: 20 },
   { name: '造梦神玉', weight: 20 },
   { name: '一阶妖丹', weight: 5 },
-  { name: '万阵核心', weight: 3 },
   { name: '天衍阵纹', weight: 4 },
   { name: '乾坤阵晶', weight: 4 },
   { name: '太虚阵砂', weight: 4 },
@@ -3368,7 +3371,14 @@ function fakeRedWeaponMaterial (p) {
 function fakeNeedsSpecialWeapon (p) {
   return !p.bag?.artifacts?.wanhun && itemCount(p.bag?.items?.['成长性特殊彩武']) < 1
 }
-/** 求购和卖方保留共用完整配方；缺中间彩武时展开成6云裳和总计1件红武器。 */
+function fakeMissingCoreCount (p, goal) {
+  const required = Number(FAKE_ARTIFACT_GOALS[goal]?.mats?.[ARRAY_CORE]) || 0
+  return Math.max(0, required - itemCount(p.bag?.items?.[ARRAY_CORE]))
+}
+function fakeArtifactMoneyNeed (p, goal) {
+  return (Number(FAKE_ARTIFACT_GOALS[goal]?.money) || 0) + fakeMissingCoreCount(p, goal) * ARRAY_CORE_COST
+}
+/** 求购和卖方保留共用完整配方，并为尚未合成的中间物预留底层材料。 */
 function fakeArtifactNeeds (p, goal) {
   const needs = { ...(FAKE_ARTIFACT_GOALS[goal]?.mats || {}) }
   if (goal === '万魂幡' && fakeNeedsSpecialWeapon(p)) {
@@ -3377,6 +3387,10 @@ function fakeArtifactNeeds (p, goal) {
     // 优先保留背包里的一件现货，其余名称的红武器仍可正常出售。
     needs[fakeRedWeaponMaterial(p) || '红武器'] = 1
   }
+  const missingCores = fakeMissingCoreCount(p, goal)
+  for (const { name, count } of ARRAY_CORE_RECIPE) {
+    if (missingCores > 0) needs[name] = (Number(needs[name]) || 0) + missingCores * count
+  }
   return needs
 }
 function fakeMissing (p, goal) {
@@ -3384,10 +3398,12 @@ function fakeMissing (p, goal) {
   if (!cfg) return {}
   const miss = {}
   for (const [name, count] of Object.entries(fakeArtifactNeeds(p, goal))) {
+    if (name === ARRAY_CORE) continue // 成品核心只自行合成，采购追踪其底层阵材。
     const have = itemCount(p.bag && p.bag.items ? p.bag.items[name] : 0)
     if (have < count) miss[name] = count - have
   }
-  if (cfg.money && (Number(p.money) || 0) < cfg.money) miss['灵石'] = cfg.money - (Number(p.money) || 0)
+  const money = fakeArtifactMoneyNeed(p, goal)
+  if ((Number(p.money) || 0) < money) miss['灵石'] = money - (Number(p.money) || 0)
   return miss
 }
 /** 某人为了自己的法宝目标，仍然需要多少件该材料(用于阻止互相倒卖同一件刚需材料) */
@@ -3431,95 +3447,9 @@ function fakeTransferDeal (f, seller, buyer, item, cost, wc = null, count = 1) {
   logTrade(f, `【${item}】${buyer.name} 花 ${paid} 灵石向 ${seller.name} 购得 ${item}×${moved}（${regionNameOf(loc)}税率${rate}%）`)
   return true
 }
-/** 伪玩家专属鬼市: 只给伪玩家补法宝瓶颈材料, 价格按普通伪玩家收入压低, 不冲击玩家市场 */
-const FAKE_MART_PRICES = {
-  魂石: 100,
-  万魂幡残卷: 500,
-  阴魂砂: 20,
-  游魂骨: 20,
-  云裳仙蕊: 400,
-  神游蛊: 1500,
-  玄阴玉: 250,
-  镇魂晶: 400,
-  血煞髓: 800,
-  万魂帝晶: 500,
-  一阶妖丹: 3000,
-  万阵核心: 3000,
-  天衍阵纹: 500,
-  乾坤阵晶: 500,
-  太虚阵砂: 500,
-  九幽阵髓: 500,
-  无主幽魂: 300,
-  摄魂铁: 300,
-  造梦神玉: 500
-}
 function fakeRedWeaponName () {
   const reds = Object.keys(EQUIP_TPL).filter(n => EQUIP_TPL[n].quality === 6 && EQUIP_TPL[n].type === 'weapon')
   return reds.length ? pick(reds) : '霓裳剑'
-}
-function fakeMartPrice (name) {
-  if (FAKE_MART_PRICES[name] != null) return Number(FAKE_MART_PRICES[name])
-  if (EQUIP_TPL[name] && EQUIP_TPL[name].quality === 6 && EQUIP_TPL[name].type === 'weapon') return 800
-  return 0
-}
-/** 鬼市库存键: 红武器按类别共享库存 */
-function fakeMartStockKey (name) {
-  return EQUIP_TPL[name] && EQUIP_TPL[name].quality === 6 && EQUIP_TPL[name].type === 'weapon' ? '红武器' : name
-}
-/** 鬼市基础库存: 参考丹阁, 按本群在世伪玩家数少量加成, 每2~4小时补一次 */
-const FAKE_MART_BASE_STOCK = {
-  魂石: 24,
-  万魂幡残卷: 3,
-  阴魂砂: 20,
-  游魂骨: 20,
-  云裳仙蕊: 6,
-  红武器: 4,
-  神游蛊: 1,
-  玄阴玉: 4,
-  镇魂晶: 4,
-  血煞髓: 3,
-  万魂帝晶: 2,
-  一阶妖丹: 2,
-  万阵核心: 1,
-  天衍阵纹: 3,
-  乾坤阵晶: 3,
-  太虚阵砂: 3,
-  九幽阵髓: 3,
-  无主幽魂: 6,
-  摄魂铁: 8,
-  造梦神玉: 8
-}
-export function fakeGhostStock (f, now = Date.now()) {
-  if (!f.fakeGhostStock || typeof f.fakeGhostStock !== 'object') f.fakeGhostStock = { nextAt: 0, stock: {} }
-  const shop = f.fakeGhostStock
-  if (Number(shop.nextAt) > now && shop.stock && typeof shop.stock === 'object') return shop
-  const alive = Object.values(f.roster || {}).filter(p => p && p.alive).length
-  const bonus = Math.floor(alive / 50)
-  const stock = {}
-  for (const [name, base] of Object.entries(FAKE_MART_BASE_STOCK)) {
-    const n = Number(base) + (name === '魂石' ? Math.floor(alive / 10) : bonus)
-    if (n > 0) stock[name] = n
-  }
-  shop.stock = stock
-  shop.nextAt = now + rand([2, 4]) * 3600000
-  return shop
-}
-export function fakeMartBuy (f, p, name, now, reason = '') {
-  if (npcInCave(f, p) || (Number(p?.fakeLostUntil) || 0) > now) return false
-  const price = fakeMartPrice(name)
-  if (!price || (Number(p.money) || 0) < price) return false
-  if ((Number(p.fakeMartAt) || 0) > now) return false
-  const shop = fakeGhostStock(f, now)
-  const key = fakeMartStockKey(name)
-  if (!(Number(shop.stock[key]) > 0)) return false
-  shop.stock[key] = Number(shop.stock[key]) - 1
-  if (shop.stock[key] <= 0) delete shop.stock[key]
-  p.money -= price
-  p.fakeMartAt = now + 10 * 60000
-  const autoEquip = !(isFakeRedWeapon(name) && fakeGoalOf(p) === '万魂幡' && fakeNeedsSpecialWeapon(p))
-  fakeAddItem(p.bag, name, 1, null, autoEquip)
-  logTrade(f, `【鬼市·西域】${p.name} ${reason ? `为${reason}，` : ''}花 ${price} 灵石购得 ${itemIcon(name)}${name}×1（库存${shop.stock[key] || 0}，${Math.ceil((shop.nextAt - now) / 3600000)}小时后补货）`)
-  return true
 }
 
 /* ---------- 伪玩家魔窟商人: 每人独立12格货单, 7小时刷新, 与玩家同规则 ---------- */
@@ -3689,11 +3619,9 @@ export function fakeGoalTick (f, gid, now = Date.now()) {
         if (buyer && fakeTransferDeal(f, p, buyer, item, price, worldCache())) continue
       }
     }
-    /* 2. 缺材料/缺药: 向有货的人定向求购; 法宝材料价格用鬼市上限, 避免买不起 */
+    /* 2. 缺材料/缺药: 按正常供需报价向真实持货者求购。 */
     if (wanted) {
-      const martPrice = fakeMartPrice(wanted)
-      const marketPrice = fakeTradePrice(f, wanted, fakeBasePrice(wanted))
-      const price = martPrice ? Math.min(marketPrice, martPrice) : marketPrice
+      const price = fakeTradePrice(f, wanted, fakeBasePrice(wanted))
       const seller = pick(alive.filter(q => q.name !== p.name && itemCount(q.bag && q.bag.items ? q.bag.items[wanted] : 0) > fakeNeedCount(f, q, wanted)))
       if (seller) {
         const sellerHave = itemCount(seller.bag && seller.bag.items ? seller.bag.items[wanted] : 0)
@@ -3703,15 +3631,13 @@ export function fakeGoalTick (f, gid, now = Date.now()) {
         /* 只接受一次补齐缺口的大单; 不接受1件1件来回倒, 避免材料在人群里空转 */
         if (take >= missingCount && fakeTransferDeal(f, seller, p, wanted, price * take, worldCache(), take)) continue
       }
-      /* 伪玩家专属鬼市: 只在西域, 没有卖家时按便宜价补瓶颈材料, 不是白给 */
-      if (martPrice && (p.loc || DEFAULT_REGION) === 'west' && fakeMartBuy(f, p, wanted, now, goal || wanted)) continue
       /* 魔窟商人: 西域内用每人自己的12格货单兑换; 缺口材料便宜时先买再换 */
       if (wanted === '魂石' && (p.loc || DEFAULT_REGION) === 'west') {
         const shop = fakeMerchantShop(f, p, now)
         if (fakeMerchantTryExchange(f, p, shop, now, alive, worldCache())) continue
       }
       /* 3. 没有卖家: 按玩家规则赶路过去, 不能再瞬移 */
-      const region = cfg?.regions?.[wanted] || (martPrice ? 'west' : null)
+      const region = cfg?.regions?.[wanted] || (wanted === '魂石' ? 'west' : null)
       if (region && (p.loc || DEFAULT_REGION) !== region) {
         if (fakeTravelTo(f, p, region, now, goal || wanted)) continue
       }
@@ -3731,7 +3657,27 @@ export function fakeShenyouTick (f, now = Date.now()) {
   fakeAddItem(p.bag, '神游蛊', 1)
   logEvent(f, 'shenyou', `🦋 南疆异象再起，伪玩家 ${p.name} 独自捕获【神游蛊】`, now, { who: [p.name], major: true })
 }
-/** 伪玩家按玩家同配方打造定仙游; 万魂幡/傀儡因特殊彩武/妖丹暂不自动做 */
+/** 只为当前目标合成尚缺的核心，保留后续打造所需的原材和灵石。 */
+function fakeCraftArrayCores (f, p, now) {
+  const goal = fakeGoalOf(p)
+  const cfg = FAKE_ARTIFACT_GOALS[goal]
+  const missing = fakeMissingCoreCount(p, goal)
+  if (!cfg || !missing) return 0
+  const availableMoney = Math.max(0, (Number(p.money) || 0) - (Number(cfg.money) || 0))
+  let quantity = Math.min(missing, Math.floor(availableMoney / ARRAY_CORE_COST))
+  for (const { name, count } of ARRAY_CORE_RECIPE) {
+    const available = itemCount(p.bag.items[name]) - (Number(cfg.mats[name]) || 0)
+    quantity = Math.min(quantity, Math.floor(available / count))
+  }
+  if (quantity <= 0) return 0
+  for (const { name, count } of ARRAY_CORE_RECIPE) fakeTakeItem(p.bag, name, count * quantity)
+  p.money -= ARRAY_CORE_COST * quantity
+  fakeAddItem(p.bag, ARRAY_CORE, quantity, null, false)
+  const ingredients = ARRAY_CORE_RECIPE.map(({ name, count }) => `${name}×${count * quantity}`).join('、')
+  logEvent(f, 'artifact', `🔮 伪玩家 ${p.name} 消耗${ingredients}与${ARRAY_CORE_COST * quantity}灵石，炼成【${ARRAY_CORE}】×${quantity}。`, now, { who: [p.name], major: true })
+  return quantity
+}
+/** 伪玩家按玩家同配方自行制作核心、特殊彩武和法宝。 */
 export function fakeArtifactTick (f, now = Date.now()) {
   for (const p of Object.values(f.roster || {})) {
     if (!p || !p.alive || (Number(p.fakeLostUntil) || 0) > now || npcInCave(f, p) || p.realmBusy || p.fakeTravel || warActorOwner(f, 'fake', p.name)) continue
@@ -3768,6 +3714,7 @@ export function fakeArtifactTick (f, now = Date.now()) {
         logEvent(f, 'artifact', `🏴 伪玩家 ${p.name} 以万魂幡残卷与特殊彩武炼成【万魂幡】！`, now, { who: [p.name], major: true })
       }
     }
+    fakeCraftArrayCores(f, p, now)
     /* 傀儡: 与玩家一阶配方/50万灵石一致 */
     if (!Array.isArray(p.bag.artifacts.puppets) || !p.bag.artifacts.puppets.length) {
       const cost = PUPPET_INITIAL_COST

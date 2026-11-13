@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fakeGoalTick, fakeArtifactTick } from '../components/fake_data.js'
+import { fakeGoalTick, fakeArtifactTick, fakeTradePrice, fakeBasePrice } from '../components/fake_data.js'
 import { EQUIP_TPL } from '../components/equip_data.js'
 import { Save_Path } from '../components/plugin.js'
 
@@ -32,8 +32,7 @@ function fixture (t, ...people) {
   const gid = `fake_trade_material_${process.pid}_${++sequence}`
   t.after(() => fs.rmSync(path.join(Save_Path, 'world', `world_${gid}.json`), { force: true }))
   return {
-    gid, roster: Object.fromEntries(people.map(p => [p.name, p])), major: [], minor: [], byPerson: {}, bySect: {}, trades: [],
-    fakeGhostStock: { nextAt: NOW + 24 * 60 * MINUTE, stock: {} }
+    gid, roster: Object.fromEntries(people.map(p => [p.name, p])), major: [], minor: [], byPerson: {}, bySect: {}, trades: []
   }
 }
 
@@ -56,12 +55,13 @@ test('云裳按6减已有数一次补齐，卖方仅出售自己6件之外的盈
   const buyer = person('买方', { 云裳仙蕊: 2 })
   const seller = person('卖方', { 云裳仙蕊: 10 }, wait)
   const f = fixture(t, buyer, seller)
+  const price = fakeTradePrice(f, '云裳仙蕊', fakeBasePrice('云裳仙蕊'))
   fakeGoalTick(f, f.gid, NOW)
   assert.equal(count(buyer, '云裳仙蕊'), 6)
   assert.equal(count(seller, '云裳仙蕊'), 6)
   assert.equal(cloudTrades(f).length, 1)
   assert.match(cloudTrades(f)[0].txt, /云裳仙蕊×4/)
-  assert.equal(buyer.money, 100000 - 400 * 4)
+  assert.equal(buyer.money, 100000 - price * 4)
 })
 
 test('卖方余货不足一次补齐缺口时，不再以单件在人群中倒手', t => {
@@ -142,22 +142,22 @@ test('红武器跨品种合计保留1件，多出的另一个品种仍可出售'
   assert.equal(f.trades.length, 1)
 })
 
-test('没有玩家卖家时，鬼市买入的配方红武器留包并能直接用于铸武炼幡', t => {
+test('没有真实卖家时，旧鬼市库存也不会补货红武器或扣款', t => {
   t.mock.method(Math, 'random', () => 0)
-  const buyer = person('鬼市买方', { 云裳仙蕊: 6 })
+  const buyer = person('缺红武器', { 云裳仙蕊: 6 })
   buyer.bag.equipped = {}
   buyer.bag.equippedAttr = {}
   const f = fixture(t, buyer)
-  f.fakeGhostStock.stock.红武器 = 1
+  f.fakeGhostStock = { nextAt: NOW + 24 * 60 * MINUTE, stock: { 红武器: 1 } }
   fakeGoalTick(f, f.gid, NOW)
-  assert.equal(redCount(buyer), 1)
-  assert.ok(!buyer.bag.equipped.weapon)
-  assert.equal(f.fakeGhostStock.stock.红武器, undefined)
-  assert.equal(buyer.money, 100000 - 800)
-  fakeArtifactTick(f, NOW)
-  assert.ok(buyer.bag.artifacts.wanhun)
   assert.equal(redCount(buyer), 0)
-  assert.equal(count(buyer, '云裳仙蕊'), 0)
+  assert.ok(!buyer.bag.equipped.weapon)
+  assert.equal(buyer.money, 100000)
+  assert.equal(f.trades.length, 0)
+  fakeArtifactTick(f, NOW)
+  assert.equal(buyer.bag.artifacts.wanhun, undefined)
+  assert.equal(redCount(buyer), 0)
+  assert.equal(count(buyer, '云裳仙蕊'), 6)
 })
 
 test('按真实缺口买齐云裳后，可实际铸成彩武并进一步炼成万魂幡', t => {
