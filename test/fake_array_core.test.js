@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
 import * as equip from '../components/equip_data.js'
-import { fakeArtifactTick, fakeGoalTick, fakeRareTick, FAKE_RARE_POOL, fakeTradePrice, fakeBasePrice } from '../components/fake_data.js'
+import { fakeArtifactTick, fakeGoalTick, fakeRareTick, FAKE_RARE_POOL, fakeTradePrice, fakeBasePrice, fakePillTargets } from '../components/fake_data.js'
+import { fakeEquipmentNeeds } from '../components/fake_equipment_crafting.js'
 import { ARRAY_CORE, ARRAY_CORE_RECIPE, ARRAY_CORE_COST } from '../components/equip_data.js'
 import { PUPPET_INITIAL_COST } from '../components/puppet_data.js'
 
@@ -47,9 +48,9 @@ function privateEvent (name) {
   const bagCode = eventSource.slice(eventSource.indexOf('function ensureFakeBag ('), eventSource.indexOf('const DIR =')).replace(/export /g, '')
   const goalStart = eventSource.indexOf('const FAKE_ARTIFACT_GOALS =')
   const goalsCode = eventSource.slice(goalStart, eventSource.indexOf('/** 法宝目标材料不主动甩卖', goalStart))
-  const needCode = ['fakeGoalOf', 'fakeMissingCoreCount', 'fakeArtifactNeeds', 'fakeNeedCount', 'fakeSocialPair'].map(eventCode).join('\n')
+  const needCode = ['fakeGoalOf', 'fakeMissingCoreCount', 'fakeArtifactNeeds', 'fakeMaterialNeeds', 'fakeNeedCount', 'fakeSocialPair'].map(eventCode).join('\n')
   return vm.runInNewContext(`${bagCode}\n${goalsCode}\n${needCode}\n${eventCode(name)}\n;${name}`, {
-    ...equip, PUPPET_INITIAL_COST,
+    ...equip, PUPPET_INITIAL_COST, fakeEquipmentNeeds, fakePillTargets,
     DEFAULT_REGION: 'center', npcCanAct: (f, p) => !!p?.alive,
     Math: Object.assign(Object.create(Math), { random: () => name === 'genTeacherDisciple' ? 0.99 : 0 }),
     pick: values => values[0],
@@ -238,6 +239,7 @@ test('成品核心有卖家也不直接购买，缺核者通过自己的原材�
 test('合核资金计入总预算，不足200万时变卖闲置物品并保留九份原材', t => {
   t.mock.method(Math, 'random', () => 0)
   const saver = person('筹合核钱', { ...PUPPET_INITIAL_COST.materials, ...raw(9), [ARRAY_CORE]: 0 }, { money: 1000000 })
+  saver.bag.items.聚宝丹 = { count: 1 } // 自己需要的修为丹不再作为闲置物变卖。
   const buyer = person('买闲置物', {}, { ...wait, money: 5000000 })
   const f = fixture(saver, buyer)
   fakeGoalTick(f, f.gid, NOW)
@@ -291,10 +293,11 @@ test('变卖事件保留成品核心、合核九份原材和绑定功法，只�
   assert.equal(sell(f, NOW), null)
   assertRaw(crafter, 9)
   assert.equal(count(crafter, '傀儡术下篇'), 1)
-  crafter.bag.items.修为丹 = { count: 2 }
+  const reserve = fakePillTargets(crafter).修为丹
+  crafter.bag.items.修为丹 = { count: reserve + 1 }
   const result = sell(f, NOW)
   assert.ok(result?.txt.includes('修为丹'))
-  assert.equal(count(crafter, '修为丹'), 1)
+  assert.equal(count(crafter, '修为丹'), reserve)
   assert.ok(crafter.money > 2000000)
   assertRaw(crafter, 9)
   assert.equal(count(crafter, '傀儡术下篇'), 1)

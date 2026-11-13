@@ -4,6 +4,7 @@ import { withGameLock } from './game_lock.js'
 import { injuryState, injuredPower } from './injury.js'
 import { absoluteWinRate, fightBestOf5 } from './fight.js'
 import { ensureFakeLuck, luckyChance, pickLuckyFake } from './fake_luck.js'
+import { fakeEquipmentNeeds, craftFakeEquipment } from './fake_equipment_crafting.js'
 import { ensureFakeRelations, repairFakeRelations, forgetFakeRelations, rememberFakeRelation, canFakeRomance, setFakeSpouses, addFakeEnemy, clearFakeFeud } from './fake_relations.js'
 import { sectMemberCapacity, sectOccupancy, canAdmitSectNpc, admitSectNpc } from './sect/capacity.js'
 import { takeVaultEquipAttrs, ensureVaultEquipAttrs } from './sect/war_loot.js'
@@ -1785,43 +1786,46 @@ async function genBreakthrough (f, t) {
   return await breakPerson(f, p)
 }
 /** 指定宗门成员闭关突破(灵力达标 → 连续突破直到灵力不足/到巅峰/失败; 破障丹或买得起则本次90%突破; 成功跨大境界为大事) */
+function fakeCanProgress (f, p, now) {
+  // 仆从可在家修炼服丹，外出采购仍遵守 npcCanAct 的完整限制。
+  return npcCanAct(f, p?.servantOf ? { ...p, servantOf: null } : p, now)
+}
 export async function breakPerson (f, p) {
-  if (npcInCave(f, p) || (Number(p?.fakeLostUntil) || 0) > Date.now()) return null
   const now = Date.now()
+  if (!fakeCanProgress(f, p, now) || now < (p.activities?.lastBreak2 || 0)) return null
   if (!p.activities) p.activities = {}
-  p.activities.lastBreak2 = now // 突破无冷却(灵力达标即可反复尝试/连续突破)
   const band = levelBand(p)
   if (p.level >= band[1]) return null // 巅峰不产事件
   if ((p.exp || 0) < fakeSubThreshold(p.level + 1)) return null // 灵力不足不产事件
-  /* 有破障丹 → 服丹(本次90%); 没有且有钱 → 自动从丹阁买(玩家一致); 否则用基础成功率(功法+演武场) */
-  let usedPill = false
-  if (p.bag && p.bag.items && itemCount(p.bag.items['破障丹']) > 0) {
-    fakeTakeItem(p.bag, '破障丹')
-    usedPill = true
-  } else if (await buyPillForBreak(f, p)) {
-    usedPill = true
-  }
-  /* 灵力达标 → 连续突破(每次成功后若灵力仍够下一级则继续), 直到灵力不足/到巅峰/失败 */
+  const want = fakePillTargets(p, f)['破障丹'] - itemCount(p.bag?.items?.['破障丹'])
+  if (want > 0) await buyWishItem(f, f.gid, p, { type: 'pill', tier: 2, quantity: want })
+  return performFakeBreaks(f, p, now, true)
+}
+/** 每一重独立消耗一颗破障丹并判定；失败即停，保留其余丹药。 */
+function performFakeBreaks (f, p, now, allowNatural = false) {
+  if (now < (p.activities?.lastBreak2 || 0) || p.level >= REALM_MAX_LEVEL || (p.exp || 0) < fakeSubThreshold(p.level + 1)) return null
+  p.activities ||= {}
   const oldRealm = Math.floor((p.level - 1) / 4)
-  let up = 0
-  let guard = 0
-  while (p.level < band[1] && (p.exp || 0) >= fakeSubThreshold(p.level + 1) && guard < 50) {
-    guard++
-    const rate = (usedPill && up === 0) ? 90 : fakeBreakRateFull(f, p) // 破障丹只保第一次突破
-    if (Math.random() * 100 > rate) break
+  let up = 0, used = 0, attempts = 0, failed = false
+  while (p.level < REALM_MAX_LEVEL && (p.exp || 0) >= fakeSubThreshold(p.level + 1) && attempts < 99) {
+    const naturalRate = luckyChance(fakeBreakRateFull(f, p), p)
+    const pillRate = luckyChance(90, p)
+    const hasPill = itemCount(p.bag?.items?.['破障丹']) > 0 && pillRate > naturalRate
+    if (!hasPill && !allowNatural && naturalRate < pillRate) break
+    if (hasPill) { if (!fakeTakeItem(p.bag, '破障丹')) break; used++ }
+    attempts++
+    const rate = hasPill ? pillRate : naturalRate
+    if (Math.random() * 100 >= rate) { failed = true; break }
     p.level++
-    mergeAccum(p) // 突破并入累计池
+    mergeAccum(p)
     up++
   }
-  if (up <= 0) {
-    /* 突破失败静默(灵力仍在, 下小时再试; 不刷失败事件) */
-    return null
-  }
+  if (!attempts) return null
+  p.activities.lastBreak2 = now + (failed ? 5 : 1) * 60000
   const major = Math.floor((p.level - 1) / 4) > oldRealm
-  const txt = usedPill
-    ? (up > 1 ? `【突破】${p.name} 服下${itemIcon('破障丹')}破障丹势如破竹，连破 ${up} 重天，直达${levelNameOf(p.level)}！` : `【突破】${p.name} 服下${itemIcon('破障丹')}破障丹，冲破瓶颈，突破至${levelNameOf(p.level)}！`)
-    : (up > 1 ? `【突破】${p.name} 闭关苦修厚积薄发，连破 ${up} 重天，直达${levelNameOf(p.level)}！` : `【突破】${p.name} 闭关苦修，成功突破至${levelNameOf(p.level)}`)
-  return { type: 'break', major, ...evMeta(p), txt }
+  const drug = used ? `服下${itemIcon('破障丹')}破障丹×${used}，` : '闭关苦修，'
+  const result = up ? `${up > 1 ? `连破 ${up} 重天，` : '冲破瓶颈，'}达到${levelNameOf(p.level)}${failed ? '，随后冲关未成，暂歇调息' : ''}` : '冲关未成，暂歇调息'
+  return { type: up ? 'break' : 'backfire', major, ...evMeta(p), txt: `【突破】${p.name} ${drug}${result}` }
 }
 /* 11.走火入魔(纯剧情, 灵力只增不减与玩家一致) */
 function genBackfire (f, t) {
@@ -2080,20 +2084,13 @@ function genCraft (f, t) {
   const p = pickAlive(f)
   if (!p) return null
   const who = p.status === 'sect' && p.sect ? sectName(f, p.sect) : '散修'
-  /* 有药材 → 合成丹药 */
-  const herbs = p.bag && p.bag.items ? Object.keys(p.bag.items).filter(n => MATERIAL_TPL[n]) : []
-  if (herbs.length && Math.random() < 0.6) {
-    const herb = pick(herbs)
-    fakeTakeItem(p.bag, herb)
-    const pill = pick(['修为丹', '破障丹', '聚宝丹', '惊鸿丹'])
-    if (!p.bag) p.bag = { items: {}, equipped: {} }
-    fakeAddItem(p.bag, pill, 1)
-    return { type: 'flavor', ...evMeta(p), txt: `【炼丹】${who} ${p.name} 以【${herb}】炼成一枚${pill}！` }
-  }
-  if (Math.random() < 0.2) {
-    return { type: 'backfire', ...evMeta(p), txt: `【炼丹】${who} ${p.name} 炼丹炸炉，身负轻伤（药材损毁）` }
-  }
-  return { type: 'flavor', ...evMeta(p), txt: `【炼丹】${who} ${p.name} 开炉炼丹，炼成一炉上品灵丹` }
+  const products = craftFakeEquipment(p, t, fakeTaichuMaterialNeeds(p))
+  if (products.length) return { type: 'flavor', ...evMeta(p), txt: `【炼器】${who} ${p.name} 消耗${products.map(x => x.materials).join('；')}，炼成${products.map(x => x.name).join('、')}` }
+  const pill = Object.keys(SECT_RECIPES).find(name => itemCount(p.bag?.items?.[name]) < 2 && SECT_RECIPES[name].every(([mat, count]) => itemCount(p.bag?.items?.[mat]) >= count + fakeNeedCount(f, p, mat)))
+  if (!pill) return null
+  for (const [mat, count] of SECT_RECIPES[pill]) fakeTakeItem(p.bag, mat, count)
+  fakeAddItem(p.bag, pill, 1)
+  return { type: 'flavor', ...evMeta(p), txt: `【炼丹】${who} ${p.name} 按配方消耗${SECT_RECIPES[pill].map(([mat, count]) => `${mat}×${count}`).join('、')}，炼成${pill}×1` }
 }
 /* 25.游历拜访(纯剧情) */
 function genVisit (f, t) {
@@ -2145,9 +2142,9 @@ async function genCultivate (f, t) {
   return await cultivatePerson(f, p)
 }
 /** 指定人修炼(每人30分钟一次, 与玩家修炼冷却一致; 巅峰不产事件; 灵力达标自动突破, 成功跨大境界为大事; 有破障丹或买得起服丹90%) */
-export async function cultivatePerson (f, p) {
-  if (npcInCave(f, p) || (Number(p?.fakeLostUntil) || 0) > Date.now()) return null
+export async function cultivatePerson (f, p, { breakthrough = true } = {}) {
   const now = Date.now()
+  if (!fakeCanProgress(f, p, now)) return null
   if (!p.activities) p.activities = {}
   p.activities.lastCultivate2 = now + 30 * 60000 // 冷却与玩家一致(30分钟)
   const band = levelBand(p)
@@ -2160,26 +2157,9 @@ export async function cultivatePerson (f, p) {
     : Math.round((1 + 19 * Math.random()) * 5)
   addExp(p, gain)
   /* 玩家体系: 灵力达标尝试突破(不清零灵力, 累计制; 有破障丹或买得起服丹90%, 否则基础+功法+演武场) */
-  if (p.level < REALM_MAX_LEVEL && p.exp >= fakeSubThreshold(p.level + 1)) {
-    let usedPill = false
-    let rate = fakeBreakRateFull(f, p)
-    if (p.bag && p.bag.items && itemCount(p.bag.items['破障丹']) > 0) {
-      fakeTakeItem(p.bag, '破障丹')
-      usedPill = true
-      rate = 90
-    } else if (await buyPillForBreak(f, p)) {
-      usedPill = true
-      rate = 90
-    }
-    rate = luckyChance(rate, p)
-    if (Math.random() * 100 < rate) {
-      const oldRealm = Math.floor((p.level - 1) / 4)
-      p.level++
-      mergeAccum(p) // 突破并入累计池
-      const major = Math.floor((p.level - 1) / 4) > oldRealm
-      return { type: 'break', major, ...evMeta(p), txt: usedPill ? `【突破】${p.name} 服下${itemIcon('破障丹')}破障丹，冲破瓶颈，成功突破至${levelNameOf(p.level)}！` : `【突破】${p.name} 潜心修炼，灵力圆满，成功突破至${levelNameOf(p.level)}！` }
-    }
-    return { type: 'backfire', ...evMeta(p), txt: usedPill ? `【突破】${p.name} 服下${itemIcon('破障丹')}破障丹冲击瓶颈，惜败未破境` : `【突破】${p.name} 灵力已足，冲击境界失败，来日再试` }
+  if (breakthrough && p.level < REALM_MAX_LEVEL && p.exp >= fakeSubThreshold(p.level + 1)) {
+    const event = await breakPerson(f, p)
+    if (event) return event
   }
   return { type: 'flavor', ...evMeta(p), txt: `【修炼】${p.name} 闭关修炼，灵力精进（+${gain}）` }
 }
@@ -2218,21 +2198,7 @@ export function stallPerson (f, p) {
   const who = p.status === 'sect' && p.sect ? sectName(f, p.sect) : '散修'
   return { type: 'flavor', ...evMeta(p), onlyPerson: true, txt: `【摆摊】${who} ${p.name} 在${regionNameOf(loc)}摆摊，赚得 ${earn - tax} 灵石（税率${rate}%，扣税 ${tax}）` }
 }
-/* 30.采买(玩家化: 花灵石购丹入背包; 同步进天下大事+江湖交易, 同 genTrade) */
-function genShop (f, t) {
-  const p = pickAlive(f)
-  if (!p) return null
-  const item = pick(['修为丹', '破障丹', '聚宝丹'])
-  const price = { '修为丹': 100, '破障丹': 500, '聚宝丹': 800 }[item]
-  if ((p.money || 0) < price) return null
-  p.money -= price
-  if (!p.bag) p.bag = { items: {}, equipped: {} }
-  fakeAddItem(p.bag, item, 1)
-  const who = p.status === 'sect' && p.sect ? sectName(f, p.sect) : '散修'
-  const txt = `【采买】${who} ${p.name} 于坊市购得【${item}】（-${price}灵石）`
-  logTrade(f, txt)
-  return { type: 'flavor', ...evMeta(p), txt }
-}
+/* 采买统一由 tradeTick 使用三阁真实库存，不再通过剧情事件低价生成丹药。 */
 /* 31.洗劫藏宝阁(伪玩家: 与玩家一样分20档难度——贪者富贵险中求选高难度, 怂者保平安选低难度;
  * 成败按个人战力 vs 该档守卫判定; 被抓真押入藏宝阁天牢0~120分钟, 可在#天下天牢查看) */
 const VAULT_LOOT = ['修为丹', '破障丹', '聚宝丹', '星霜草', '望舒花', '月魄石', '流光玉', '流霜剑', '功法残卷', '灵石袋']
@@ -2820,48 +2786,31 @@ function genPill (f, t) {
   if (!p) return null
   return pillPerson(f, p)
 }
-/** 指定人吃丹(背包有丹吃, 每人90分钟一次; 破障丹仅突破时用, 灵力不足留着)
- *  增益丹(战斗/生活)一律不吃——只留给打架时(fakeCombatPill)用, 平时省着 */
+/** 为下一轮四重修炼准备丹药；受99颗、真实灵力缺口和累计池容量共同约束。 */
+export function fakePillTargets (p, f = null) {
+  if (!p || p.level >= REALM_MAX_LEVEL) return { 修为丹: 0, 破障丹: 0 }
+  const exp = Number(p.exp) || 0, accum = Math.max(0, Number(p.accum) || 0)
+  const next = fakeSubThreshold(p.level + 1)
+  const room = Math.max(0, next - exp) + Math.max(0, FAKE_ACCUM_CAP - accum)
+  const goal = fakeSubThreshold(Math.min(REALM_MAX_LEVEL, p.level + 4))
+  const growth = exp >= next ? 0 : Math.min(99, Math.floor(room / 200), Math.max(0, Math.ceil((goal - exp - accum) / 200)))
+  let levels = 0
+  for (let lv = p.level + 1; lv <= REALM_MAX_LEVEL && levels < 99 && fakeSubThreshold(lv) <= exp + accum; lv++) levels++
+  const needBreakPill = !f || luckyChance(fakeBreakRateFull(f, p), p) < luckyChance(90, p)
+  return { 修为丹: growth, 破障丹: needBreakPill ? Math.min(99, Math.max(levels, exp >= next ? 1 : (growth > 0 ? 2 : 0))) : 0 }
+}
+/** 修为丹按需批量服用；已到瓶颈先冲关，破障丹逐重消耗，失败即停。 */
 export function pillPerson (f, p) {
-  if (npcInCave(f, p) || (Number(p?.fakeLostUntil) || 0) > Date.now()) return null
   const now = Date.now()
+  if (!fakeCanProgress(f, p, now) || p.level >= REALM_MAX_LEVEL || now < (p.activities?.lastPill2 || 0)) return null
   if (!p.activities) p.activities = {}
-  const pills = p.bag && p.bag.items ? Object.keys(p.bag.items).filter(n => ['修为丹', '破障丹'].includes(n)) : []
-  if (!pills.length) return null
   const who = p.status === 'sect' && p.sect ? sectName(f, p.sect) : '散修'
-  const band = levelBand(p)
-  const canBreak = (p.exp || 0) >= fakeSubThreshold(p.level + 1) && p.level < band[1]
-  /* 丹药决策(知道好坏): 修为丹=修炼刚需随时吃; 破障丹=灵力达标才吃(90%破境), 否则省着;
-   *  增益丹一律不吃留打架(fakeCombatPill) */
-  const has = (n) => pills.includes(n)
-  let pill = null
-  if (canBreak) {
-    /* 灵力达标可突破: 破障丹最优先, 没有则吃修为丹冲灵力 */
-    pill = has('破障丹') ? '破障丹' : '修为丹'
-  } else {
-    /* 灵力不足: 吃修为丹攒灵力; 没有则省着(破障丹留给突破, 增益丹留给打架) */
-    pill = has('修为丹') ? '修为丹' : null
-  }
-  if (!pill) return null // 没有值得现在吃的 → 攒着
-  fakeTakeItem(p.bag, pill)
-  if (pill === '修为丹') {
-    p.activities.lastPill2 = now + rand([30, 60]) * 60000 // 吃丹冷却30~60分钟
-    addExp(p, 200)
-    return { type: 'flavor', ...evMeta(p), txt: `【服丹】${who} ${p.name} 服下${itemIcon('修为丹')}修为丹，灵力大涨（+200）` }
-  }
-  if (pill === '破障丹') {
-    p.activities.lastPill2 = now + rand([30, 60]) * 60000 // 吃丹冷却30~60分钟
-    /* 玩家一致: 破障丹突破成功率90% (此时灵力已达标) */
-    if (Math.random() * 100 <= 90) {
-      const oldRealm = Math.floor((p.level - 1) / 4)
-      p.level++
-      mergeAccum(p) // 突破并入累计池
-      const major = Math.floor((p.level - 1) / 4) > oldRealm
-      return { type: 'break', major, ...evMeta(p), txt: `【服丹】${who} ${p.name} 服下${itemIcon('破障丹')}破障丹，冲破瓶颈，突破至${levelNameOf(p.level)}！` }
-    }
-    return { type: 'backfire', ...evMeta(p), txt: `【服丹】${who} ${p.name} 服下${itemIcon('破障丹')}破障丹冲击瓶颈，惜败未破境` }
-  }
-  return { type: 'flavor', ...evMeta(p), txt: `【服丹】${who} ${p.name} 服下${pill}` }
+  if ((p.exp || 0) >= fakeSubThreshold(p.level + 1)) return performFakeBreaks(f, p, now)
+  const count = Math.min(fakePillTargets(p, f)['修为丹'], itemCount(p.bag?.items?.['修为丹']))
+  if (count <= 0 || !fakeTakeItem(p.bag, '修为丹', count)) return null
+  addExp(p, count * 200)
+  p.activities.lastPill2 = now + rand([30, 60]) * 60000
+  return { type: 'flavor', ...evMeta(p), txt: `【服丹】${who} ${p.name} 服下${itemIcon('修为丹')}修为丹×${count}，灵力精进（+${count * 200}）` }
 }
 
 /* 仙帝丹: 玩家不可服用(可自由交易); 伪玩家拿到后自动服用, 直接升到仙帝第10重(level 78) */
@@ -2882,6 +2831,7 @@ export function fakeCombatPill (f, p) {
   try {
     if (!p || !p.bag || !p.bag.items) return false
     const now = Date.now()
+    if (p.pill?.until > now && COMBAT_PILLS.includes(p.pill.name)) return false
     const name = COMBAT_PILLS.find(n => itemCount(p.bag.items[n]) > 0)
     if (!name) return false
     fakeTakeItem(p.bag, name)
@@ -3038,7 +2988,7 @@ export const EVENT_GENS = [
   /* 关系(结怨/结为道侣/抢道侣/知己/手足/师徒互动/和解/同行秘境/结伴劫修) */
   genGrudge, genRomance, genStealWife, genBond, genSibling, genTeacherDisciple, genReconcile, genSecretWith, genTeamRob,
   /* 修炼生活(炼丹/采买/洗劫藏宝阁/远行/赠礼/挂机/低保/上交/双修/互动/修习/秘境/变卖/夺宝/交易) */
-  genCraft, genShop, genVaultRob, genTravel, genGift,
+  genCraft, genVaultRob, genTravel, genGift,
   genIdle, genPoor, genSubmit, genShuangxiu, genIntimate, genPractice,
   genSecret, genSell, genLoot, genFate,
   /* 装备功法(穿戴/运转) */
@@ -3189,13 +3139,13 @@ async function perPersonActs (f, now = Date.now()) {
       const emperorEv = fakeEatEmperorPill(f, p, now)
       if (emperorEv) logEvent(f, emperorEv.type, emperorEv.txt, now, { ...emperorEv })
     } catch (err) { }
-    if (isFakeCaptive(f, p.name) || isInSectJail(f, p.name) || isInRaidJail(f, p.name) || isInSectMine(f, p.name)) continue // 被俘/关押/送矿中: 暂停普通活动
+    if (!fakeCanProgress(f, p, now)) continue // 被俘、关押、送矿和在途时暂停普通活动。
     try {
       const acts = p.activities || (p.activities = {})
       const fx = actFx(p)
       /* 修炼: 冷却到 + 性格概率(苦修勤/懒散惰), 未触发也进冷却防重复判定; 只记个人事迹 */
       if (now >= (acts.lastCultivate2 || 0)) {
-        if (Math.random() < luckyChance(0.65 * fx.cult, p, 1)) { const ev = await cultivatePerson(f, p); if (ev) logEvent(f, ev.type, ev.txt, now, { ...ev, onlyPerson: true }) }
+        if (Math.random() < luckyChance(0.65 * fx.cult, p, 1)) { const ev = await cultivatePerson(f, p, { breakthrough: false }); if (ev) logEvent(f, ev.type, ev.txt, now, { ...ev, onlyPerson: true }) }
         else acts.lastCultivate2 = now + 60 * 60000
       }
       /* 吃丹: 有丹大概率吃(90%) */
@@ -3423,15 +3373,20 @@ function fakeMissing (p, goal) {
   if ((Number(p.money) || 0) < money) miss['灵石'] = money - (Number(p.money) || 0)
   return miss
 }
-/** 某人为了自己的法宝目标，仍然需要多少件该材料(用于阻止互相倒卖同一件刚需材料) */
-function fakeNeedCount (f, p, name) {
-  /* 留足自己的安全行程，避免备石刚完成就被当成余货卖走。 */
-  if (name === '魂石') return fakeCaveSupplyTarget(p, personPower(p))
+function fakeMaterialNeeds (p) {
   const goal = fakeGoalOf(p)
-  const taichuNeed = Number(fakeTaichuMaterialNeeds(p)[name]) || 0
-  if (!goal) return taichuNeed
+  const taichu = fakeTaichuMaterialNeeds(p)
+  const gear = fakeEquipmentNeeds(p, taichu)
+  const artifact = goal ? fakeArtifactNeeds(p, goal) : {}
+  const names = new Set([...Object.keys(taichu), ...Object.keys(gear), ...Object.keys(artifact)])
   /* 关键: 要保留的是“目标总需求”, 不是“当前缺口”。否则凑够5残卷的人会立刻被当成卖家把材料卖回去, 形成循环。 */
-  return Math.max(taichuNeed, Number(fakeArtifactNeeds(p, goal)[name]) || 0)
+  return Object.fromEntries([...names].map(name => [name, Math.max(Number(taichu[name]) || 0, Number(gear[name]) || 0, Number(artifact[name]) || 0)]))
+}
+/** 某人自己的真实需求，用于阻止互相倒卖同一件刚需物。 */
+function fakeNeedCount (f, p, name) {
+  if (name === '魂石') return fakeCaveSupplyTarget(p, personPower(p))
+  if (name === '修为丹' || name === '破障丹') return fakePillTargets(p, f)[name]
+  return Number(fakeMaterialNeeds(p)[name]) || 0
 }
 function fakeTransferDeal (f, seller, buyer, item, cost, wc = null, count = 1) {
   count = Math.max(1, Math.floor(Number(count) || 1))
@@ -3444,7 +3399,8 @@ function fakeTransferDeal (f, seller, buyer, item, cost, wc = null, count = 1) {
   if ((Number(buyer.money) || 0) < total) return false
   /* 先交货再扣钱: 交货失败时买卖双方都不变 */
   if (!buyer.bag) buyer.bag = { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} }
-  const autoEquip = !(isFakeRedWeapon(item) && fakeGoalOf(buyer) === '万魂幡' && fakeNeedsSpecialWeapon(buyer))
+  const colorBase = EQUIP_TPL[item]?.quality === 6 && Object.keys(fakeEquipmentNeeds(buyer, fakeTaichuMaterialNeeds(buyer))).length > 0
+  const autoEquip = !colorBase && !(isFakeRedWeapon(item) && fakeGoalOf(buyer) === '万魂幡' && fakeNeedsSpecialWeapon(buyer))
   let moved = 0
   for (let i = 0; i < count; i++) {
     if (!fakeTransferEntry(seller.bag, buyer.bag, item, autoEquip)) break
@@ -3589,8 +3545,31 @@ function fakeTradeDesire (p, miss = {}, stoneTarget = 1) {
 /** 缺什么就买什么、缺钱就卖多余；缺材料在别的大区就赶路过去 */
 export function fakeGoalTick (f, gid, now = Date.now()) {
   const alive = Object.values(f.roster || {}).filter(p => p && p.alive && (Number(p.fakeLostUntil) || 0) <= now && !npcInCave(f, p) && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !p.fakeTravel && !isFakeCaptive(f, p.name) && !isInSectJail(f, p.name) && !isInRaidJail(f, p.name) && !isInSectMine(f, p.name))
+  // 每轮只索引现有持货者；不把本轮刚买进的材料马上撮合卖回去。
+  const offers = new Map()
+  for (const q of alive) for (const name of Object.keys(q.bag?.items || {})) {
+    if (itemCount(q.bag.items[name]) <= 0) continue
+    if (!offers.has(name)) offers.set(name, [])
+    offers.get(name).push(q)
+  }
   let wc = null
   const worldCache = () => wc || (wc = { w: getWorld(gid), dirty: false })
+  const needsCache = new Map()
+  const needCount = (p, name) => {
+    if (!needsCache.has(p)) {
+      const needs = { ...fakeMaterialNeeds(p), ...fakePillTargets(p, f) }
+      delete needs['魂石'] // 魂石继续沿用安全行程需求，与 fakeNeedCount 完全一致。
+      needsCache.set(p, needs)
+    }
+    const needs = needsCache.get(p)
+    if (name === '魂石' && needs[name] === undefined) needs[name] = fakeCaveSupplyTarget(p, personPower(p))
+    return Number(needs[name]) || 0
+  }
+  const transfer = (seller, buyer, item, cost, quantity = 1) => {
+    const done = fakeTransferDeal(f, seller, buyer, item, cost, worldCache(), quantity)
+    if (done) { needsCache.delete(seller); needsCache.delete(buyer) }
+    return done
+  }
   for (const p of alive) {
     if (now < (p.fakeGoalAt || 0)) continue
     if (Array.isArray(f.fakeCaves) && f.fakeCaves.some(party => (party.names || []).includes(p.name))) continue
@@ -3599,6 +3578,10 @@ export function fakeGoalTick (f, gid, now = Date.now()) {
     const cfg = goal ? FAKE_ARTIFACT_GOALS[goal] : null
     const miss = goal ? fakeMissing(p, goal) : {}
     const taichuPlan = p.taichuTarget ? planFakeTaichuEquipment(p) : null
+    const gearNeeds = fakeEquipmentNeeds(p, fakeTaichuMaterialNeeds(p))
+    const gearMissing = Object.fromEntries(Object.entries(gearNeeds).filter(([name, count]) => itemCount(p.bag?.items?.[name]) < count)
+      .map(([name, count]) => [name, count - itemCount(p.bag?.items?.[name])]))
+    for (const [name, count] of Object.entries(gearMissing)) miss[name] = Math.max(miss[name] || 0, count)
     for (const [name, count] of Object.entries(taichuPlan?.missing || {})) miss[name] = Math.max(miss[name] || 0, count)
     if (taichuPlan && (Number(p.money) || 0) < taichuPlan.recipe.stones) miss['灵石'] = Math.max(miss['灵石'] || 0, taichuPlan.recipe.stones - (Number(p.money) || 0))
     const stoneTarget = fakeCaveSupplyTarget(p, personPower(p))
@@ -3610,7 +3593,14 @@ export function fakeGoalTick (f, gid, now = Date.now()) {
     const moneyLow = (Number(p.money) || 0) < 5000
     const stoneCount = itemCount(p.bag && p.bag.items ? p.bag.items['魂石'] : 0)
     const needStone = stoneCount < stoneTarget
-    let wanted = needStone ? '魂石' : Object.keys(miss).find(n => n !== '灵石')
+    // 彩装是最快的装备提升：市场有整份余货时优先筹料，没货则继续其它真实需求。
+    // 有现成红胚时直接求购，省去先筹五种矿物再炼胚的等待。
+    const redOffer = !Object.keys(gearNeeds).some(name => EQUIP_TPL[name]?.quality === 6) && Object.keys(gearNeeds).length
+      ? Object.keys(EQUIP_TPL).find(name => EQUIP_TPL[name].quality === 6 && (offers.get(name) || []).some(q => q.name !== p.name && itemCount(q.bag.items[name]) > needCount(q, name))) : null
+    if (redOffer) { gearMissing[redOffer] = 1; miss[redOffer] = 1 }
+    const gearWanted = [...Object.keys(gearMissing)].sort((a, b) => Number(EQUIP_TPL[b]?.quality === 6) - Number(EQUIP_TPL[a]?.quality === 6))
+      .find(name => (offers.get(name) || []).some(q => q.name !== p.name && itemCount(q.bag?.items?.[name]) - needCount(q, name) >= gearMissing[name]))
+    let wanted = gearWanted || (needStone ? '魂石' : Object.keys(miss).find(n => n !== '灵石' && !Object.hasOwn(gearMissing, n)))
     if (!wanted && !moneyLow) {
       if (itemCount(p.bag && p.bag.items ? p.bag.items['修为丹'] : 0) < 1) wanted = '修为丹'
       else if (itemCount(p.bag && p.bag.items ? p.bag.items['破障丹'] : 0) < 1 && (p.exp || 0) >= fakeSubThreshold(p.level + 1) * 0.7) wanted = '破障丹'
@@ -3618,40 +3608,41 @@ export function fakeGoalTick (f, gid, now = Date.now()) {
     /* 红武器可用任一名称，优先求购市场现有余货，避免随机挑中无人出售的品种。 */
     if (wanted === '红武器') {
       wanted = pick(alive.filter(q => q.name !== p.name).flatMap(q => Object.keys(q.bag?.items || {})
-        .filter(n => isFakeRedWeapon(n) && itemCount(q.bag.items[n]) > fakeNeedCount(f, q, n)))) || fakeRedWeaponName()
+        .filter(n => isFakeRedWeapon(n) && itemCount(q.bag.items[n]) > needCount(q, n)))) || fakeRedWeaponName()
       miss[wanted] = miss['红武器']
     }
     /* 1. 缺钱: 卖非目标材料/多余物品给有钱的伪玩家 */
-    if (moneyLow || miss['灵石']) {
+    const gearAffordable = gearWanted && (Number(p.money) || 0) >= fakeTradePrice(f, gearWanted, fakeBasePrice(gearWanted)) * gearMissing[gearWanted]
+    if ((moneyLow || miss['灵石']) && !gearAffordable) {
       const goalMats = cfg?.mats || {}
       const reserved = new Set([...Object.keys(goalMats), ...FAKE_ARTIFACT_MATS, ...Object.keys(taichuPlan?.needs || {})])
       for (const n of Object.keys(p.bag && p.bag.items ? p.bag.items : {})) {
         if (EQUIP_TPL[n] && EQUIP_TPL[n].quality === 6 && EQUIP_TPL[n].type === 'weapon') reserved.add(n)
       }
-      const surplus = Object.keys(p.bag && p.bag.items ? p.bag.items : {}).filter(n => !reserved.has(n) && itemCount(p.bag.items[n]) > 0)
+      const surplus = Object.keys(p.bag && p.bag.items ? p.bag.items : {}).filter(n => !isBound(n) && !reserved.has(n) && itemCount(p.bag.items[n]) > needCount(p, n))
       if (surplus.length) {
         const item = pick(surplus)
         const price = fakeTradePrice(f, item, fakeBasePrice(item))
         const buyer = pick(alive.filter(q => q.name !== p.name && (Number(q.money) || 0) >= price && itemCount(q.bag && q.bag.items ? q.bag.items[item] : 0) <= 1))
-        if (buyer && fakeTransferDeal(f, p, buyer, item, price, worldCache())) continue
+        if (buyer && transfer(p, buyer, item, price)) continue
       }
     }
     /* 2. 缺材料/缺药: 按正常供需报价向真实持货者求购。 */
     if (wanted) {
       const price = fakeTradePrice(f, wanted, fakeBasePrice(wanted))
-      const seller = pick(alive.filter(q => q.name !== p.name && itemCount(q.bag && q.bag.items ? q.bag.items[wanted] : 0) > fakeNeedCount(f, q, wanted)))
+      const seller = pick((offers.get(wanted) || []).filter(q => q.name !== p.name && itemCount(q.bag?.items?.[wanted]) > needCount(q, wanted)))
       if (seller) {
         const sellerHave = itemCount(seller.bag && seller.bag.items ? seller.bag.items[wanted] : 0)
-        const sellerNeed = fakeNeedCount(f, seller, wanted)
+        const sellerNeed = needCount(seller, wanted)
         const missingCount = wanted === '魂石' ? stoneTarget - stoneCount : Math.max(1, Number(miss[wanted]) || 1)
         const take = Math.min(missingCount, Math.max(0, sellerHave - sellerNeed))
         /* 只接受一次补齐缺口的大单; 不接受1件1件来回倒, 避免材料在人群里空转 */
-        if (take >= missingCount && fakeTransferDeal(f, seller, p, wanted, price * take, worldCache(), take)) continue
+        if (take >= missingCount && transfer(seller, p, wanted, price * take, take)) continue
       }
       /* 魔窟商人: 西域内用每人自己的12格货单兑换; 缺口材料便宜时先买再换 */
       if (wanted === '魂石' && (p.loc || DEFAULT_REGION) === 'west') {
         const shop = fakeMerchantShop(f, p, now)
-        if (fakeMerchantTryExchange(f, p, shop, now, alive, worldCache())) continue
+        if (fakeMerchantTryExchange(f, p, shop, now, alive, worldCache())) { needsCache.clear(); continue }
       }
       /* 3. 没有卖家: 按玩家规则赶路过去, 不能再瞬移 */
       const region = cfg?.regions?.[wanted] || (wanted === '魂石' ? 'west' : null)
@@ -3697,9 +3688,13 @@ function fakeCraftArrayCores (f, p, now) {
 /** 伪玩家按玩家同配方自行制作核心、特殊彩武和法宝。 */
 export function fakeArtifactTick (f, now = Date.now()) {
   for (const p of Object.values(f.roster || {})) {
-    if (!p || !p.alive || (Number(p.fakeLostUntil) || 0) > now || npcInCave(f, p) || p.realmBusy || p.fakeTravel || warActorOwner(f, 'fake', p.name)) continue
+    if (!npcCanAct(f, p, now)) continue
     if (!p.bag) p.bag = { items: {}, equipped: {}, equippedAttr: {}, artifacts: {} }
     if (!p.bag.artifacts) p.bag.artifacts = {}
+    const equipment = craftFakeEquipment(p, now, fakeTaichuMaterialNeeds(p))
+    for (const product of equipment) {
+      logEvent(f, 'artifact', `【炼器】${p.name} 消耗${product.materials}，炼成${itemIcon(product.name)}${product.name}，择优换装。`, now, { who: [p.name], onlyPerson: true })
+    }
     /* 伪玩家自己铸造特殊彩武: 6云裳仙蕊 + 1件红武器, 与玩家配方一致 */
     if (fakeNeedsSpecialWeapon(p) && itemCount(p.bag.items['云裳仙蕊']) >= 6) {
       const red = fakeRedWeaponMaterial(p)
@@ -4308,15 +4303,14 @@ function fakeWish (f, p) {
   const money = Number(p.money) || 0
   const equipped = p.bag?.equipped || {}
   const items = p.bag?.items || {}
-  const tiers = money < 1000 ? [1, 2] : (money < 3000 ? [2, 3] : (money < 8000 ? [3, 4] : [4, 5]))
-  const tier = tiers[Math.floor(Math.random() * tiers.length)]
+  const tier = money < 1000 ? 1 : (money < 4000 ? 2 : (money < 12000 ? 3 : (money < 30000 ? 4 : 5)))
   const wish = (type, part, targetTier = tier) => ({
     type, ...(part ? { part } : {}), tier: targetTier,
     price: [0, 200, 1000, 4000, 12000, 30000][targetTier], at: Date.now()
   })
   if (!equipped.weapon) return wish('weapon', 'weapon')
   if (gongfaScore(p.activeGongfa) <= 0) return wish('gongfa')
-  if ((p.exp || 0) >= fakeSubThreshold(p.level + 1) * 0.7 && itemCount(items['破障丹']) <= 0) return wish('pill', null, 2)
+  if (p.level < REALM_MAX_LEVEL && (p.exp || 0) >= fakeSubThreshold(p.level + 1) * 0.7 && itemCount(items['破障丹']) <= 0) return wish('pill', null, 2)
   const emptySlots = FAKE_EQUIP_SLOTS.filter(slot => !equipped[slot])
   if (emptySlots.length) return wish('weapon', emptySlots[Math.floor(Math.random() * emptySlots.length)])
   let type
@@ -4363,6 +4357,7 @@ async function buyWishItem (f, gid, p, w) {
       scope = scope.filter(name => !learned.has(name) && gongfaScore(name) > gongfaScore(p.activeGongfa))
     } else {
       scope = scope.filter(name => name === (w.tier === 2 ? '破障丹' : '修为丹'))
+      scope = scope.filter(name => itemCount(p.bag?.items?.[name]) < fakePillTargets(p, f)[name])
     }
     const qOf = name => kind === 'pill' ? (name === '破障丹' ? 2 : 1) : (EQUIP_TPL[name] || GONGFA_TPL[name]).quality
     const pool = scope.filter(name => qOf(name) <= w.tier)
@@ -4370,12 +4365,18 @@ async function buyWishItem (f, gid, p, w) {
     pool.sort((a, b) => qOf(b) - qOf(a) || scoreOf(b) - scoreOf(a) || priceOf(a) - priceOf(b))
     const name = pool[0]
     if (!name) return false
-    const price = priceOf(name)
-    const res = await buyStock(gid, shop, name, 1, rg)
+    const unitPrice = priceOf(name)
+    const missing = kind === 'pill' ? Math.max(0, fakePillTargets(p, f)[name] - itemCount(p.bag?.items?.[name])) : 1
+    const want = Math.min(missing, Math.max(1, Math.floor(Number(w.quantity) || missing)), Math.floor((Number(p.money) || 0) / unitPrice))
+    if (want <= 0) return false
+    const res = await buyStock(gid, shop, name, want, rg)
     if (!res || !res.ok || (res.count || 0) < 1) return false
+    const count = Math.min(want, Math.floor(res.count))
+    const price = unitPrice * count
     p.money -= price
     if (!p.bag) p.bag = { items: {}, equipped: {} }
-    const changed = fakeAddItem(p.bag, name, 1)
+    const changed = fakeAddItem(p.bag, name, count)
+    if (kind === 'pill') (p.activities ||= {}).lastPill2 = 0
     /* 购买装备后立即装备；若新装备没有超过当前装备，不延长装备冷却。 */
     if (kind === 'weapon' && changed.length) {
       p.activities = { ...(p.activities || {}), lastEquip2: Date.now() + rand([10, 30]) * 60000 }
@@ -4388,8 +4389,8 @@ async function buyWishItem (f, gid, p, w) {
     addTax(tw, rg, ttax)
     saveWorld(tw)
     const who = p.status === 'sect' && p.sect ? sectName(f, p.sect) : '散修'
-    try { logTrade(f, `【${SHOP_CN[shop] || shop}·${regionNameOf(rg)}】${who} ${p.name} 攒够灵石购得 ${itemIcon(name)}${name} ×1（-${price}灵石，税率${trate}%缴税${ttax}）`) } catch (err) { }
-    try { logEvent(f, 'flavor', `【购宝】${who} ${p.name} 攒钱买下 ${itemIcon(name)}${name}（${price}灵石）`, Date.now(), { onlyPerson: true, ...evMeta(p) }) } catch (err) { }
+    try { logTrade(f, `【${SHOP_CN[shop] || shop}·${regionNameOf(rg)}】${who} ${p.name} 购得 ${itemIcon(name)}${name} ×${count}（-${price}灵石，税率${trate}%缴税${ttax}）`) } catch (err) { }
+    try { logEvent(f, 'flavor', `【购宝】${who} ${p.name} 买下 ${itemIcon(name)}${name}×${count}（${price}灵石）`, Date.now(), { onlyPerson: true, ...evMeta(p) }) } catch (err) { }
     try { await recordActive(gid, 'fake:' + p.name, rg) } catch (err) { }
     return true
   } catch (err) { return false }
@@ -4410,42 +4411,25 @@ async function tryFakeBuy (f, gid, p, now) {
     if (empty) wishes.push({ ...p.wish, type: 'weapon', part: empty, tier: 4 })
     const needPill = itemCount(p.bag?.items?.['破障丹']) <= 0 && (p.exp || 0) >= fakeSubThreshold(p.level + 1)
     if (needPill && !(p.wish.type === 'pill' && p.wish.tier === 2)) wishes.push({ type: 'pill', tier: 2 })
+    wishes.push({ type: 'weapon', tier: 4 }, { type: 'gongfa', tier: 5 }, { type: 'pill', tier: 1 }, { type: 'pill', tier: 2 })
     for (const wish of wishes) {
       if (await buyWishItem(f, gid, p, wish)) { p.wish = null; return true }
     }
     return false
   } catch (err) { return false }
 }
-/** 突破时自动买破障丹(玩家一致: 丹阁价, 按所在大区库存; 买不起/售罄返回false) */
-async function buyPillForBreak (f, p) {
-  try {
-    const price = ITEM_PRICE['破障丹'] || 1000
-    if ((p.money || 0) < price) return false
-    const rg = p.loc || 'center'
-    const res = await buyStock(f.gid, 'dange', '破障丹', 1, rg)
-    if (!res || !res.ok || (res.count || 0) < 1) return false
-    p.money -= price
-    /* 销售税(玩家一致: 按所在大区税率计入该区繁荣度) */
-    const tw = getWorld(f.gid)
-    const trate = taxFor(tw, rg, p.sect ? sectName(f, p.sect) : null)
-    const ttax = Math.max(1, Math.round(price * trate / 100))
-    addTax(tw, rg, ttax)
-    saveWorld(tw)
-    try { logTrade(f, `【丹阁·${regionNameOf(rg)}】${p.sect ? sectName(f, p.sect) : '散修'} ${p.name} 购得 ${itemIcon('破障丹')}破障丹 ×1（-${price}灵石，税率${trate}%缴税${ttax}）`) } catch (err) { }
-    try { await recordActive(f.gid, 'fake:' + p.name, rg) } catch (err) { }
-    return true
-  } catch (err) { return false }
-}
 /** 每分钟交易推进: 每个在世伪玩家尝试买 1 件(短冷却1~3分钟, 有钱就买但不刷屏掩盖修炼/摆摊; 买不起/售罄自动跳过) */
 async function tradeTick (f, gid, now) {
   let changed = false
   for (const p of Object.values(f.roster)) {
-    if (!p || !p.alive || p.realmBusy || isInSectMine(f, p.name)) continue
+    if (!npcCanAct(f, p, now)) continue
     if (!p.activities) p.activities = {}
     if (now < (p.activities.nextShop || 0)) continue
     /* 三阁购买也按个人倾向: 不是每人每1~3分钟都去买 */
     const desire = fakeTradeDesire(p, {})
-    if (Math.random() > 0.2 + desire * 0.6) {
+    const needsPills = Object.entries(fakePillTargets(p)).some(([name, count]) => itemCount(p.bag?.items?.[name]) < count)
+    const shoppingChance = needsPills || (Number(p.money) || 0) >= 30000 ? 0.95 : 0.2 + desire * 0.6
+    if (Math.random() > shoppingChance) {
       p.activities.nextShop = now + rand([5, 15]) * 60000
       continue
     }

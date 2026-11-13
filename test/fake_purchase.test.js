@@ -3,26 +3,28 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
 import * as equip from '../components/equip_data.js'
-import { gongfaScore, fakeSubThreshold, fakeLearnBestGongfa, runBestGongfa } from '../components/fake_data.js'
+import { gongfaScore, fakeSubThreshold, fakeLearnBestGongfa, runBestGongfa, fakePillTargets } from '../components/fake_data.js'
+import { REALM_MAX_LEVEL } from '../components/realm_cap.js'
 
 // 执行真实购买逻辑，仅将商店、世界存档、事件等外部服务替换为内存实现。
 const source = fs.readFileSync(new URL('../components/fake_data.js', import.meta.url), 'utf8')
 const bagCode = source.slice(source.indexOf('function ensureFakeBag ('), source.indexOf('const DIR ='))
-const buyerCode = source.slice(source.indexOf('/* 购物冷却到期后重评真实需求'), source.indexOf('/** 突破时自动买破障丹'))
+const buyerCode = source.slice(source.indexOf('/* 购物冷却到期后重评真实需求'), source.indexOf('/** 每分钟交易推进'))
 function makeBuyer (stocks, random = 0.99) {
   const purchases = []
   let available = true
   const context = vm.createContext({
-    ...equip, gongfaScore, fakeSubThreshold, fakeLearnBestGongfa, runBestGongfa,
+    ...equip, gongfaScore, fakeSubThreshold, fakeLearnBestGongfa, runBestGongfa, fakePillTargets, REALM_MAX_LEVEL,
     rand: ([min]) => min,
     Math: Object.assign(Object.create(Math), { random: () => random }),
     getStock: async (gid, shop, region) => stocks[shop] || {},
     buyStock: async (gid, shop, name, count, region) => {
       const stock = stocks[shop] || {}
       if (!available || !(stock[name] > 0)) return { ok: false, count: 0 }
-      stock[name]--
-      purchases.push({ shop, name, region })
-      return { ok: true, count: 1 }
+      const taken = Math.min(stock[name], count)
+      stock[name] -= taken
+      purchases.push({ shop, name, region, count: taken })
+      return { ok: true, count: taken }
     },
     getWorld: () => ({}), taxFor: () => 10, addTax: () => {}, saveWorld: () => {},
     logTrade: () => {}, recordActive: async () => {}, evMeta: () => ({}),
@@ -144,4 +146,35 @@ test('破障丹缺货不阻塞其它空槽，也不把丹药档位误用于装�
   assert.equal(await h.buy(p), true)
   assert.equal(h.purchases[0].name, blueHelm)
   assert.equal(p.money, 1000)
+})
+
+test('富裕者首选装备缺货时会批量买修为丹，不被无货目标卡住', async () => {
+  const p = person(100000)
+  p.level = 40; p.exp = fakeSubThreshold(40); p.accum = 0; p.trait = '好斗'
+  wear(p, equip.STARTER_ITEMS)
+  p.learnedGongfa = [basicGongfa]; p.activeGongfa = basicGongfa
+  const stocks = { dange: { 修为丹: 200 }, qige: {}, cangbaoge: {} }, h = makeBuyer(stocks)
+  assert.equal(await h.buy(p), true)
+  const quantity = p.bag.items.修为丹.count
+  assert.ok(quantity > 1 && quantity <= 99)
+  assert.equal(p.money, 100000 - quantity * equip.ITEM_PRICE.修为丹)
+  assert.equal(stocks.dange.修为丹, 200 - quantity)
+  assert.equal(h.purchases[0].region, 'west')
+  const balance = p.money
+  assert.equal(await h.buy(p), false); assert.equal(p.money, balance)
+})
+test('批量购丹按实际交货数量付款，库存不足不会扣整批钱', async () => {
+  const p = person(100000); p.level = 40; p.exp = fakeSubThreshold(40)
+  const h = makeBuyer({ dange: { 修为丹: 3 } })
+  assert.equal(await h.buy(p), true)
+  assert.equal(p.bag.items.修为丹.count, 3)
+  assert.equal(p.money, 100000 - 3 * equip.ITEM_PRICE.修为丹)
+})
+test('余额只够一颗时按能力买，不透支；满级不采购成长丹药', async () => {
+  const p = person(equip.ITEM_PRICE.修为丹 + 50)
+  const h = makeBuyer({ dange: { 修为丹: 100 } })
+  assert.equal(await h.buy(p), true); assert.equal(p.money, 50); assert.equal(p.bag.items.修为丹.count, 1)
+  const max = person(100000); max.level = REALM_MAX_LEVEL; max.act = '苦修'
+  const done = makeBuyer({ dange: { 修为丹: 100, 破障丹: 100 } })
+  assert.equal(await done.buy(max), false); assert.equal(max.money, 100000)
 })
