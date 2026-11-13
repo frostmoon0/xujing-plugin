@@ -19,10 +19,11 @@ import { Plugin_Name, Save_Path } from './plugin.js'
 import xujing_data from './xujing_data.js'
 import command from './command.js'
 import { REGION_KEYS, REGIONS, getWorld, getLoc, setLoc, regionNameOf, getSeal, sealCoversRegion } from './world_data.js'
-import { getBuffs, calcCombatPower, guardWinRate } from './fight.js'
+import { getBuffs, calcCombatPower, guardWinRate, absoluteWinRate } from './fight.js'
+import { luckyDeathRate } from './fake_luck.js'
 import { ZHENHAI_MATERIALS, ZHENHAI_NAME, ZHENHAI_DROP_CHANCE, ZHENHAI_DROP_TABLE } from './zhenhai_data.js'
 import { getBag, addItem, addItemToBag, takeBagItems, consumeItem, isBound, itemIcon, ITEM_TPL, MATERIAL_TPL, EQUIP_TPL, GONGFA_TPL, ARRAY_MATS, saveBag } from './equip_data.js'
-import { getFake, saveFake, personPower, sectName, sectAlive, isInSectMine, killPerson } from './fake_data.js'
+import { getFake, saveFake, personPower, sectName, sectAlive, isInSectMine, killPerson, createKillGrudge } from './fake_data.js'
 // karma helper is exposed on xujing_data default export
 import Wanhun from './wanhun_data.js'
 import { PUPPET_CHAPTERS } from './puppet_data.js'
@@ -1559,6 +1560,7 @@ function killFakePerson (gid, st, team, victim, killerTeam) {
   const level = p.level
   const killer = killerTeam.kind === 'fake' ? f.roster[killerTeam.leader] : null
   if (killer) {
+    createKillGrudge(f, killer, p)
     killer.kills = (killer.kills || 0) + 1
     killer.sin = (killer.sin || 0) + (p.status === 'sect' && p.sect ? 2 : 1)
   }
@@ -1929,7 +1931,7 @@ function removeAmbushTeam (st, gid, team) {
 /** 随机两两配对混战一轮: 胜者抢败者30%池子; 玩家不战死只受伤, 伪玩家低概率战死否则受伤 */
 async function meleeFight (st, gid, a, b) {
   const pa = await ambushPower(gid, a); const pb = await ambushPower(gid, b)
-  const winRate = guardWinRate(pa, pb)
+  const winRate = absoluteWinRate(pa, pb)
   const win = Math.random() * 100 < winRate
   const receipt = `realm-melee:${st.realmId || st.startAt}:${st.ambushRound}:${a.id}:${b.id}`
   await wearRealmTeam(st, gid, a, receipt, win ? 2 : 4)
@@ -1946,7 +1948,7 @@ async function meleeFight (st, gid, a, b) {
   if (loser.kind === 'fake') {
     const persons = currentFakePersons(gid, loser)
     const victim = persons[Math.floor(Math.random() * persons.length)]
-    if (victim && Math.random() < 0.08) {
+    if (victim && Math.random() < luckyDeathRate(0.08, victim)) {
       const killed = killFakePerson(gid, st, loser, victim.name, winner)
       msgs.push(`☠️ ${victim.name} 战死${killed.level ? `（${killed.level}阶）` : ''}。`)
       if (!currentFakePersons(gid, loser).length) { loser.dead = true; msgs.push(`💀 ${loser.name} 全灭，退出围剿`) }

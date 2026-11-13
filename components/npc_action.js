@@ -1,6 +1,7 @@
 import { warActorOwner, warCaptiveOwner } from './sect/war_state.js'
 import { absoluteWinRate, fightBestOf5 } from './fight.js'
 import { wearNpcTaichu } from './taichu_combat.js'
+import { luckyDeathRate } from './fake_luck.js'
 
 const MINUTE = 60000
 export const NPC_CONFLICT_CD = 60 * MINUTE
@@ -63,6 +64,6 @@ export function resolveNpcEncounter (f, actors, target, powerOf, now = Date.now(
     if (!p.injury || p.injury.level < level || now >= p.injury.at + [0, 30, 120, 480][p.injury.level] * MINUTE) p.injury = { level, at: now }
   }
   const evil = party.some(p => p.trait === '嗜杀' || p.path === '魔道')
-  const deathRate = Math.min(0.45, (evil ? 0.12 : 0.04) + (vendetta ? 0.2 : 0)) * (target.sect ? 0.6 : 1)
+  const deathRate = luckyDeathRate(Math.min(0.45, (evil ? 0.12 : 0.04) + (vendetta ? 0.2 : 0)) * (target.sect ? 0.6 : 1), target)
   return { ok: true, won, kill: won && lethal && Math.random() < deathRate, attack, defense }
 }

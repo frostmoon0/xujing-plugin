@@ -2,6 +2,9 @@ import { VAULT_PILL_PRICES, VAULT_ROUND_MS, VAULT_DAILY_CULTIVATION_BUDGET, duty
 import { vaultReserve, vaultAvailable } from './sect/treasury.js'
 import { withGameLock } from './game_lock.js'
 import { injuryState, injuredPower } from './injury.js'
+import { absoluteWinRate, fightBestOf5 } from './fight.js'
+import { ensureFakeLuck, luckyChance, pickLuckyFake } from './fake_luck.js'
+import { ensureFakeRelations, repairFakeRelations, forgetFakeRelations, rememberFakeRelation, canFakeRomance, setFakeSpouses, addFakeEnemy, clearFakeFeud } from './fake_relations.js'
 import { sectMemberCapacity, sectOccupancy, canAdmitSectNpc, admitSectNpc } from './sect/capacity.js'
 import { takeVaultEquipAttrs, ensureVaultEquipAttrs } from './sect/war_loot.js'
 import { warActorOwner } from './sect/war_state.js'
@@ -386,14 +389,17 @@ export function getFake (gid) {
     return nf
   }
   /* 兼容旧档: 补齐玩家化/关系链字段 */
+  let personChanged = false
   for (const p of Object.values(f.roster)) {
+    const before = JSON.stringify([p?.relations, p?.luckTier, p?.lifeAt])
     personDefaults(p)
+    if (before !== JSON.stringify([p?.relations, p?.luckTier, p?.lifeAt])) personChanged = true
     bindFakeGid(p, g)
   }
   /* 兼容旧档: 玩家宗门身份表 */
   if (!f.players || typeof f.players !== 'object') f.players = {}
   /* 兼容旧档: 宗门设施/宝库/玩家宗主/敌人/大区/创建标记 */
-  let sChanged = false
+  let sChanged = repairFakeRelations(f) || personChanged
   for (const [sid, sm] of Object.entries(f.sects || {})) {
     if (!sm || typeof sm !== 'object') continue
     if (!sm.facilities || typeof sm.facilities !== 'object') { sm.facilities = { yanwu: 0, hushan: 0, lingmai: 0 }; sChanged = true }
@@ -667,9 +673,8 @@ function bindFakeGid (p, gid) {
 function personDefaults (p) {
   if (!p) return p
   if (p.lifeAt === undefined) p.lifeAt = p.joinAt || Date.now()
-  if (!p.relations) p.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], siblings: [], kin: [] }
-  if (!p.relations.confidants) p.relations.confidants = []
-  if (!p.relations.siblings) p.relations.siblings = []
+  ensureFakeRelations(p)
+  ensureFakeLuck(p)
   /* 参战表现(宗门战争维护): 累计出战/最近出战/连续避战次数 */
   if (p.lastFightAt === undefined) p.lastFightAt = 0
   if (p.fightCount === undefined) p.fightCount = 0
@@ -1299,16 +1304,9 @@ export function killPerson (f, p, txt, t = Date.now(), opts = {}) {
     trait: p.trait || ''
   }
   delete f.roster[p.name]
-  /* 清理其他在世者仇人名单里对死者的引用, 避免面板(#查人)残留已死之人 */
-  for (const op of Object.values(f.roster)) {
-    if (!op.alive || !op.relations) continue
-    const en = op.relations.enemies
-    if (en && en.includes(p.name)) op.relations.enemies = en.filter(n => n !== p.name)
-    if (op.enemyLives) delete op.enemyLives[p.name]
-    if (op.bloodEnemies) delete op.bloodEnemies[p.name]
-  }
+  forgetFakeRelations(f, p.name)
   returnName(f, p.name)
-  /* 死亡/被处决名 1 天禁用: 补员(drawName)避开, 避免同名"复活"观感 */
+  /* 死亡/被处决名 6 小时禁用: 补员(drawName)避开, 避免同名"复活"观感 */
   if (!f.poolBans) f.poolBans = {}
   f.poolBans[p.name] = Date.now() + POOL_BAN_MS
   logEvent(f, 'death', txt, t, evMeta(p))
@@ -1400,17 +1398,14 @@ function pickVictim (f, except = null) {
   return w[0].p
 }
 /** 击杀宗门弟子 = 与对方全宗结仇(同门/好友记入双方仇人名单, 驱动复仇/仇杀/和解) */
-function createKillGrudge (f, k, v) {
+export function createKillGrudge (f, k, v) {
   if (!k || !v) return
   const r = v.relations || {}
   const close = new Set([r.master, r.spouse, ...(r.disciples || []), ...(r.friends || []), ...(r.confidants || []), ...(r.siblings || []), ...(r.kin || [])].filter(Boolean))
   for (const n of close) {
     const p = f.roster[n]
     if (!p?.alive || p.name === k.name) continue
-    p.relations ||= {}; p.relations.enemies ||= []
-    if (!p.relations.enemies.includes(k.name)) p.relations.enemies.push(k.name)
-    ;(p.enemyLives ||= {})[k.name] = k.lifeAt ?? k.joinAt ?? 0
-    ;(p.bloodEnemies ||= {})[k.name] = k.lifeAt ?? k.joinAt ?? 0
+    addFakeEnemy(p, k, true)
   }
   if (v.sect && f.sects[v.sect] && k.sect && k.sect !== v.sect) {
     const grudges = f.sects[v.sect].grudges ||= {}
@@ -1461,6 +1456,9 @@ function relLabelOf (f, a, bName) {
   if (a.status === 'sect' && a.sect && b && b.status === 'sect' && a.sect === b.sect) return '同门'
   return '故人'
 }
+function fakeSocialPair (f, a, b) {
+  return a?.name !== b?.name && npcCanAct(f, a) && npcCanAct(f, b) && (a.loc || DEFAULT_REGION) === (b.loc || DEFAULT_REGION)
+}
 
 /* 1.切磋 */
 export function genFight (f, t) {
@@ -1468,12 +1466,13 @@ export function genFight (f, t) {
   if (!a) return null
   const b = pickAlive(f, a.name)
   if (!b) return null
+  if ((a.loc || DEFAULT_REGION) !== (b.loc || DEFAULT_REGION)) return null
   a.lastFight = t; b.lastFight = t
-  const win = Math.random() < 0.5 ? a : b
+  const win = fightBestOf5(absoluteWinRate(personPower(a), personPower(b))).winner === 'me' ? a : b
   const receipt = `npc-duel:${f.gid || ''}:${t}:${[a.name, b.name].sort().join(',')}`
   wearNpcTaichu(a, receipt, 2)
   wearNpcTaichu(b, receipt, 2)
-  win.kills = (win.kills || 0) + 1
+  win.duelWins = (win.duelWins || 0) + 1
   const place = pick(['山门前', '演武场', '秘境入口', '集市', '论道台'])
   return { type: 'fight', ...evWho([a, b]), txt: `【切磋】${a.name} 与 ${b.name} 于${place}切磋，${win.name} 技高一筹` }
 }
@@ -1664,16 +1663,19 @@ function genWelcome (f, t) {
   if (!mates.length) return null
   if (Math.random() < 0.35) return null // 部分新弟子低调修行
   const b = pick(mates)
-  const ra = a.relations || (a.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], siblings: [], kin: [] })
-  const rb = b.relations || (b.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], siblings: [], kin: [] })
+  if (!fakeSocialPair(f, a, b)) return null
+  const ra = ensureFakeRelations(a)
+  const rb = ensureFakeRelations(b)
+  if (ra.enemies.includes(b.name) || rb.enemies.includes(a.name)) return null
   const whoA = sectName(f, a.sect)
   const kind = Math.random()
   if (kind < 0.5) {
     /* 义结金兰 → 师兄弟/手足 */
-    if ((ra.siblings || []).includes(b.name)) return null
+    if (ra.spouse === b.name || rb.spouse === a.name || ra.master === b.name || rb.master === a.name || ra.disciples.includes(b.name) || rb.disciples.includes(a.name) || (ra.siblings || []).includes(b.name)) return null
     if (!ra.siblings) ra.siblings = []
     if (!rb.siblings) rb.siblings = []
     ra.siblings.push(b.name); rb.siblings.push(a.name)
+    rememberFakeRelation(a, b)
     if (!ra.kin.includes(b.name)) ra.kin.push(b.name)
     if (!rb.kin.includes(a.name)) rb.kin.push(a.name)
     return { type: 'flavor', ...evWho([a, b]), txt: `【结缘】${whoA} 新弟子 ${a.name} 拜入山门，与 ${b.name} 一见如故，义结金兰结为异姓手足` }
@@ -1684,22 +1686,23 @@ function genWelcome (f, t) {
     if (!ra.friends) ra.friends = []
     if (!rb.friends) rb.friends = []
     ra.friends.push(b.name); rb.friends.push(a.name)
+    rememberFakeRelation(a, b)
     return { type: 'flavor', ...evWho([a, b]), txt: `【结缘】${whoA} 新弟子 ${a.name} 与 ${b.name} 同门情深，结为挚友` }
   }
   /* 日久生情 → 道侣 */
-  if (ra.spouse || rb.spouse || ra.master === b.name || rb.master === a.name || (ra.disciples || []).includes(b.name) || (rb.disciples || []).includes(a.name)) return null
-  ra.spouse = b.name; rb.spouse = a.name
+  if (ra.spouse || rb.spouse || !canFakeRomance(a, b)) return null
+  setFakeSpouses(f, a, b)
   return { type: 'flavor', ...evWho([a, b]), txt: `【结缘】${whoA} 新弟子 ${a.name} 与 ${b.name} 日久生情，结为道侣` }
 }
 /* 灭门复仇: 幸存者寻仇(劫道/打劫/激战/击杀仇人; 仇人皆亡或放下恩怨则释然) */
 function genVendetta (f, t) {
   const av = pickBy(f, p => p.vendetta && npcCanThreaten(f, p))
   if (!av) return null
-  const enemies = (av.relations?.enemies || []).map(n => f.roster[n]).filter(p => p?.alive && (av.enemyLives?.[p.name] === undefined || av.enemyLives[p.name] === (p.lifeAt ?? p.joinAt ?? 0)))
+  const enemies = (av.vendetta.culprit || []).map(n => f.roster[n]).filter(p => p?.alive && (av.enemyLives?.[p.name] === undefined || av.enemyLives[p.name] === (p.lifeAt ?? p.joinAt ?? 0)))
   const target = enemies.find(p => npcCanBeTarget(f, p, av))
   if (target) {
     const result = npcConflict(f, [av], target, t, { label: '寻仇', lethal: true, vendetta: true })
-    if (result.killed) av.vendetta = null
+    // 死亡处理只移除这一个仇家，其余灭门凶手仍需追踪。
     return result.event
   }
   if (enemies.length) {
@@ -1855,11 +1858,12 @@ function genDisciple (f, t) {
 function genSibling (f, t) {
   const a = pickAlive(f)
   if (!a) return null
-  const cands = Object.values(f.roster).filter(p => npcCanAct(f, p) && p.name !== a.name && Math.abs((p.level || 0) - (a.level || 0)) <= 8)
+  const cands = Object.values(f.roster).filter(p => fakeSocialPair(f, a, p) && Math.abs((p.level || 0) - (a.level || 0)) <= 8)
   if (!cands.length) return null
   const b = pick(cands)
-  const ra = a.relations || (a.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], siblings: [], kin: [] })
-  const rb = b.relations || (b.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], siblings: [], kin: [] })
+  const ra = ensureFakeRelations(a)
+  const rb = ensureFakeRelations(b)
+  if (ra.enemies.includes(b.name) || rb.enemies.includes(a.name)) return null
   if (ra.spouse === b.name || rb.spouse === a.name) return null
   if (ra.master === b.name || rb.master === a.name) return null
   if ((ra.disciples || []).includes(b.name) || (rb.disciples || []).includes(a.name)) return null
@@ -1868,6 +1872,7 @@ function genSibling (f, t) {
   if (!rb.siblings) rb.siblings = []
   ra.siblings.push(b.name)
   rb.siblings.push(a.name)
+  rememberFakeRelation(a, b)
   if (!ra.kin.includes(b.name)) ra.kin.push(b.name)
   if (!rb.kin.includes(a.name)) rb.kin.push(a.name)
   const sameSect = a.status === 'sect' && a.sect && a.sect === b.sect
@@ -1879,8 +1884,8 @@ function genTeacherDisciple (f, t) {
   const a = pickBy(f, p => p.alive && p.relations && ((p.relations.master && f.roster[p.relations.master] && f.roster[p.relations.master].alive) || ((p.relations.disciples || []).some(n => f.roster[n] && f.roster[n].alive))))
   if (!a) return null
   const r = a.relations
-  const hasMaster = r.master && f.roster[r.master] && f.roster[r.master].alive
-  const dNames = (r.disciples || []).filter(n => f.roster[n] && f.roster[n].alive)
+  const hasMaster = r.master && fakeSocialPair(f, a, f.roster[r.master]) && f.roster[r.master].relations?.disciples?.includes(a.name)
+  const dNames = (r.disciples || []).filter(n => fakeSocialPair(f, a, f.roster[n]) && f.roster[n].relations?.master === a.name)
   const whoA = a.status === 'sect' && a.sect ? sectName(f, a.sect) : '散修'
   if (dNames.length && Math.random() < 0.6) {
     /* 师父传功/指点徒弟 */
@@ -1915,9 +1920,11 @@ function genGrudge (f, t) {
   if (!a) return null
   const b = pickAlive(f, a.name)
   if (!b) return null
+  if (!fakeSocialPair(f, a, b)) return null
+  if (a.relations.enemies.includes(b.name) && b.relations.enemies.includes(a.name)) return null
   a.lastFight = t
-  if (!a.relations.enemies.includes(b.name)) a.relations.enemies.push(b.name)
-  if (!b.relations.enemies.includes(a.name)) b.relations.enemies.push(a.name)
+  addFakeEnemy(a, b)
+  addFakeEnemy(b, a)
   if (a.path !== b.path) {
     return { type: 'grudge', ...evWho([a, b]), txt: `【结怨】${a.name}（${a.path}）与 ${b.name}（${b.path}）正邪不两立，狭路相逢结下死仇` }
   }
@@ -1929,9 +1936,9 @@ function genRomance (f, t) {
   if (!a) return null
   const b = pickAlive(f, a.name)
   if (!b) return null
-  if (a.relations.spouse || b.relations.spouse) return null // 已有道侣
-  a.relations.spouse = b.name
-  b.relations.spouse = a.name
+  if ((a.loc || DEFAULT_REGION) !== (b.loc || DEFAULT_REGION) || !canFakeRomance(a, b)) return null
+  if (a.relations.spouse || b.relations.spouse) return null
+  setFakeSpouses(f, a, b)
   return { type: 'flavor', ...evWho([a, b]), txt: `【姻缘】${a.name} 与 ${b.name} 结为道侣，双修共进` }
 }
 /* 16.宗门内讧 */
@@ -2164,7 +2171,8 @@ export async function cultivatePerson (f, p) {
       usedPill = true
       rate = 90
     }
-    if (Math.random() * 100 <= rate) {
+    rate = luckyChance(rate, p)
+    if (Math.random() * 100 < rate) {
       const oldRealm = Math.floor((p.level - 1) / 4)
       p.level++
       mergeAccum(p) // 突破并入累计池
@@ -2310,6 +2318,7 @@ function genGift (f, t) {
   if (relPool.length && Math.random() < 0.7) b = f.roster[pick(relPool)]
   if (!b) b = pickAlive(f, a.name)
   if (!b) return null
+  if (!fakeSocialPair(f, a, b)) return null
   const whoA = a.status === 'sect' && a.sect ? sectName(f, a.sect) : '散修'
   const whoB = b.status === 'sect' && b.sect ? sectName(f, b.sect) : '散修'
   const giftLabel = relLabelOf(f, a, b.name)
@@ -2366,6 +2375,7 @@ function genSubmit (f, t) {
   const a = pickBy(f, p => p.alive && p.relations && p.relations.spouse && f.roster[p.relations.spouse] && f.roster[p.relations.spouse].alive)
   if (!a) return null
   const b = f.roster[a.relations.spouse]
+  if (!fakeSocialPair(f, a, b) || b.relations?.spouse !== a.name) return null
   const gold = Math.min((a.money || 0), rand([100, 800]))
   if (gold <= 0) return null
   const whoA = a.status === 'sect' && a.sect ? sectName(f, a.sect) : '散修'
@@ -2379,6 +2389,7 @@ function genShuangxiu (f, t) {
   const a = pickBy(f, p => p.alive && p.relations && p.relations.spouse && f.roster[p.relations.spouse] && f.roster[p.relations.spouse].alive)
   if (!a) return null
   const b = f.roster[a.relations.spouse]
+  if (!fakeSocialPair(f, a, b) || b.relations?.spouse !== a.name) return null
   const gain = rand([20, 60])
   /* 灵犀丹: 双修收益翻倍(与玩家一致) */
   const mul = (a.pill && a.pill.name === '灵犀丹' && a.pill.until > Date.now()) ? 2 : 1
@@ -2391,7 +2402,7 @@ function genShuangxiu (f, t) {
 function genIntimate (f, t) {
   const a = pickBy(f, p => p.alive && relPoolOf(f, p, true).length)
   if (!a) return null
-  const pool = relPoolOf(f, a, true)
+  const pool = relPoolOf(f, a, true).filter(n => fakeSocialPair(f, a, f.roster[n]))
   if (!pool.length) return null
   const bName = pick(pool)
   const b = f.roster[bName]
@@ -2429,7 +2440,7 @@ function genSecret (f, t) {
 function genSecretWith (f, t) {
   const a = pickBy(f, p => npcCanAct(f, p) && p.status === 'sect' && p.sect && sectAlive(f, p.sect).length > 1)
   if (!a) return null
-  const relPool = relPoolOf(f, a, true)
+  const relPool = relPoolOf(f, a, true).filter(n => fakeSocialPair(f, a, f.roster[n]))
   if (!relPool.length) return null
   const bName = pick(relPool)
   const b = f.roster[bName]
@@ -2458,19 +2469,22 @@ function genBond (f, t) {
   const a = pickAlive(f)
   if (!a) return null
   const r = a.relations || (a.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], siblings: [], kin: [] })
-  const pool = relPoolOf(f, a, true).map(n => f.roster[n]).filter(Boolean)
+  const pool = relPoolOf(f, a, true).map(n => f.roster[n]).filter(b => fakeSocialPair(f, a, b) && !(a.relations.enemies || []).includes(b.name) && !(b.relations?.enemies || []).includes(a.name))
   if (!pool.length) return null
   const b = pick(pool)
   if (b.name === a.name) return null
   if (!b.relations) b.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], confidants: [], kin: [] }
+  const sameSect = a.status === 'sect' && a.sect && a.sect === b.sect
+  const canConfide = sameSect || r.spouse === b.name
+  if (r.friends.includes(b.name) && b.relations.friends.includes(a.name) && (!canConfide || r.confidants.includes(b.name) && (b.relations.confidants || []).includes(a.name))) return null
+  rememberFakeRelation(a, b)
   if (!r.friends.includes(b.name)) {
     r.friends.push(b.name)
-    if (!b.relations.friends.includes(a.name)) b.relations.friends.push(a.name)
   }
-  const sameSect = a.status === 'sect' && a.sect && a.sect === b.sect
-  if ((sameSect || r.spouse === b.name) && !(r.confidants || []).includes(b.name)) {
+  if (!b.relations.friends.includes(a.name)) b.relations.friends.push(a.name)
+  if (sameSect || r.spouse === b.name) {
     if (!r.confidants) r.confidants = []
-    r.confidants.push(b.name)
+    if (!r.confidants.includes(b.name)) r.confidants.push(b.name)
     if (!b.relations.confidants) b.relations.confidants = []
     if (!b.relations.confidants.includes(a.name)) b.relations.confidants.push(a.name)
   }
@@ -2487,8 +2501,9 @@ function genReconcile (f, t) {
   const b = f.roster[bName]
   const sameSect = a.status === 'sect' && a.sect && a.sect === b.sect
   if (Math.random() >= (sameSect ? 0.5 : 0.35)) return null
-  a.relations.enemies = (a.relations.enemies || []).filter(n => n !== bName)
-  if (b.relations) b.relations.enemies = (b.relations.enemies || []).filter(n => n !== a.name)
+  if (!fakeSocialPair(f, a, b)) return null
+  clearFakeFeud(a, b)
+  rememberFakeRelation(a, b)
   if (sameSect && Math.random() < 0.5) {
     if (!a.relations.friends.includes(bName)) a.relations.friends.push(bName)
     if (!b.relations.friends.includes(a.name)) b.relations.friends.push(a.name)
@@ -2518,14 +2533,16 @@ function genStealWife (f, t) {
   const target = pickBy(f, p => p.alive && p.name !== k.name && p.relations && p.relations.spouse && f.roster[p.relations.spouse] && f.roster[p.relations.spouse].alive)
   if (!target) return null
   const spouse = f.roster[target.relations.spouse]
+  if (!fakeSocialPair(f, k, target) || !fakeSocialPair(f, k, spouse) || spouse.relations?.spouse !== target.name || !canFakeRomance(k, spouse)) return null
+  if (personPower(k) < personPower(spouse) * 0.9) return null
+  const fight = resolveNpcEncounter(f, [k], target, personPower, Date.now())
+  if (!fight.ok || !fight.won) return null
   const whoK = k.status === 'sect' && k.sect ? sectName(f, k.sect) : '散修'
   const whoT = target.status === 'sect' && target.sect ? sectName(f, target.sect) : '散修'
-  target.relations.spouse = null
-  if (!spouse.relations) spouse.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], kin: [] }
-  spouse.relations.spouse = k.name
-  if (!k.relations) k.relations = { master: null, disciples: [], spouse: null, enemies: [], friends: [], kin: [] }
-  k.relations.spouse = spouse.name
-  target.relations.enemies = (target.relations.enemies || []).concat(k.name)
+  const oldSpouse = f.roster[k.relations?.spouse]
+  setFakeSpouses(f, k, spouse)
+  addFakeEnemy(target, k)
+  if (oldSpouse?.alive && oldSpouse.name !== spouse.name) addFakeEnemy(oldSpouse, k)
   return { type: 'flavor', ...evWho([k, target, spouse]), txt: `【夺爱】${whoK} ${k.name} 强夺了 ${whoT} ${target.name} 的道侣 ${spouse.name}，结为道侣！` }
 }
 /* 44.情变(玩家化: 道侣感情破裂反目成仇) */
@@ -3178,7 +3195,7 @@ async function perPersonActs (f, now = Date.now()) {
       const fx = actFx(p)
       /* 修炼: 冷却到 + 性格概率(苦修勤/懒散惰), 未触发也进冷却防重复判定; 只记个人事迹 */
       if (now >= (acts.lastCultivate2 || 0)) {
-        if (Math.random() < 0.65 * fx.cult) { const ev = await cultivatePerson(f, p); if (ev) logEvent(f, ev.type, ev.txt, now, { ...ev, onlyPerson: true }) }
+        if (Math.random() < luckyChance(0.65 * fx.cult, p, 1)) { const ev = await cultivatePerson(f, p); if (ev) logEvent(f, ev.type, ev.txt, now, { ...ev, onlyPerson: true }) }
         else acts.lastCultivate2 = now + 60 * 60000
       }
       /* 吃丹: 有丹大概率吃(90%) */
@@ -3311,7 +3328,7 @@ export function fakeRareTick (f, now = Date.now()) {
   f.fakeRareAt = now + rand([3, 5]) * 3600000
   const cand = Object.values(f.roster || {}).filter(p => p && p.alive && (Number(p.fakeLostUntil) || 0) <= now && !npcInCave(f, p) && !p.realmBusy && !warActorOwner(f, 'fake', p.name) && !isFakeCaptive(f, p.name))
   if (!cand.length) return
-  const p = pick(cand)
+  const p = pickLuckyFake(cand)
   const total = FAKE_RARE_POOL.reduce((sum, x) => sum + x.weight, 0)
   let roll = Math.random() * total
   let got = FAKE_RARE_POOL[FAKE_RARE_POOL.length - 1]
@@ -4099,7 +4116,7 @@ function bondCountInSect (f, p) {
   if (!p || p.status !== 'sect' || !p.sect) return 0
   const r = p.relations || {}
   const names = [].concat(r.master ? [r.master] : [], r.spouse ? [r.spouse] : [], r.confidants || [], r.siblings || [], r.disciples || [], r.friends || []).filter(Boolean)
-  return names.filter(n => f.roster[n] && f.roster[n].alive && f.roster[n].sect === p.sect).length
+  return new Set(names.filter(n => f.roster[n] && f.roster[n].alive && f.roster[n].sect === p.sect)).size
 }
 /** 忠诚度每日调整: 入宗越久越忠诚 + 同宗羁绊 + 宗门兴衰; 散修趋中 */
 function loyaltySettle (f, now = Date.now()) {
@@ -4142,7 +4159,7 @@ export function createVendetta (f, sid, culprit = [], culpritType = 'fate', now 
   const coreNames = [sm.zongzhu, ...(sm.fuzong || []), ...(sm.taishang || [])].filter(Boolean)
   let n = 0
   for (const p of sectAlive(f, sid)) {
-    const r = p.relations || {}
+    const r = ensureFakeRelations(p)
     const bonded = coreNames.some(c => c === r.master || c === r.spouse ||
       (r.confidants || []).includes(c) || (r.friends || []).includes(c) ||
       (r.siblings || []).includes(c) || (r.kin || []).includes(c))
@@ -4150,9 +4167,11 @@ export function createVendetta (f, sid, culprit = [], culpritType = 'fate', now 
     if (!vengeful) continue
     if (!r.enemies) r.enemies = []
     for (const c of culprit) {
-      if (c && f.roster[c] && f.roster[c].alive && !r.enemies.includes(c)) r.enemies.push(c)
+      if (c && f.roster[c]?.alive && c !== p.name) addFakeEnemy(p, f.roster[c], true)
     }
-    p.vendetta = { sectName: s.name, culprit: culprit.slice(0, 6), culpritType, at: now }
+    const targets = [...new Set(culprit)].filter(c => f.roster[c]?.alive && c !== p.name)
+    if (!targets.length) continue
+    p.vendetta = { sectName: s.name, culprit: targets, culpritType, at: now }
     logEvent(f, 'vendetta', `【灭门之仇】${s.name} 覆灭，${p.name} ${traitFlavor(p)}，誓要报仇雪恨`, now, { who: [p.name], major: true })
     n++
   }

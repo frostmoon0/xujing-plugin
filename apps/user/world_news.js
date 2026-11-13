@@ -28,6 +28,7 @@ import { Plugin_Name, Plugin_Path } from '../../components/plugin.js'
 import { backupSaves } from '../../components/save_backup.js'
 import { cleanupSaveFiles } from '../../components/save_cleanup.js'
 import { flushDeferredSaves } from '../../components/deferred_save.js'
+import { fakeLuckOf } from '../../components/fake_luck.js'
 
 /** 事件时间格式: 月-日 时:分 */
 function fmtTime (t) {
@@ -585,6 +586,7 @@ export class world_news extends plugin {
       ...(Number(p.sin) > 0 ? [`业障：${p.sin}${p.sin >= 8 ? '（杀孽深重）' : (p.sin >= 3 ? '（因果缠身）' : '')}`] : []),
       `所在大区：${locTxt}`,
       `修为：${levelNameOf(p.level)}`,
+      `气运：${p.luckTier || 1}/7 · ${fakeLuckOf(p).name}`,
       `战力：${power}（境界${realm} + 装备${equip}${petPart} ×功法倍率${gfAtk}${pillOn ? ' +丹药5' : ''}）`,
       `出战灵兽：${petInfo ? `${petInfo.name}（${petInfo.stage}）· 战力 ${petInfo.power}` : '无（尚无出战灵兽）'}`,
       `灵石：${money}`,
@@ -594,7 +596,7 @@ export class world_news extends plugin {
       `功法：${gfTxt}`,
       ...(pillTxt ? [`丹药：${pillTxt}`] : []),
       `关系：${relTxt}`,
-      `战绩：击杀 ${p.kills} 人`,
+      `战绩：击杀 ${p.kills} 人 · 切磋获胜 ${p.duelWins || 0} 次`,
       `入世：${fmtTime(p.joinAt)}`,
       `状态：在世`
     ]

@@ -47,9 +47,10 @@ function privateEvent (name) {
   const bagCode = eventSource.slice(eventSource.indexOf('function ensureFakeBag ('), eventSource.indexOf('const DIR =')).replace(/export /g, '')
   const goalStart = eventSource.indexOf('const FAKE_ARTIFACT_GOALS =')
   const goalsCode = eventSource.slice(goalStart, eventSource.indexOf('/** 法宝目标材料不主动甩卖', goalStart))
-  const needCode = ['fakeGoalOf', 'fakeMissingCoreCount', 'fakeArtifactNeeds', 'fakeNeedCount'].map(eventCode).join('\n')
+  const needCode = ['fakeGoalOf', 'fakeMissingCoreCount', 'fakeArtifactNeeds', 'fakeNeedCount', 'fakeSocialPair'].map(eventCode).join('\n')
   return vm.runInNewContext(`${bagCode}\n${goalsCode}\n${needCode}\n${eventCode(name)}\n;${name}`, {
     ...equip, PUPPET_INITIAL_COST,
+    DEFAULT_REGION: 'center', npcCanAct: (f, p) => !!p?.alive,
     Math: Object.assign(Object.create(Math), { random: () => name === 'genTeacherDisciple' ? 0.99 : 0 }),
     pick: values => values[0],
     pickAlive: (f, except) => Object.values(f.roster).find(p => p.alive && p.name !== except),

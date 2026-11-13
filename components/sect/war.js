@@ -1,5 +1,6 @@
 import { wearPlayerTaichu, wearNpcTaichu } from '../taichu_combat.js'
-import { hasBloodFeud, defeatDeathRate } from './survival.js'
+import { hasBloodFeud, defeatDeathRate, canInflictCombatDeath } from './survival.js'
+import { luckyDeathRate } from '../fake_luck.js'
 import { assessSectDevelopment, commonTerritoryThreat, warIncludesSect } from './ai_strategy.js'
 import { hasTruce, normalizeDiplomacy, setDiplomacyRelation, forgetSectDiplomacy } from './diplomacy_state.js'
 import { withImmediateSaveContext } from '../deferred_save.js'
@@ -1244,6 +1245,7 @@ export async function resolveRoundCasualties (f, gid, atk, now, pA, pD) {
           continue
         }
       }
+      if (!canInflictCombatDeath(sd.isAtk ? pD : pA, it.power)) continue
       const weakness = enemyAvg > 0 ? Math.max(0, (enemyAvg - it.power) / enemyAvg) : 0
       const pExit = Math.min(0.6, Math.max(0.02, rate + weakness * 0.3))
       if (warRoll(atk, `round:${atk.round}:exit:${it.name || it.uid}`) >= pExit) continue
@@ -1253,8 +1255,8 @@ export async function resolveRoundCasualties (f, gid, atk, now, pA, pD) {
         if (idx < 0) continue
         const sTag = sd.sectId ? sectName(f, sd.sectId) : '散修'
         /* 战死: 遵循"境界越高越难死"(与 settleDefeatDeaths 同公式 1级≈5%→68级≈0.5%), 玩家死不了, 伪玩家也不该轻易死 */
-        let deathRate = CFG.DEATH_BASE * (1 - 0.9 * (Number(p.level) || 0) / 68)
-        deathRate = Math.max(0.5, deathRate)
+        const bloodFeud = enemy.fakes.some(n => f.roster[n] && (hasBloodFeud(p, f.roster[n]) || hasBloodFeud(f.roster[n], p)))
+        const deathRate = lost ? luckyDeathRate(defeatDeathRate(p.level, { base: CFG.DEATH_BASE, bloodFeud }), p) : 0
         if (warRoll(atk, `round:${atk.round}:death:${it.name}`) * 100 < deathRate) {
           sd.fakes.splice(idx, 1)
           killPerson(f, p, '战场战死', now)
@@ -1265,7 +1267,7 @@ export async function resolveRoundCasualties (f, gid, atk, now, pA, pD) {
         }
         /* 未战死 → 被抓 / 受伤退出(伪玩家同样会受伤) / 溃逃 */
         const roll = warRoll(atk, `round:${atk.round}:fate:${it.name || it.uid}`)
-        if (roll < 0.35) {
+        if (lost && roll < 0.35) {
           ensureCapSub(atk)
           const capBy = sd.isAtk ? atk.captives.byDef : atk.captives.byAtk
           atk.captives.fakes.push(it.name)
@@ -1333,8 +1335,10 @@ export function settleDefeatDeaths (f, atk, loseSect, winSect, isCityFall, crush
   const fled = []
   const loseName = sectName(f, loseSect)
   for (const p of loseMembers) {
+    const enemyPower = Number(isCityFall ? atk.settlement?.powers?.atk : atk.settlement?.powers?.def) || winMembers.reduce((sum, q) => sum + personPower(q), 0)
+    if (!canInflictCombatDeath(enemyPower, personPower(p))) continue
     const bloodFeud = winMembers.some(w => hasBloodFeud(p, w) || hasBloodFeud(w, p))
-    const rate = defeatDeathRate(p.level, { crush, bloodFeud, base: CFG.DEATH_BASE, ceiling: CFG.DEATH_CRUSH_RATE })
+    const rate = luckyDeathRate(defeatDeathRate(p.level, { crush, bloodFeud, base: CFG.DEATH_BASE, ceiling: CFG.DEATH_CRUSH_RATE }), p)
     if (warRoll(atk, `death:${p.name}`) * 100 < rate) dead.push(p)
     else if (isCityFall) fled.push(p)
   }
@@ -1636,7 +1640,8 @@ async function finishSectAttackUnlocked (f, gid, atk, win, now = Date.now()) {
       const deadName = s.name
       const sm = f.sectMap[sid] || {}
       /* 记录灭门之仇后，剩余门人散尽；已俘虏/已送矿者不重复处理 */
-      createVendetta(f, sid, [atkName], 'sect', now)
+      const culprits = [...new Set([...(atk.atkFakes || []), ...Object.values(atk.actors || {}).filter(a => a.kind === 'fake' && a.side === 'atk' && a.rounds > 0).map(a => a.id)])].filter(n => f.roster[n]?.alive)
+      createVendetta(f, sid, culprits, 'sect', now)
       for (const p of sectAlive(f, sid)) {
         removeFromSectMap(f, sid, p.name)
         p.status = 'scatter'; p.sect = null; p.pos = null

@@ -8,8 +8,13 @@ export function hasBloodFeud (a, b) {
     (a.enemyLives?.[b.name] === undefined || a.enemyLives[b.name] === life)
 }
 export function defeatDeathRate (level, { crush = false, bloodFeud = false, base = 5, ceiling = 50 } = {}) {
-  const normal = Math.max(0.5, base * (1 - 0.9 * Math.min(68, Math.max(1, Number(level) || 1)) / 68))
+  const lv = Math.max(1, Number(level) || 1)
+  const normal = Math.max(0.5, base * (1 - 0.9 * Math.min(68, lv) / 68)) / (1 + Math.max(0, lv - 68) / 68)
   return Math.min(ceiling, normal * (bloodFeud ? 3 : crush ? 2.5 : 1))
+}
+/** 沿用日常交战的90%战力门槛；整支敌军可以合力威胁一位强者。 */
+export function canInflictCombatDeath (opponentPower, victimPower) {
+  return Number(opponentPower) > 0 && Number(opponentPower) >= Math.max(1, Number(victimPower) || 1) * 0.9
 }
 export function temperCaptiveWeights (weights, { bloodFeud = false, cruelty = 0 } = {}) {
   if (bloodFeud) return weights
